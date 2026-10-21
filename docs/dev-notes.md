@@ -81,3 +81,6 @@
 从 `C:\Users\35688\WorkBuddy\2026-10-19-00-22-52\ai-quant-agent\`（WorkBuddy 会话目录）
 迁至 `D:\Projects\ai-quant-agent\`，首次纳入 git。旧目录保留两周后删除。
 桌面 `AI量化面板.bat` 路径已同步更新（备份：`AI量化面板.bat.bak`）。
+
+远程仓库：`git@github.com:netbit888/ai-quant-agent-mt5.git`（私有，SSH 认证）。
+**注意本地目录名是 `ai-quant-agent`，仓库名多了 `-mt5` 后缀**，clone 下来会是 `ai-quant-agent-mt5`。
