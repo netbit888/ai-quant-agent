@@ -449,7 +449,42 @@
   .dim-row .val { flex: 0 0 118px; font-family: var(--mono); font-size: 12.5px; }
   .dim-row .tg { flex: 1 1 auto; font-size: 11.5px; color: var(--dim); }
   .dim-row .nt { flex: 0 0 240px; font-size: 11px; color: var(--muted); text-align: right; }
-  @media (max-width: 820px) { .dim-row .nt { display: none; } }
+  @media (max-width: 820px) { .dim-row .nt { display: none; } }  /* ---------------- 本场复盘 ---------------- */
+  .sess-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+  .sess-top .big { font-size: 24px; font-weight: 700; font-family: var(--mono); letter-spacing: -.5px; }
+  .sess-top .sub2 { font-size: 12px; color: var(--muted); }
+  .sess-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
+  .sess-kpi { background: rgba(255,255,255,.02); border: 1px solid var(--border);
+              border-radius: 9px; padding: 10px 12px; }
+  .sess-kpi .k { font-size: 10.5px; color: var(--dim); letter-spacing: .3px; }
+  .sess-kpi .v { font-size: 15.5px; font-family: var(--mono); margin-top: 3px; }
+  .sess-kpi .s { font-size: 10px; color: var(--dim); margin-top: 2px; }
+  .sess-note { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; margin: 14px 0 4px; }
+  .sess-note textarea {
+    flex: 1 1 320px; min-height: 44px; resize: vertical; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 12.5px;
+  }
+  .sess-note textarea:focus { outline: none; border-color: var(--border-hi); }
+  .sess-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .sess-tag { padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border);
+              background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+  .sess-tag:hover { color: var(--text); }
+  .sess-tag.on { border-color: rgba(74,158,255,.5); color: #8fc4ff; background: rgba(74,158,255,.13); }
+  .sess-rule { margin-top: 14px; padding: 12px 14px; border-radius: 9px; font-size: 12.5px;
+               border: 1px solid rgba(240,180,41,.3); background: rgba(240,180,41,.06); }
+  .sess-rule.pass { border-color: rgba(46,204,113,.32); background: rgba(46,204,113,.06); }
+  .sess-rule.fail { border-color: rgba(255,77,79,.35); background: rgba(255,77,79,.07); }
+  .sess-rule .t { font-weight: 600; margin-bottom: 4px; }
+  .sess-ai { margin-top: 14px; padding: 13px 15px; border-radius: 9px;
+             border: 1px solid rgba(74,158,255,.22); background: rgba(74,158,255,.05); }
+  .sess-ai .hl { font-size: 14px; font-weight: 600; line-height: 1.5; }
+  .sess-ai .ev { margin-top: 9px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+  .sess-ai .ev b { color: var(--text); font-weight: 600; }
+  .sess-ai .num { color: #8fc4ff; font-family: var(--mono); }
+  .sess-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .btn-danger { background: rgba(255,77,79,.1); color: #ff8b8d; border-color: rgba(255,77,79,.4); }
+  .btn-danger:hover { background: rgba(255,77,79,.18); border-color: var(--bad); }
+
 </style>
 </head>
 <body>
@@ -495,6 +530,8 @@
       <select id="acctPick" title="选择查看哪个账户。切换账户请在 MT5 终端里操作，这里会自动归档。">
         <option value="">读取中…</option>
       </select>
+      <button class="btn-ghost btn-danger hidden" id="btnDelAcct" style="margin-left:8px"
+              title="把本地账本移到 data/live/_trash/，不是真删除">删除账户</button>
     </div>
     <div class="figs">
       <div class="fig"><i>余额</i><b class="mono" id="acctBalance">—</b></div>
@@ -506,6 +543,15 @@
     </div>
   </div>
   <div class="acct-note" id="acctNote"></div>
+
+  <!-- 本场复盘：盘后打开先看这一块。按「上一笔平仓→下一笔开仓」超过 30 分钟切场 -->
+  <div class="card">
+    <div class="card-head">
+      <h2>本场复盘</h2>
+      <div class="win-tabs" id="sessTabs"></div>
+    </div>
+    <div id="sessBody"><div class="mini">读取中…</div></div>
+  </div>
 
   <div class="kpis">
     <div class="kpi"><div class="k">今日盈亏</div><div class="v mono" id="lvToday">—</div><div class="s" id="lvTodaySub">按平仓日统计</div></div>
@@ -1002,9 +1048,13 @@ function showParams(name) {
 let liveData = null;
 let liveTimer = null;
 let liveLoading = false;
+let acctList = [];        // /api/accounts 的原始结果，删除按钮靠它判断是不是当前账户
 
 const money = (v, d = 2) => (v === null || v === undefined) ? '—'
   : (v > 0 ? '+' : '') + Number(v).toFixed(d);
+// 备注是用户写的、AI 结论是模型写的，两者都可能带 < > &，必须转义后再拼 HTML
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ts2str = ts => {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
@@ -1024,6 +1074,7 @@ async function loadAccounts() {
     const r = await fetch('/api/accounts');
     const d = await r.json();
     if (!d.ok) return;
+    acctList = d.accounts || [];
     const sel = $('acctPick');
     const prev = sel.value;
     sel.innerHTML = (d.accounts || []).map(a => {
@@ -1082,6 +1133,8 @@ function renderLive(d) {
       ? '面板会自动尝试启动 MetaTrader 5（最多等 20 秒），成功后这里自动恢复。若一直起不来，请手动双击 MT5。'
       : '';
     renderAdvice({ ok: false, error: (d && d.error) || '账户读取失败，无法生成复盘' });
+    $('sessTabs').innerHTML = '';
+    $('sessBody').innerHTML = '<div class="mini">账户未连接，读不到场次数据。</div>';
     return;
   }
   const a = d.account || {};
@@ -1237,6 +1290,267 @@ function renderLive(d) {
       <td>${scoreCell}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="10" class="empty">暂无平仓记录</td></tr>';
+
+  // ---- 本场复盘（盘后第一眼要看的） ----
+  renderSessions(d);
+  syncDeleteButton(d);
+}
+
+/* ==================== 本场复盘 ====================
+   切场口径：上一笔平仓 → 下一笔开仓 超过 30 分钟断场（后端 live/sessions.py）。
+   场次只用来「读」和「分析」，不用来算胜率——单笔场次很常见。 */
+const SESS_TAGS = ['计划内', '手痒', '状态差'];
+let sessSel = null;
+
+const FLAG_CN = {
+  revenge: '报复', itchy: '手痒', wide_stop: '宽止损',
+  oversize: '超仓', one_bad_trade: '一笔定输赢',
+};
+
+function sessionAdviceOf(d, sid) {
+  const x = (d.session_advice || {})[sid];
+  return (x && x.advice) ? x : null;
+}
+
+function renderSessions(d) {
+  const tabs = $('sessTabs');
+  const body = $('sessBody');
+  const sessions = d.sessions || [];
+
+  if (!sessions.length) {
+    tabs.innerHTML = '';
+    body.innerHTML = `<div class="mini">${d.sessions_error
+      ? '场次切分失败：' + d.sessions_error
+      : '还没有已平仓交易。打一场之后，这里会出现「本场复盘」。'}</div>`;
+    return;
+  }
+  if (!sessSel || !sessions.some(s => s.id === sessSel)) sessSel = sessions[0].id;
+
+  tabs.innerHTML = sessions.slice(0, 6).map(s => {
+    const st = s.stats || {};
+    const cls = s.id === sessSel ? 'win-tab active' : 'win-tab';
+    const t = new Date(s.start * 1000);
+    const hh = String(t.getHours()).padStart(2, '0');
+    const mm = String(t.getMinutes()).padStart(2, '0');
+    return `<button class="${cls}" data-sid="${s.id}">${s.date} ${hh}:${mm}<span class="cnt">${st.n}</span></button>`;
+  }).join('');
+  tabs.querySelectorAll('.win-tab').forEach(b => {
+    b.addEventListener('click', () => { sessSel = b.dataset.sid; renderSessions(d); });
+  });
+
+  const s = sessions.find(x => x.id === sessSel);
+  body.innerHTML = sessionHtml(d, s);
+  bindSession(d);
+}
+
+function sessionHtml(d, s) {
+  const st = s.stats || {};
+  const net = st.net || 0;
+  const note = (d.session_notes || {})[s.id] || {};
+  const tags = note.tags || [];
+  const flags = s.flags || [];
+  const ai = sessionAdviceOf(d, s.id);
+
+  const kpi = (k, v, sub) =>
+    `<div class="sess-kpi"><div class="k">${k}</div><div class="v">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
+
+  const riskSub = st.median_risk_pct != null ? `中位 ${fmt(st.median_risk_pct, 1)}%` : '需要止损记录';
+  const slSub = (st.sl_points || []).length ? st.sl_points.join(' / ') + ' 点' : '无止损记录';
+
+  const tradeRows = (s.trades || []).slice().reverse().map(t => {
+    const marks = flags.filter(f => String(f.pid) === String(t.position_id))
+      .map(f => `<span class="mini" style="color:var(--warn)" title="${esc(f.title)}">${esc(FLAG_CN[f.code] || f.code)}</span>`)
+      .join(' ');
+    return `<tr>
+      <td class="mono">${ts2str(t.entry_time)}</td>
+      <td class="${t.direction > 0 ? 'pos-long' : 'pos-short'}">${t.direction > 0 ? '多' : '空'}</td>
+      <td class="mono">${t.volume}</td>
+      <td class="mono ${signClass(t.profit)}">${money(t.profit)}</td>
+      <td class="mono">${t.r != null ? fmt(t.r, 2) + 'R' : '—'}</td>
+      <td class="mono">${mins(t.hold_min)}</td>
+      <td class="mono">${t.risk_pct != null ? fmt(t.risk_pct, 1) + '%' : '—'}</td>
+      <td class="mono">${t.sl_points ? t.sl_points + ' pt' : '—'}</td>
+      <td class="mini">${reasonCn(t.close_reason)}</td>
+      <td>${marks || '<span class="mini">—</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  const sessFlags = flags.filter(f => !f.pid);
+  const flagHtml = sessFlags.map(f => `
+    <div class="flag ${f.level}"><div>
+      <div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div>
+    </div></div>`).join('');
+
+  // 下一场规则：只在本场处于规则之后时才判定
+  let ruleHtml = '';
+  const rc = d.rule_check;
+  if (d.rule) {
+    const applies = rc && rc.session_id === s.id;
+    const cls = applies ? (rc.status === 'pass' ? 'pass' : rc.status === 'fail' ? 'fail' : '') : '';
+    const verdict = applies
+      ? (rc.status === 'pass' ? `✅ 遵守（${rc.label} = ${rc.value}，目标 ${rc.target}）`
+        : rc.status === 'fail' ? `❌ 违反（${rc.label} = ${rc.value}，目标 ${rc.target}）`
+        : '无法判定')
+      : '';
+    ruleHtml = `<div class="sess-rule ${cls}">
+      <div class="t">下一场规则</div>
+      <div>${esc(d.rule.text) || '—'}</div>
+      ${verdict ? `<div class="mini" style="margin-top:6px">${esc(verdict)}</div>` : ''}
+    </div>`;
+  }
+
+  const aiHtml = ai
+    ? `<div class="sess-ai">
+         <div class="hl">${esc(ai.advice.headline) || '—'}</div>
+         ${(ai.advice.evidence || []).map(e => `<div class="ev"><b>${esc(e.claim)}</b>
+           <span class="num">${esc(e.numbers)}</span></div>`).join('')}
+         <div class="mini" style="margin-top:9px">生成于 ${new Date(ai.generated_at * 1000).toLocaleString('zh-CN')}</div>
+       </div>`
+    : '';
+
+  const aiBtn = d.offline ? '' :
+    `<button class="btn-ghost" id="btnSessAi">${ai ? '重新分析本场' : 'AI 分析本场'}</button>`;
+
+  return `
+    <div class="sess-top">
+      <div class="big ${signClass(net)}">${money(net)}</div>
+      <div class="sub2">
+        第 ${s.index} 场 · ${ts2str(s.start)} → ${ts2str(s.end)} · 历时 ${fmt(s.span_min, 0)} 分钟<br>
+        ${st.n} 笔（多 ${st.long} / 空 ${st.short}）· ${st.wins} 胜 ${st.losses} 负
+        ${st.n >= 5 && st.rr ? ` · 盈亏比 ${fmt(st.rr)} → 需要胜率 ${fmt(st.need_win_rate, 1)}%，边际 ${fmt(st.margin_pp, 1)} pp` : ''}
+      </div>
+    </div>
+
+    <div class="sess-kpis">
+      ${kpi('笔数', st.n, st.n < 5 ? '样本太少，只看过程' : '')}
+      ${kpi('持仓中位', mins(st.median_hold_min), '最长 ' + mins(st.max_hold_min))}
+      ${kpi('最大单笔风险', st.max_risk_pct != null ? fmt(st.max_risk_pct, 1) + '%' : '—', riskSub)}
+      ${kpi('止损宽度', st.sl_width_ratio ? fmt(st.sl_width_ratio, 2) + '×' : '—', slSub)}
+      ${kpi('手动平仓', st.n ? fmt(st.manual / st.n * 100, 0) + '%' : '—', `${st.manual} / ${st.n} 笔`)}
+    </div>
+
+    ${flagHtml}
+
+    <div style="margin-top:14px">
+      <table>
+        <thead><tr><th>开仓</th><th>方向</th><th>手数</th><th>盈亏</th><th>R</th>
+          <th>持仓</th><th>风险</th><th>止损</th><th>离场</th><th>标记</th></tr></thead>
+        <tbody>${tradeRows || '<tr><td colspan="10" class="empty">无交易</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="sess-note">
+      <textarea id="sessNote" placeholder="这一场一句话：当时在干什么 / 为什么开始 / 为什么停（10 秒，可跳过）">${esc(note.note)}</textarea>
+      <div class="sess-tags">
+        ${SESS_TAGS.map(t => `<button class="sess-tag ${tags.includes(t) ? 'on' : ''}" data-tag="${t}">${t}</button>`).join('')}
+      </div>
+    </div>
+    <div class="sess-foot">
+      <button class="btn-ghost" id="btnSessSave">保存备注</button>
+      ${aiBtn}
+      <span class="mini" id="sessSaveHint">${note.updated_at ? '上次保存 ' + ts2str(note.updated_at) : ''}</span>
+    </div>
+
+    ${aiHtml}
+    ${ruleHtml}
+  `;
+}
+
+function bindSession(d) {
+  document.querySelectorAll('.sess-tag').forEach(b => {
+    b.addEventListener('click', () => b.classList.toggle('on'));
+  });
+  const save = $('btnSessSave');
+  if (save) save.addEventListener('click', () => saveSessionNote(d));
+  const ai = $('btnSessAi');
+  if (ai) ai.addEventListener('click', () => genSessionAi(d));
+}
+
+async function saveSessionNote(d) {
+  const ta = $('sessNote');
+  if (!ta) return;
+  const tags = [...document.querySelectorAll('.sess-tag.on')].map(b => b.dataset.tag);
+  const payload = { session_id: sessSel, note: ta.value, tags };
+  if (d.offline) payload.account = d.login;
+  try {
+    const r = await fetch('/api/session_note', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!j.ok) { $('sessSaveHint').textContent = j.error || '保存失败'; return; }
+    d.session_notes = j.session_notes || {};
+    $('sessSaveHint').textContent = '已保存';
+  } catch (e) {
+    $('sessSaveHint').textContent = String(e);
+  }
+}
+
+async function genSessionAi(d) {
+  if (d.offline) return;
+  const s = (d.sessions || []).find(x => x.id === sessSel);
+  if (!s) return;
+  const has = !!sessionAdviceOf(d, sessSel);
+  const ok = await confirmApiCall({
+    title: has ? '确认重新分析这一场？' : '确认分析这一场？',
+    desc: `把本场 ${s.stats.n} 笔的切片数据（方向、持仓时长、止损宽度、单笔风险、离场方式）发给 DeepSeek。`,
+    cost: '会产生 API 费用（约一两千 token）。只有你点确认之后才会真正发起请求。',
+    okText: has ? '重新分析' : '确认分析',
+  });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/session_advice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessSel, confirm: true, force: true }),
+    });
+    const j = await r.json();
+    const parsed = j.advice && j.advice.advice;
+    if (j.ok && parsed) {
+      d.session_advice = d.session_advice || {};
+      d.session_advice[sessSel] = { advice: parsed, generated_at: j.advice.generated_at };
+      if (j.rule) d.rule = j.rule;
+      if (j.api_calls) renderApiMeter(j.api_calls);
+      renderSessions(d);
+    } else {
+      alert(j.error || '生成失败');
+    }
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+/* ---------------- 删除归档账户 ---------------- */
+function syncDeleteButton(d) {
+  const btn = $('btnDelAcct');
+  const acc = (acctList || []).find(a => String(a.login) === String(d.login));
+  const can = !!(acc && !acc.current);
+  btn.classList.toggle('hidden', !can);
+  btn.title = can ? '把本地账本移到 data/live/_trash/，不是真删除' : '当前登录的账户不能删除';
+}
+
+async function deleteAccount() {
+  const login = $('acctPick').value;
+  const acc = (acctList || []).find(a => String(a.login) === String(login));
+  if (!acc || acc.current) return;
+  const ok = await confirmApiCall({
+    title: `删除账户 #${login}？`,
+    desc: `本地账本 ${acc.deals != null ? acc.deals + ' 条成交' : ''}、余额 ${acc.last_balance != null ? fmt(acc.last_balance) : '—'}。删除后它不再出现在下拉列表里。`,
+    cost: '账本会移到 data/live/_trash/ 下，不是真删除——需要时可以手动移回来。',
+    okText: '删除',
+  });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/accounts/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login: login, confirm: true }),
+    });
+    const j = await r.json();
+    if (!j.ok) { alert(j.error || '删除失败'); return; }
+    sessSel = null;
+    liveData = null;
+    await refreshLive(true);
+  } catch (e) {
+    alert(String(e));
+  }
 }
 
 function reasonCn(k) {
@@ -1636,7 +1950,8 @@ setInterval(() => {
   if (!$('view-live').classList.contains('hidden') && !document.hidden) refreshLive();
 }, 20000);
 
-$('acctPick').addEventListener('change', () => loadLive(true));
+$('acctPick').addEventListener('change', () => { sessSel = null; loadLive(true); });
+$('btnDelAcct').addEventListener('click', deleteAccount);
 
 loadEvalList().then(() => loadStrategies());
 </script>

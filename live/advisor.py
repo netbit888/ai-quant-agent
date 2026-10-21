@@ -207,14 +207,14 @@ def load_cached(login: int | str | None = None) -> dict | None:
 
 
 def _log_call(ok: bool, usage: dict | None, error: str | None = None,
-              login: int | str | None = None) -> None:
+              login: int | str | None = None, purpose: str = "live_advice") -> None:
     """每调一次外部 API 就记一行，方便事后核对花了多少钱。"""
     p = call_log_path(login)
     p.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "ts": int(time.time()),
         "provider": "deepseek",
-        "purpose": "live_advice",
+        "purpose": purpose,
         "login": paths.resolve_login(login),
         "ok": ok,
         "usage": usage or {},
@@ -325,6 +325,283 @@ def _summarize_log(path: Path) -> dict:
         tokens += int((row.get("usage") or {}).get("total_tokens") or 0)
         last_at = row.get("ts") or last_at
     return {"calls": calls, "total_tokens": tokens, "last_at": last_at}
+
+
+# ================================================================== 场次复盘
+#
+# 账户级复盘回答「我这三个月怎么样」，场次级回答「我刚坐下来这一场怎么样」。
+# 后者才是每天用的那个，所以单独一套 prompt：
+#   - 只喂本场切片 + 上一场（有对比才有信息量，只给本场会退化成「你亏了」）
+#   - 输出压到 2 条证据 + 1 条规则，避免正确但没用的长篇
+#   - 规则必须从固定指标表里选，下一场才能自动检查
+#
+# 只读：这个函数不会下单、不改参数、不动账本。
+
+SESSION_SYSTEM = """你是一名交易复盘教练，服务对象是手动交易者。
+他刚打完一场，打开面板想知道「这一场我到底做对了什么、漏在哪里」。
+
+规则：
+1. 只谈这一场，以及和上一场的对比。不要写账户长期总结。
+2. 每条结论必须带数字，数字必须来自给你的数据。不许编。
+3. 先找「过程」上的差异（持仓时长、止损宽度、单笔风险、方向、连续入场），
+   再谈结果。结果差但过程对，要说清楚；结果好但过程危险，也要说。
+4. 不要安慰，也不要训斥。像一个看过很多账户的人，平静地指出事实。
+5. 本场笔数少于 5 时，明确说「样本太少，只能看过程，不能下结论」。
+6. 最后给一条下一次能执行、且能被自动检查的规则。规则必须从给定的
+   「可选指标」里挑一个 metric，并给一个数值阈值。
+7. 用中文。不要输出 JSON 以外的任何文字。"""
+
+SESSION_PROMPT = """## 本场
+第 {index} 场 | {start} → {end}（{span} 分钟）| {n} 笔
+净额 {net} | {wins} 胜 {losses} 负 | 胜率 {win_rate}%
+盈亏比 {rr} → 需要胜率 {need}%，实际 {actual}%，边际 {margin} 个百分点
+方向：多 {long} 空 {short}
+持仓中位数 {median_hold} 分钟，最长 {max_hold} 分钟
+单笔风险（占开仓时余额）：中位 {med_risk}%，最大 {max_risk}%
+止损宽度：{sl_txt}
+
+## 逐笔（本地时间）
+{rows}
+
+## 规则引擎自动标出的行为
+{flags}
+
+## 用户对本场的备注
+{note}
+
+## 上一场（只用于对比；本场是第 1 场时为空）
+{prev}
+
+## 当前生效的下一场规则，以及本场是否遵守
+{rule}
+
+## 可选指标（rule.metric 只能从这里选一个）
+{metrics}
+
+## 输出（严格 JSON，不要代码块以外的文字）
+{{
+  "headline": "一句话说清这一场最要紧的事，40 字以内",
+  "evidence": [
+    {{"claim": "结论", "numbers": "支撑它的具体数字"}}
+  ],
+  "rule": {{"text": "下一场要遵守的一条，可执行", "metric": "上面表里的一个键", "value": 0}}
+}}
+evidence 最多 2 条。rule 的 value 必须和 metric 的口径一致（比如 metric 是百分比就给 5 表示 5%）。"""
+
+# 指标表由 live.rules 提供，这里只做展示
+def _metric_table() -> str:
+    from live import rules
+
+    lines = ["键 | 含义 | 方向"]
+    for key, spec in rules.METRICS.items():
+        lines.append(f"{key} | {spec['label']}（{spec['unit']}） | {spec['op']} 阈值")
+    return "\n".join(lines)
+
+
+def _fmt_dt(ts) -> str:
+    if not ts:
+        return "—"
+    return datetime.fromtimestamp(int(ts)).strftime("%m-%d %H:%M")
+
+
+def _num(v, suffix: str = "", digits: int = 2) -> str:
+    if v is None:
+        return "—"
+    return f"{v:.{digits}f}{suffix}"
+
+
+def build_session_prompt(session: dict, prev_session: dict | None = None,
+                         note: dict | None = None, ctx: dict | None = None) -> str:
+    st = session.get("stats") or {}
+    ctx = ctx or {}
+
+    rows = []
+    for t in session.get("trades") or []:
+        flags = [f["title"] for f in (session.get("flags") or [])
+                 if f.get("pid") and str(f["pid"]) == str(t.get("position_id"))]
+        rows.append(
+            f"{_fmt_dt(t.get('entry_time'))} | {'多' if (t.get('direction') or 0) > 0 else '空'} | "
+            f"{t.get('volume')}手 | {t.get('entry_price')}→{t.get('exit_price')} | "
+            f"{_fmt_money(t.get('profit'))} | {_num(t.get('r'), 'R')} | "
+            f"{_num(t.get('hold_min'), '分')} | 风险 {_num(t.get('risk_pct'), '%', 1)} | "
+            f"SL {t.get('sl_points') or '—'}点 | {t.get('close_reason') or 'manual'}"
+            + (f" | 标记: {'、'.join(flags)}" if flags else "")
+        )
+
+    sls = st.get("sl_points") or []
+    sl_txt = f"{st.get('sl_width_ratio')} 倍（{'/'.join(str(s) for s in sls)} 点）" if sls else "无止损记录"
+
+    flag_txt = "\n".join(
+        f"- [{f.get('level')}] {f.get('title')}：{f.get('detail')}" for f in (session.get("flags") or [])
+    ) or "（无）"
+
+    note = note or {}
+    note_txt = (note.get("note") or "").strip() or "（没写）"
+    tags = note.get("tags") or []
+    if tags:
+        note_txt += f"\n标签：{'、'.join(tags)}"
+
+    if prev_session:
+        ps = prev_session.get("stats") or {}
+        prev_txt = (
+            f"第 {prev_session.get('index')} 场 | {_fmt_dt(prev_session.get('start'))} | "
+            f"{ps.get('n')} 笔 | 净额 {_fmt_money(ps.get('net'))} | "
+            f"胜率 {ps.get('win_rate')}% | 持仓中位 {ps.get('median_hold_min')} 分 | "
+            f"最大风险 {_num(ps.get('max_risk_pct'), '%', 1)} | "
+            f"方向上{'偏多' if (ps.get('long') or 0) > (ps.get('short') or 0) else '偏空'}"
+        )
+    else:
+        prev_txt = "（这是账本里的第 1 场）"
+
+    rule = ctx.get("rule")
+    chk = ctx.get("rule_check")
+    if rule and chk:
+        verdict = {"pass": "遵守了", "fail": "违反了", "unknown": "无法判定"}.get(chk.get("status"), "未判定")
+        rule_txt = (f"规则：{rule.get('text')}\n判定：{verdict}"
+                    f"（{chk.get('label')} = {chk.get('value')}，目标 {chk.get('target')}）")
+    elif rule:
+        rule_txt = f"规则：{rule.get('text')}\n（本场不在它的适用范围内）"
+    else:
+        rule_txt = "（暂无）"
+
+    return SESSION_PROMPT.format(
+        index=session.get("index"),
+        start=_fmt_dt(session.get("start")),
+        end=_fmt_dt(session.get("end")),
+        span=session.get("span_min"),
+        n=st.get("n"),
+        net=_fmt_money(st.get("net")),
+        wins=st.get("wins"),
+        losses=st.get("losses"),
+        win_rate=st.get("win_rate"),
+        rr=st.get("rr"),
+        need=st.get("need_win_rate"),
+        actual=st.get("win_rate"),
+        margin=st.get("margin_pp"),
+        long=st.get("long"),
+        short=st.get("short"),
+        median_hold=st.get("median_hold_min"),
+        max_hold=st.get("max_hold_min"),
+        med_risk=st.get("median_risk_pct"),
+        max_risk=st.get("max_risk_pct"),
+        sl_txt=sl_txt,
+        rows="\n".join(rows) or "（无）",
+        flags=flag_txt,
+        note=note_txt,
+        prev=prev_txt,
+        rule=rule_txt,
+        metrics=_metric_table(),
+    )
+
+
+def session_advice_path(login: int | str | None = None) -> Path:
+    return paths.account_file(paths.resolve_login(login), "session_advice.json")
+
+
+def load_session_cache(login: int | str | None = None) -> dict:
+    p = session_advice_path(login)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _session_key(session: dict) -> str:
+    st = session.get("stats") or {}
+    trades = session.get("trades") or []
+    last = max((int(t["exit_time"]) for t in trades if t.get("exit_time")), default=0)
+    return f"{session.get('id')}:{st.get('n')}:{last}"
+
+
+def advise_session(session: dict, prev_session: dict | None = None, note: dict | None = None,
+                   ctx: dict | None = None, allow_call: bool = False, force: bool = False,
+                   login: int | str | None = None) -> dict:
+    """本场 AI 分析。与账户级 `advise()` 同一条硬约束：
+    `allow_call=False` 时绝不发请求，只回缓存或 need_confirm。"""
+    if not session or not (session.get("trades") or []):
+        return {"ok": False, "error": "这一场没有交易", "advice": None}
+
+    key = _session_key(session)
+    cache = load_session_cache(login)
+    hit = cache.get(str(session.get("id"))) or {}
+    if not force and hit.get("key") == key and hit.get("advice"):
+        return {"ok": True, "cached": True, **hit}
+
+    if not allow_call:
+        return {
+            "ok": False,
+            "need_confirm": True,
+            "error": "尚未生成这一场的 AI 分析，需要确认（会产生费用）。",
+            "advice": hit.get("advice"),
+            "generated_at": hit.get("generated_at"),
+            "stale": bool(hit),
+        }
+
+    usage: dict = {}
+    try:
+        from agent.llm import chat_ex
+        from agent.sandbox import extract_json
+
+        text, usage = chat_ex(
+            build_session_prompt(session, prev_session, note, ctx), system=SESSION_SYSTEM
+        )
+        parsed = extract_json(text)
+    except Exception as exc:  # noqa: BLE001
+        _log_call(False, usage, f"{type(exc).__name__}: {exc}", login=login, purpose="session_advice")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                "advice": hit.get("advice"), "stale": bool(hit)}
+
+    advice = _normalize_session_advice(parsed)
+    _log_call(True, usage, login=login, purpose="session_advice")
+
+    payload = {
+        "key": key,
+        "generated_at": int(time.time()),
+        "advice": advice,
+        "usage": usage,
+        "rule_entry": None,
+    }
+
+    # 规则顺手落盘：下一场开始就按它检查
+    if advice.get("rule"):
+        from live import rules
+
+        validated = rules.validate(advice["rule"])
+        if validated:
+            entry = rules.save(validated, after_ts=session.get("end") or 0,
+                               session_id=session.get("id"), login=login)
+            advice["rule"] = {**validated, "saved": True}
+            payload["rule_entry"] = entry
+
+    cache[str(session.get("id"))] = payload
+    p = session_advice_path(login)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "cached": False, **payload}
+
+
+def _normalize_session_advice(parsed: dict) -> dict:
+    """把模型输出修剪成固定形状：2 条证据、1 条规则。多了就是没重点。"""
+    if not isinstance(parsed, dict):
+        return {"headline": str(parsed)[:120], "evidence": [], "rule": None}
+    evidence = []
+    for e in (parsed.get("evidence") or [])[:2]:
+        if isinstance(e, dict):
+            evidence.append({"claim": str(e.get("claim") or "")[:120],
+                             "numbers": str(e.get("numbers") or "")[:120]})
+        elif isinstance(e, str):
+            evidence.append({"claim": e[:120], "numbers": ""})
+    rule = parsed.get("rule")
+    if not isinstance(rule, dict):
+        rule = {"text": str(rule)[:120]} if rule else None
+    return {
+        "headline": str(parsed.get("headline") or "")[:120],
+        "evidence": evidence,
+        "rule": rule,
+    }
 
 
 if __name__ == "__main__":

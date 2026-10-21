@@ -41,6 +41,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, status: int, payload) -> None:
+        self._send(status, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                   "application/json; charset=utf-8")
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
 
@@ -76,6 +80,14 @@ class Handler(BaseHTTPRequestHandler):
                     paths.set_login(cur)
                     for r in rows:
                         r["current"] = str(r.get("login")) == str(cur)
+                # 删除确认要显示「这个账户有多少笔」，顺手数一下账本行数
+                for r in rows:
+                    ledger = paths.account_dir(r.get("login")) / "deals.jsonl"
+                    try:
+                        r["deals"] = (sum(1 for line in ledger.read_text(encoding="utf-8").splitlines()
+                                          if line.strip()) if ledger.exists() else 0)
+                    except OSError:
+                        r["deals"] = None
                 payload = {"ok": True, "current": cur, "accounts": rows}
             except Exception as exc:  # noqa: BLE001
                 payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "accounts": []}
@@ -93,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
             force = "1" in (qs.get("force") or [])
             want = (qs.get("account") or [""])[0].strip()
             try:
-                from live.advisor import advise, api_call_summary
+                from live.advisor import advise, api_call_summary, load_session_cache
                 from live.journal import collect, collect_offline
                 from live.stats import compute, risk_flags
 
@@ -121,6 +133,20 @@ class Handler(BaseHTTPRequestHandler):
                 login = info.get("login") or want or None
                 advice = advise(stats, flags, info["trades"], allow_call=False,
                                 scoring=info.get("scoring"), login=login)
+
+                # 场次复盘：只放最近 30 场，账本长期累积后不至于把响应撑爆
+                from live import paths, rules
+
+                sessions = (info.get("sessions") or [])[:30]
+                note_map = paths.read_notes(login)
+                rule = rules.load(login).get("rule")
+                # 已生成过的场次 AI 一起带上，避免每次刷新都显示「未生成」
+                sid_set = {s["id"] for s in sessions}
+                cached_sess = load_session_cache(login)
+                session_advice = {
+                    k: {"advice": v.get("advice"), "generated_at": v.get("generated_at")}
+                    for k, v in cached_sess.items() if k in sid_set
+                }
                 payload = {
                     "ok": True,
                     "login": login,
@@ -138,6 +164,12 @@ class Handler(BaseHTTPRequestHandler):
                     "account_daily": info.get("account_daily") or [],
                     "quality": info.get("quality") or {},
                     "scoring": info.get("scoring") or {},
+                    "sessions": sessions,
+                    "sessions_error": info.get("sessions_error"),
+                    "session_notes": note_map,
+                    "session_advice": session_advice,
+                    "rule": rule,
+                    "rule_check": rules.summarize(rule, sessions),
                     "updated_at": info["updated_at"],
                 }
             except Exception as exc:  # noqa: BLE001
@@ -234,40 +266,43 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
-        """只接受一种写入：用户确认后生成 AI 复盘。
+        """写入口：场次备注 / 场次 AI / 删除账户 / 账户级 AI。
 
-        这是整个面板**唯一**会调用外部付费 API 的入口，必须显式带
-        {"confirm": true}，否则直接 400。GET 侧永远只读缓存。
+        两类约束不能破：
+          1. 会花钱的（/api/advice、/api/session_advice）必须带 {"confirm": true}；
+          2. 归档账户不能生成新的复盘——它连不上了，生成了也没法验证。
+        备注和删账户不花钱，但仍然只接受显式 POST。
         """
         parsed = urlparse(self.path)
-        if parsed.path != "/api/advice":
-            self._send(404, b'{"error":"not found"}', "application/json; charset=utf-8")
-            return
-
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
-            self._send(400, b'{"error":"bad json"}', "application/json; charset=utf-8")
+            self._json(400, {"ok": False, "error": "bad json"})
             return
 
-        # 归档账户不给生成：它连不上了，生成了也没法验证，纯烧钱
+        routes = {
+            "/api/session_note": self._post_session_note,
+            "/api/session_advice": self._post_session_advice,
+            "/api/accounts/delete": self._post_account_delete,
+            "/api/rule": self._post_rule,
+            "/api/advice": self._post_advice,
+        }
+        handler = routes.get(parsed.path)
+        if handler is None:
+            self._json(404, {"ok": False, "error": "not found"})
+            return
+        handler(body)
+
+    # ---------------------------------------------------------- 各写入入口
+
+    def _post_advice(self, body: dict) -> None:
         if body.get("account"):
-            self._send(
-                400,
-                json.dumps({"ok": False, "error": "归档账户无法生成新的 AI 复盘"}, ensure_ascii=False).encode(),
-                "application/json; charset=utf-8",
-            )
+            self._json(400, {"ok": False, "error": "归档账户无法生成新的 AI 复盘"})
             return
-
         if not body.get("confirm"):
-            self._send(
-                400,
-                json.dumps({"ok": False, "error": "缺少 confirm=true，拒绝调用付费 API"}, ensure_ascii=False).encode(),
-                "application/json; charset=utf-8",
-            )
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝调用付费 API"})
             return
-
         try:
             from live.advisor import advise, api_call_summary
             from live.journal import collect
@@ -289,8 +324,106 @@ class Handler(BaseHTTPRequestHandler):
                     payload["error"] = result.get("error")
         except Exception as exc:  # noqa: BLE001
             payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self._json(200, payload)
 
-        self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(), "application/json; charset=utf-8")
+    def _post_session_note(self, body: dict) -> None:
+        """场次备注：一句话 + 可选标签。不花钱，所以不需要 confirm。"""
+        from live import paths
+
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            self._json(400, {"ok": False, "error": "缺少 session_id"})
+            return
+        try:
+            notes = paths.write_note(
+                sid, body.get("note") or "", body.get("tags") or [],
+                login=body.get("account") or None,
+            )
+            self._json(200, {"ok": True, "session_notes": notes})
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_session_advice(self, body: dict) -> None:
+        """本场 AI 分析（付费）。生成成功后顺手落一条「下一场规则」。"""
+        if body.get("account"):
+            self._json(400, {"ok": False, "error": "归档账户无法生成新的 AI 分析"})
+            return
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝调用付费 API"})
+            return
+        sid = str(body.get("session_id") or "").strip()
+        try:
+            from live import paths, rules
+            from live.advisor import advise_session, api_call_summary
+            from live.journal import collect
+
+            info = collect(force=True)
+            if not info.get("ok"):
+                self._json(200, {"ok": False, "error": info.get("error")})
+                return
+            sessions = info.get("sessions") or []
+            sess = next((s for s in sessions if s.get("id") == sid), None)
+            if sess is None:
+                self._json(404, {"ok": False, "error": "找不到这一场（可能刚被刷新掉）"})
+                return
+            prev = next((s for s in sessions if s.get("index") == sess["index"] - 1), None)
+            login = info.get("login")
+            rule = rules.load(login).get("rule")
+            res = advise_session(
+                sess, prev_session=prev,
+                note=(paths.read_notes(login) or {}).get(sid),
+                ctx={"rule": rule, "rule_check": rules.check(rule, sess)},
+                allow_call=True, force=bool(body.get("force")), login=login,
+            )
+            payload = {
+                "ok": bool(res.get("ok")),
+                "advice": res,
+                "api_calls": api_call_summary(),
+                "rule": rules.load(login).get("rule"),
+            }
+            if not payload["ok"]:
+                payload["error"] = res.get("error")
+        except Exception as exc:  # noqa: BLE001
+            payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self._json(200, payload)
+
+    def _post_account_delete(self, body: dict) -> None:
+        """删除归档账户。默认软删除——目录移到 _trash/，可以手动移回来。"""
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true"})
+            return
+        login = str(body.get("login") or "").strip()
+        if not login:
+            self._json(400, {"ok": False, "error": "缺少 login"})
+            return
+        try:
+            from live import paths
+            from live.journal import probe_login
+
+            cur = None
+            try:
+                cur = probe_login()
+            except Exception:  # noqa: BLE001
+                cur = None
+            res = paths.delete_account(login, current=cur, hard=bool(body.get("hard")))
+            if res.get("ok") and paths.current_login() == login:
+                paths.set_login(None)   # 内存里的当前账户上下文也要清掉
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self._json(200, res)
+
+    def _post_rule(self, body: dict) -> None:
+        """规则管理：目前只有「清掉当前规则」。"""
+        from live import rules
+
+        if body.get("action") != "clear":
+            self._json(400, {"ok": False, "error": "unknown action"})
+            return
+        try:
+            rules.clear(body.get("account") or None)
+            self._json(200, {"ok": True, "rule": None})
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     def log_message(self, fmt: str, *args) -> None:  # 静默，避免刷屏
         return

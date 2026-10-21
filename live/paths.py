@@ -25,6 +25,7 @@ MT5 的 Python 接口（`mt5.login`）需要账号的**密码**才能切换登�
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -32,6 +33,10 @@ ROOT = Path(__file__).resolve().parent.parent
 LIVE_DIR = ROOT / "data" / "live"
 ACCOUNTS_DIR = LIVE_DIR / "accounts"
 INDEX_FILE = LIVE_DIR / "index.json"
+
+# 删除账户一律先进这里，不真删。真实账户账本是**唯一副本**，MT5 的历史
+# 有保留期、换服务器就丢，误删之后没有任何地方能恢复。
+TRASH_DIR_NAME = "_trash"
 
 
 def account_dir(login: int | str) -> Path:
@@ -164,6 +169,85 @@ def read_json(login: int | str, name: str, default=None):
 def write_json(login: int | str, name: str, data) -> None:
     p = account_file(login, name)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ------------------------------------------------------------- 场次备注
+
+
+def read_notes(login: int | str | None = None) -> dict:
+    """场次备注：{session_id: {note, tags, updated_at}}。"""
+    data = read_json(resolve_login(login), "notes.json", {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_note(session_id: str, note: str = "", tags: list[str] | None = None,
+               login: int | str | None = None) -> dict:
+    """写一场的备注。空备注 + 空标签 = 删除这条记录（不占地方）。"""
+    key = resolve_login(login)
+    data = read_notes(key)
+    if (note or "").strip() or tags:
+        data[str(session_id)] = {
+            "note": (note or "").strip()[:500],
+            "tags": [str(t)[:20] for t in (tags or [])][:5],
+            "updated_at": int(time.time()),
+        }
+    else:
+        data.pop(str(session_id), None)
+    write_json(key, "notes.json", data)
+    return data
+
+
+# ------------------------------------------------------------- 删除账户
+
+
+def trash_dir() -> Path:
+    return LIVE_DIR / TRASH_DIR_NAME
+
+
+def delete_account(login: int | str, current: int | str | None = None,
+                   hard: bool = False) -> dict:
+    """删除一个**归档账户**。默认软删除：整目录移到 `_trash/<login>-<时间戳>/`。
+
+    - 拒绝删除终端当前登录的账户（`current` 由调用方从 MT5 读出后传入）
+    - 拒绝删除不在 accounts/ 下的路径（防穿越）
+    - 返回被移动的目录，方便告诉用户怎么恢复
+    """
+    key = str(login)
+    if current is not None and key == str(current):
+        return {"ok": False, "error": "这是终端当前登录的账户，不能删除；请先在 MT5 里切到别的账户"}
+
+    src = account_dir(key)
+    if not src.exists():
+        return {"ok": False, "error": f"账户 {key} 没有归档目录"}
+
+    try:
+        # 只允许操作 accounts/ 的直接子目录
+        if src.resolve().parent != ACCOUNTS_DIR.resolve():
+            return {"ok": False, "error": "路径不在 accounts/ 下，拒绝操作"}
+    except OSError:
+        return {"ok": False, "error": "路径解析失败"}
+
+    deals = 0
+    ledger = src / "deals.jsonl"
+    if ledger.exists():
+        deals = sum(1 for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip())
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if hard:
+        shutil.rmtree(src)
+        moved = None
+    else:
+        dest = trash_dir() / f"{key}-{stamp}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        moved = str(dest)
+
+    index = load_index()
+    index.pop(key, None)
+    save_index(index)
+
+    return {"ok": True, "login": key, "deals": deals, "moved_to": moved,
+            "restore": None if hard else f"把 {moved} 移回 {src} 并跑一次同步即可恢复"}
 
 
 if __name__ == "__main__":

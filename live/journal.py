@@ -662,6 +662,13 @@ def collect_offline(login: int | str) -> dict:
                    "dimensions": [], "red_flags": [], "trades": []}
 
     daily = paths.read_json(key, "daily.json", {}) or {}
+    try:
+        from live.sessions import build as build_sessions
+
+        sessions = build_sessions(trades, flows=flows, deposits=round(gross_in - gross_out, 2),
+                                  plans=plans)
+    except Exception:  # noqa: BLE001
+        sessions = []
     return {
         "ok": bool(ledger),
         "offline": True,
@@ -673,6 +680,7 @@ def collect_offline(login: int | str) -> dict:
         "quality": quality,
         "scoring": scoring,
         "plans": plans,
+        "sessions": sessions,
         "sync": asdict(SyncResult(
             deals_total=len(ledger), deals_new=0, trades=len(trades),
             deposits=round(gross_in - gross_out, 2),
@@ -748,6 +756,18 @@ def collect(days: int = 365, force: bool = False, allow_launch: bool = False) ->
                 scoring = {"grade": "insufficient", "error": f"{type(exc).__name__}: {exc}",
                            "dimensions": [], "red_flags": [], "trades": []}
 
+            # 场次（盘后复盘用）：按「上一笔平仓 → 下一笔开仓」间隔 > 30 分钟切场
+            try:
+                from live.sessions import build as build_sessions
+
+                sessions = build_sessions(trade_dicts, flows=flows, deposits=res.deposits,
+                                          plans=plans)
+            except Exception as exc:  # noqa: BLE001
+                sessions = []
+                result_note = f"场次切分失败: {type(exc).__name__}: {exc}"
+            else:
+                result_note = None
+
             result = {
                 "ok": True,
                 "error": res.error,
@@ -762,6 +782,8 @@ def collect(days: int = 365, force: bool = False, allow_launch: bool = False) ->
                 "sync": asdict(res),
                 "deposits": res.deposits,
                 "account_daily": history,
+                "sessions": sessions,
+                "sessions_error": result_note,
                 "updated_at": now,
             }
             snapshot_account(acct, login)
