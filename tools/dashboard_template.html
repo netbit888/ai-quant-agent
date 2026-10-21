@@ -1133,8 +1133,11 @@ function renderLive(d) {
       ? '面板会自动尝试启动 MetaTrader 5（最多等 20 秒），成功后这里自动恢复。若一直起不来，请手动双击 MT5。'
       : '';
     renderAdvice({ ok: false, error: (d && d.error) || '账户读取失败，无法生成复盘' });
-    $('sessTabs').innerHTML = '';
-    $('sessBody').innerHTML = '<div class="mini">账户未连接，读不到场次数据。</div>';
+    // 正在写备注时不要清空，否则连「写了一半的字」也一起没了
+    if (!isEditingNote()) {
+      $('sessTabs').innerHTML = '';
+      $('sessBody').innerHTML = '<div class="mini">账户未连接，读不到场次数据。</div>';
+    }
     return;
   }
   const a = d.account || {};
@@ -1302,6 +1305,66 @@ function renderLive(d) {
 const SESS_TAGS = ['计划内', '手痒', '状态差'];
 let sessSel = null;
 
+/* 备注草稿
+   --------
+   面板每 20 秒自动刷新一次，renderSessions 会用「已保存的备注」重建 textarea。
+   正在写、还没点保存的文字会被直接冲掉（这个问题真实发生过）。
+   所以：输入即记草稿（内存 + localStorage），刷新时优先用草稿，保存成功才清掉。
+   另外，textarea 处于焦点时**完全不重建**本场内容——否则中文输入法的
+   候选状态（拼音还没上屏）会跟着 DOM 一起没掉。 */
+const noteDrafts = {};
+let draftStoreKey = null;
+
+function loadDrafts(login) {
+  const key = 'aqa.notes.' + (login || 'anon');
+  if (key === draftStoreKey) return;
+  draftStoreKey = key;
+  Object.keys(noteDrafts).forEach(k => delete noteDrafts[k]);
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) Object.assign(noteDrafts, JSON.parse(raw) || {});
+  } catch (e) { /* 隐私模式 / 配额满：草稿只在内存里，不影响使用 */ }
+}
+
+function persistDrafts() {
+  if (!draftStoreKey) return;
+  try { localStorage.setItem(draftStoreKey, JSON.stringify(noteDrafts)); } catch (e) { /* 忽略 */ }
+}
+
+function setDraft(sid, value, tags) {
+  noteDrafts[sid] = { value: value, tags: tags };
+  persistDrafts();
+}
+
+function clearDraft(sid) {
+  delete noteDrafts[sid];
+  persistDrafts();
+}
+
+function isEditingNote() {
+  const el = document.activeElement;
+  return !!(el && el.id === 'sessNote');
+}
+
+function captureCaret() {
+  const ta = $('sessNote');
+  if (!ta) return null;
+  return {
+    sid: sessSel,
+    focused: document.activeElement === ta,
+    start: ta.selectionStart,
+    end: ta.selectionEnd,
+  };
+}
+
+function restoreCaret(snap) {
+  if (!snap || snap.sid !== sessSel || !snap.focused) return;
+  const ta = $('sessNote');
+  if (!ta) return;
+  ta.focus();
+  try { ta.setSelectionRange(snap.start, snap.end); } catch (e) { /* 忽略 */ }
+}
+
 const FLAG_CN = {
   revenge: '报复', itchy: '手痒', wide_stop: '宽止损',
   oversize: '超仓', one_bad_trade: '一笔定输赢',
@@ -1312,10 +1375,11 @@ function sessionAdviceOf(d, sid) {
   return (x && x.advice) ? x : null;
 }
 
-function renderSessions(d) {
+function renderSessions(d, force = false) {
   const tabs = $('sessTabs');
   const body = $('sessBody');
   const sessions = d.sessions || [];
+  loadDrafts(d.login);
 
   if (!sessions.length) {
     tabs.innerHTML = '';
@@ -1332,22 +1396,33 @@ function renderSessions(d) {
     const t = new Date(s.start * 1000);
     const hh = String(t.getHours()).padStart(2, '0');
     const mm = String(t.getMinutes()).padStart(2, '0');
-    return `<button class="${cls}" data-sid="${s.id}">${s.date} ${hh}:${mm}<span class="cnt">${st.n}</span></button>`;
+    const dot = noteDrafts[s.id] ? '<span class="cnt" style="color:var(--warn)">•</span>' : '';
+    return `<button class="${cls}" data-sid="${s.id}">${s.date} ${hh}:${mm}${dot}<span class="cnt">${st.n}</span></button>`;
   }).join('');
   tabs.querySelectorAll('.win-tab').forEach(b => {
-    b.addEventListener('click', () => { sessSel = b.dataset.sid; renderSessions(d); });
+    b.addEventListener('click', () => {
+      sessSel = b.dataset.sid;
+      renderSessions(d, true);   // 切场必须重建，不管焦点在哪
+    });
   });
 
+  // 正在写备注就别动 DOM：会让输入法候选词丢字
+  if (!force && isEditingNote()) return;
+
   const s = sessions.find(x => x.id === sessSel);
+  const snap = captureCaret();
   body.innerHTML = sessionHtml(d, s);
   bindSession(d);
+  restoreCaret(snap);
 }
 
 function sessionHtml(d, s) {
   const st = s.stats || {};
   const net = st.net || 0;
   const note = (d.session_notes || {})[s.id] || {};
-  const tags = note.tags || [];
+  const draft = noteDrafts[s.id];       // 有未保存的草稿时，草稿优先
+  const noteVal = draft ? (draft.value || '') : (note.note || '');
+  const tags = draft ? (draft.tags || []) : (note.tags || []);
   const flags = s.flags || [];
   const ai = sessionAdviceOf(d, s.id);
 
@@ -1440,7 +1515,7 @@ function sessionHtml(d, s) {
     </div>
 
     <div class="sess-note">
-      <textarea id="sessNote" placeholder="这一场一句话：当时在干什么 / 为什么开始 / 为什么停（10 秒，可跳过）">${esc(note.note)}</textarea>
+      <textarea id="sessNote" placeholder="这一场一句话：当时在干什么 / 为什么开始 / 为什么停（10 秒，可跳过）">${esc(noteVal)}</textarea>
       <div class="sess-tags">
         ${SESS_TAGS.map(t => `<button class="sess-tag ${tags.includes(t) ? 'on' : ''}" data-tag="${t}">${t}</button>`).join('')}
       </div>
@@ -1448,7 +1523,9 @@ function sessionHtml(d, s) {
     <div class="sess-foot">
       <button class="btn-ghost" id="btnSessSave">保存备注</button>
       ${aiBtn}
-      <span class="mini" id="sessSaveHint">${note.updated_at ? '上次保存 ' + ts2str(note.updated_at) : ''}</span>
+      <span class="mini" id="sessSaveHint">${draft
+        ? '未保存的修改'
+        : (note.updated_at ? '上次保存 ' + ts2str(note.updated_at) : '')}</span>
     </div>
 
     ${aiHtml}
@@ -1457,9 +1534,20 @@ function sessionHtml(d, s) {
 }
 
 function bindSession(d) {
+  const ta = $('sessNote');
+  const tagNames = () => Array.from(document.querySelectorAll('.sess-tag.on')).map(b => b.dataset.tag);
+  const markDirty = () => {
+    setDraft(sessSel, ta ? ta.value : '', tagNames());
+    const hint = $('sessSaveHint');
+    if (hint) hint.textContent = '未保存';
+  };
+
+  // 边打边存草稿：这样 20 秒刷新、切场、甚至刷新页面都不会把没写完的字弄丢
+  if (ta) ta.addEventListener('input', markDirty);
   document.querySelectorAll('.sess-tag').forEach(b => {
-    b.addEventListener('click', () => b.classList.toggle('on'));
+    b.addEventListener('click', () => { b.classList.toggle('on'); markDirty(); });
   });
+
   const save = $('btnSessSave');
   if (save) save.addEventListener('click', () => saveSessionNote(d));
   const ai = $('btnSessAi');
@@ -1479,7 +1567,9 @@ async function saveSessionNote(d) {
     const j = await r.json();
     if (!j.ok) { $('sessSaveHint').textContent = j.error || '保存失败'; return; }
     d.session_notes = j.session_notes || {};
-    $('sessSaveHint').textContent = '已保存';
+    clearDraft(sessSel);                  // 存住了才丢草稿
+    const hint = $('sessSaveHint');
+    if (hint) hint.textContent = '已保存 ' + new Date().toLocaleTimeString('zh-CN');
   } catch (e) {
     $('sessSaveHint').textContent = String(e);
   }
