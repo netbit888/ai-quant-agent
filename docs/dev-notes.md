@@ -101,5 +101,7 @@
 迁至 `D:\Projects\ai-quant-agent\`，首次纳入 git。旧目录保留两周后删除。
 桌面 `AI量化面板.bat` 路径已同步更新（备份：`AI量化面板.bat.bak`）。
 
-远程仓库：`git@github.com:netbit888/ai-quant-agent-mt5.git`（私有，SSH 认证）。
-**注意本地目录名是 `ai-quant-agent`，仓库名多了 `-mt5` 后缀**，clone 下来会是 `ai-quant-agent-mt5`。
+远程仓库：`git@github.com:netbit888/ai-quant-agent.git`（私有，SSH 认证）。
+仓库名原本带 `-mt5` 后缀，2026-10-21 已改名为 `ai-quant-agent`，与本地目录一致；
+旧地址 `.../ai-quant-agent-mt5.git` 仍会 301 到新地址，但每次 push 都会打印「repository moved」，
+所以 `origin` 已同步改成新 URL。
