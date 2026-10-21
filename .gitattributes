@@ -1,0 +1,13 @@
+# 批处理文件必须是 CRLF —— cmd.exe 对 LF-only 的 .bat 会读错位置，
+# 加上 UTF-8 中文和 chcp 后会执行成半截命令（曾把 python.exe 读成 on.exe）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 其余按 LF 存
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+
+# 这个文件自己也用 LF，否则 autocrlf 会把它检出成 CRLF
+.gitattributes text eol=lf
