@@ -1,0 +1,83 @@
+# 开发备注
+
+> docs/ 其他文件讲"系统是什么"，本文件讲"做过什么决定、为什么、别再踩什么坑"。
+> 内容从 WorkBuddy 会话记忆抽取（2026-10-21 迁移时整理），是跨会话的连续性上下文。
+
+## 配色约定（2026-10-20 定，绿涨红跌）
+
+与 A 股默认的红涨绿跌**相反**，这是用户明确要求的：
+
+- 涨跌方向：`--up` = 绿 `#2ecc71`，`--down` = 红 `#ff4d4f`
+- 语义好坏：`--good` = 绿，`--bad` = 红 —— 用于通过/失败、等级 A/F、风险标记
+
+**两组变量不许混用。** 方向变量染"好坏"会把高风险标记染成绿色。
+图表里 `line-up`/`line-down` 是方向，`line-bad` 是语义"坏"（如回撤曲线）。
+
+## 实盘账本结构（多账户）
+
+- 按 `data/live/accounts/<login>/` 隔离，**每条 deal 必须带 `login` 字段**——
+  这是唯一能事后拆分混账的手段（曾因切账户不记录导致 160 条混进 1 条，全盘指标失真）
+- 用户在 MT5 终端里切账户，程序自动识别 `account_info().login`
+- 归档账户只离线读（`collect_offline`），不生成新 AI 复盘（POST 带归档账户直接 400）
+- 历史账户：232307606（已归档，76 笔，净 −119.03）、419219926（当前）
+
+## 用户的真实交易习惯（影响评分系统设计）
+
+- **一般不设止盈，偶尔设止损。** 「计划盈亏比」在他身上算不出来，
+  已改用盈亏平衡线边际（`live/profile.py`）+ MFE/MAE 捕获率方向
+- 归档 76 笔实测（2026-10-19，手数已归一化）：
+
+| 离场方式 | 笔数 | 胜率 | 净额 |
+|---|---|---|---|
+| 手动 | 41 | 78% | +144.42 |
+| 止损 | 31 | 0% | −183.06 |
+| 止盈 | 2 | 100% | +14.46 |
+| 爆仓 | 2 | 0% | −94.85 |
+
+- 手动部分单独看：RR 1.68、单笔 +3.52，有正期望；**亏损 100% 来自止损+爆仓**
+- 止损在他手里不是风控，是"放弃管理的许可证"——评分系统的纪律维度按此设计
+
+## 付费 API 闸门（用户要求：调 API 必须确认）
+
+- `advice(..., allow_call=False)` 默认不发请求；`GET /api/live` 只读永不调 LLM
+- `POST /api/advice` 是唯一付费入口，body 必须 `{"confirm": true}` 否则 400
+- 每次调用落 `data/live/api_calls.jsonl`，面板显示累计 tokens
+- **不弹窗的**：本地读 MT5（免费、只读、不外传）——每 20 秒弹一次面板没法用
+- `agent/llm.py` 的 `chat_ex()` 返回 `(text, usage)`，CLI 用 `_confirm_call()` 交互确认
+
+## 评分系统设计要点（live/scoring.py）
+
+- 单笔 0-100：结果 40 / 纪律 30 / 风险 20 / 时长 10
+- 账户 A~F 六维（期望/盈亏平衡边际/稳定性/风险/纪律/样本），**整体取最差**（木桶原理，
+  不做加权平均——期望 0.3R 和回撤 50% 不可交换）
+- 抗操纵：用 R 不用美元、笔数多不加分、样本 <20 判 `insufficient`
+- LLM 定位是"解释者"不是"评价者"：分数由规则引擎决定，prompt 要求 LLM 对齐规则数字
+
+## 环境坑（Windows + agent 进程树，2026-10-20 实测）
+
+1. **agent 进程树起不了 MT5 GUI**：terminal64.exe / MetaEditor64.exe 报
+   0xC0000139 / 0xC0000142。但**面板进程可以**（用户双击 bat 启动，Explorer 树）——
+   `live/journal.py` 的 `ensure_terminal()` 只在面板后台线程尝试启动，HTTP 路径永远不启动
+2. **pip 要走官方源**：清华源报 "from versions: none"；系统 HTTP_PROXY 会导致 pip 失败，
+   `.venv/pip.ini` 已固化 `index-url=https://pypi.org/simple` + 空 proxy
+3. **MT5 `initialize()` 会阻塞 60 秒**（MT5 内部最小超时，timeout=30000 不生效）——
+   先用 `tasklist` 按字节匹配查 terminal64.exe（中文 Windows 输出 GBK，
+   `text=True` 会抛 UnicodeDecodeError 吞掉 stdout），失败后退避 60s
+4. MT5 同一数据目录只允许单实例；回测前必须关终端
+
+## 数据资产与再生方式（2026-10-21 迁移时整理）
+
+| 数据 | 位置 | 处置 |
+|---|---|---|
+| 真实账户账本 | `data/live/`、`data/live_backup_231239/` | **珍贵，唯一副本，永不重生** |
+| 迭代证据 | `data/runs/`、`data/evaluations/` | 保留，简历素材 |
+| MT5 行情 CSV | `data/*.csv`（15MB） | 可再生：MT5 终端开着 + `python aqa.py data pull --symbol XAUUSDm --tf H4` |
+| 回测报告 | `data/reports/`（2.4MB） | 可再生：MT5 界面跑策略测试器导出 |
+
+> `data/` 整体被 .gitignore 排除——账本含真实账户号和成交明细，**永远不进仓库**。
+
+## 迁移记录（2026-10-21）
+
+从 `C:\Users\35688\WorkBuddy\2026-10-19-00-22-52\ai-quant-agent\`（WorkBuddy 会话目录）
+迁至 `D:\Projects\ai-quant-agent\`，首次纳入 git。旧目录保留两周后删除。
+桌面 `AI量化面板.bat` 路径已同步更新（备份：`AI量化面板.bat.bak`）。
