@@ -270,6 +270,9 @@ Python 3.13（managed venv）· DeepSeek API（OpenAI 兼容）· MetaTrader5 ·
 
 pip 配置：`.venv/pip.ini` 已设为官方源并禁用代理（本机 HTTP_PROXY 会导致 pip 失败）。
 
+提交推送：双击 `push.bat`（逻辑在 `push.ps1`）。提示会是中文，提交说明也可以直接写中文——
+脚本把它读成 UTF-16 再写成 UTF-8 交给 git，所以 GitHub 上不会乱码。
+
 ## 免责声明
 
 技术研究用途，不构成投资建议。回测收益不代表未来表现，实盘有亏损风险。
