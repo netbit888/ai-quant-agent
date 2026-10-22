@@ -236,7 +236,7 @@ def compute(
         row["trades"] += 1
         row["wins"] += 1 if t["profit"] > 0 else 0
         row["profit"] = round(row["profit"] + t["profit"], 2)
-        row["volume"] = round(row["volume"] + t["volume"], 4)
+        row["volume"] = round(row["volume"] + (t.get("volume_closed") or t["volume"]), 4)
     daily = [day_map[k] for k in sorted(day_map)]
     for row in daily:
         row["win_rate"] = round(row["wins"] / row["trades"] * 100, 1) if row["trades"] else 0.0
@@ -275,7 +275,7 @@ def compute(
         "balance_curve": curve["series"],
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
-        "risk_unit": round(avg_loss, 2) if avg_loss else None,
+        "risk_unit": round(avg_loss, 4) if avg_loss else None,
         "cur_streak": cur_w if cur_w else -cur_l,
         "hold_median_min": round(statistics.median(holds), 1) if holds else None,
         "hold_max_min": round(holds[-1], 1) if holds else None,
@@ -283,7 +283,9 @@ def compute(
         "last_trade": closed[-1]["exit_time"],
         "active_days": active_days,
         "span_days": round(span_days, 1),
-        "trades_per_day": round(len(closed) / max(span_days, 1), 2),
+        # 频率按「有交易的天」算：span_days 把没开单的日子也算进分母，
+        # 隔几天打一次的人会被算成「低频」，跟实际状态不符。
+        "trades_per_day": round(len(closed) / max(active_days, 1), 2),
         "today": today_row or {"date": today, "trades": 0, "wins": 0, "profit": 0.0, "win_rate": 0.0},
         "deposits": round(deposits, 2),
         "return_pct": round(net / deposits * 100, 1) if deposits > 0 else None,

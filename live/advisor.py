@@ -92,7 +92,8 @@ def _fmt_money(v) -> str:
     return f"{v:+.2f}" if isinstance(v, (int, float)) else str(v)
 
 
-def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: dict | None = None) -> str:
+def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: dict | None = None,
+                 notes: dict | None = None) -> str:
     acct = stats.get("account") or {}
     account = (
         f"账户 {acct.get('login', '?')} @ {acct.get('server', '?')}，"
@@ -103,11 +104,19 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
         f"{(acct.get('balance') or 0) / (stats.get('deposits') or 1) * 100:.1f}%"
     )
 
+    notes = notes or {}
+
+    def _note_of(t: dict) -> str:
+        row = notes.get(str(t.get("position_id"))) or {}
+        return (row.get("note") or "").strip()
+
     overall = "\n".join(
         [
             f"已平仓 {stats.get('count')} 笔（未平仓 {stats.get('open_count', 0)} 笔），"
             f"跨 {stats.get('span_days')} 天，实际有交易 {stats.get('active_days')} 天，"
-            f"日均 {stats.get('trades_per_day')} 笔",
+            f"日均 {stats.get('trades_per_day')} 笔（按有交易的天数算，不是日历跨度）",
+            f"其中 {sum(1 for t in trades if _note_of(t))} 笔写了进场理由"
+            "（没有理由的交易只能从盈亏反推，结论要标明是推测）",
             f"净盈亏 {_fmt_money(stats.get('net'))}，相对入金 {stats.get('return_pct')}%",
             f"胜率 {stats.get('win_rate')}%（{stats.get('wins')} 胜 / {stats.get('losses')} 负）",
             f"盈利因子 PF {stats.get('pf')}",
@@ -142,6 +151,7 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
         f"{t['symbol']} | {'多' if t['direction'] > 0 else '空'} | {t['volume']}手 | "
         f"{_fmt_money(t['profit'])} | {t.get('close_reason')} | "
         f"持仓 {(t['exit_time'] - t['entry_time']) / 60:.0f} 分钟"
+        + (f" | 进场理由: {_note_of(t)}" if _note_of(t) else "")
         for t in recent
     ) or "（无）"
 
@@ -190,10 +200,13 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
     )
 
 
-def _cache_key(stats: dict, trades: list[dict]) -> str:
+def _cache_key(stats: dict, trades: list[dict], notes: dict | None = None) -> str:
     closed = [t for t in trades if t.get("exit_time")]
     last = max((t["exit_time"] for t in closed), default=0)
-    return f"{len(closed)}:{last}"
+    # 进场理由也算输入的一部分：新写了理由，旧复盘就该失效
+    notes = notes or {}
+    note_sig = f"{len(notes)}:{max((v.get('updated_at') or 0) for v in notes.values()) if notes else 0}"
+    return f"{len(closed)}:{last}:{note_sig}"
 
 
 def load_cached(login: int | str | None = None) -> dict | None:
@@ -233,6 +246,7 @@ def advise(
     allow_call: bool = False,
     scoring: dict | None = None,
     login: int | str | None = None,
+    notes: dict | None = None,
 ) -> dict:
     """返回 AI 复盘结果。失败时返回带 error 的字典，不抛异常——面板不能因此挂掉。
 
@@ -242,7 +256,7 @@ def advise(
     if stats.get("empty"):
         return {"ok": False, "error": "还没有已平仓交易，无法复盘", "advice": None, "flags": flags}
 
-    key = _cache_key(stats, trades)
+    key = _cache_key(stats, trades, notes)
     cached = load_cached(login)
     if not force and cached and cached.get("key") == key and cached.get("advice"):
         return {"ok": True, "cached": True, **cached, "flags": flags}
@@ -263,7 +277,7 @@ def advise(
         from agent.sandbox import extract_json
         from agent.llm import chat_ex
 
-        text, usage = chat_ex(build_prompt(stats, flags, trades, scoring), system=SYSTEM)
+        text, usage = chat_ex(build_prompt(stats, flags, trades, scoring, notes), system=SYSTEM)
         parsed = extract_json(text)
     except Exception as exc:  # noqa: BLE001
         _log_call(False, usage, f"{type(exc).__name__}: {exc}", login=login)
@@ -415,16 +429,19 @@ def build_session_prompt(session: dict, prev_session: dict | None = None,
     st = session.get("stats") or {}
     ctx = ctx or {}
 
+    notes = session.get("trade_notes") or {}
     rows = []
     for t in session.get("trades") or []:
         flags = [f["title"] for f in (session.get("flags") or [])
                  if f.get("pid") and str(f["pid"]) == str(t.get("position_id"))]
+        reason_note = ((notes.get(str(t.get("position_id"))) or {}).get("note") or "").strip()
         rows.append(
             f"{_fmt_dt(t.get('entry_time'))} | {'多' if (t.get('direction') or 0) > 0 else '空'} | "
             f"{t.get('volume')}手 | {t.get('entry_price')}→{t.get('exit_price')} | "
             f"{_fmt_money(t.get('profit'))} | {_num(t.get('r'), 'R')} | "
             f"{_num(t.get('hold_min'), '分')} | 风险 {_num(t.get('risk_pct'), '%', 1)} | "
             f"SL {t.get('sl_points') or '—'}点 | {t.get('close_reason') or 'manual'}"
+            + (f" | 进场理由: {reason_note}" if reason_note else "")
             + (f" | 标记: {'、'.join(flags)}" if flags else "")
         )
 

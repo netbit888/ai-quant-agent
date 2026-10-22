@@ -465,6 +465,16 @@
     border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 12.5px;
   }
   .sess-note textarea:focus { outline: none; border-color: var(--border-hi); }
+  /* 逐笔进场理由：表格里的小输入框，失焦即保存 */
+  .note-in {
+    width: 150px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px;
+    font: inherit; font-size: 12px;
+  }
+  .note-in::placeholder { color: var(--muted); }
+  .note-in:focus { outline: none; border-color: var(--border-hi); }
+  .note-in.saved { border-color: rgba(46,204,113,.65); }
+  .note-in.failed { border-color: rgba(255,77,79,.65); }
   .sess-tags { display: flex; gap: 6px; flex-wrap: wrap; }
   .sess-tag { padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border);
               background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
@@ -653,6 +663,14 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-head">
+      <h2>行为标记累计（跨场次）</h2>
+      <span class="mini" id="markNote"></span>
+    </div>
+    <table><thead><tr><th>标记</th><th>次数</th><th>涉及净盈亏</th><th>胜率</th><th>出现场次</th></tr></thead><tbody id="rowsMark"></tbody></table>
+  </div>
+
   <div class="grid2">
     <div class="card"><h2>分方向</h2><table><thead><tr><th>方向</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsDir"></tbody></table></div>
     <div class="card"><h2>分平仓原因</h2><table><thead><tr><th>原因</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsReason"></tbody></table></div>
@@ -670,7 +688,7 @@
 
   <div class="card">
     <h2>最近平仓记录</h2>
-    <table><thead><tr><th>平仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th><th>原因</th><th>持仓</th><th>评分</th></tr></thead><tbody id="rowsTrade"></tbody></table>
+    <table><thead><tr><th>平仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th><th>原因</th><th>持仓</th><th>评分</th><th>进场理由</th></tr></thead><tbody id="rowsTrade"></tbody></table>
   </div>
 </section>
 
@@ -1049,6 +1067,7 @@ let liveData = null;
 let liveTimer = null;
 let liveLoading = false;
 let acctList = [];        // /api/accounts 的原始结果，删除按钮靠它判断是不是当前账户
+let curLogin = null;      // 当前查看的账户，逐笔理由要用它决定写进哪个账本
 
 const money = (v, d = 2) => (v === null || v === undefined) ? '—'
   : (v > 0 ? '+' : '') + Number(v).toFixed(d);
@@ -1120,6 +1139,7 @@ async function refreshLive(force = false) {
 }
 
 function renderLive(d) {
+  curLogin = (d && d.login) || null;
   if (!d || !d.ok) {
     const raw = String((d && d.error) || '未知错误').replace(/^RuntimeError:\s*/, '');
     const noTerminal = /终端未运行|未连接/.test(raw);
@@ -1186,7 +1206,9 @@ function renderLive(d) {
 
   $('lvWin').textContent = s.win_rate != null ? fmt(s.win_rate, 1) + '%' : '—';
   $('lvWin').className = 'v mono neut';
-  $('lvWinSub').textContent = s.count ? `${s.wins} 胜 / ${s.losses} 负` : '—';
+  $('lvWinSub').textContent = s.count
+    ? `${s.wins} 胜 / ${s.losses} 负` + (s.flats ? ` / ${s.flats} 平` : '')
+    : '—';
 
   $('lvPf').textContent = s.pf != null ? fmt(s.pf) : '—';
   $('lvPf').className = 'v mono ' + (s.pf != null && s.pf < 1 ? 'neg' : '');
@@ -1274,29 +1296,90 @@ function renderLive(d) {
   ((d.scoring && d.scoring.trades) || []).forEach(x => { tradeScores[String(x.position_id)] = x; });
 
   const trades = (d.trades || []).filter(t => t.exit_time).slice(-15).reverse();
-  $('rowsTrade').innerHTML = trades.length ? trades.map(t => {
-    const sc = tradeScores[String(t.position_id)];
-    const scoreCell = sc
-      ? `<span class="chip c-${sc.grade}" title="${sc.flags.join('；') || '无异常'}">${sc.score}</span>`
-      : '<span class="mini">—</span>';
-    return `
+  const tradeNotes = d.trade_notes || {};
+  // 正在写理由时不重建表格：20 秒轮询会把输入冲掉（场次备注踩过这个坑）
+  const editingNote = document.activeElement && document.activeElement.dataset
+    && document.activeElement.dataset.notePid;
+  if (!editingNote) {
+    $('rowsTrade').innerHTML = trades.length ? trades.map(t => {
+      const sc = tradeScores[String(t.position_id)];
+      const scoreCell = sc
+        ? `<span class="chip c-${sc.grade}" title="${sc.flags.join('；') || '无异常'}">${sc.score}</span>`
+        : '<span class="mini">—</span>';
+      const note = tradeNotes[String(t.position_id)] || '';
+      return `
     <tr>
       <td class="mono">${ts2str(t.exit_time)}</td>
       <td>${t.symbol}</td>
       <td class="${t.direction > 0 ? 'pos-long' : 'pos-short'}">${t.direction > 0 ? '多' : '空'}</td>
-      <td class="mono">${t.volume}</td>
+      <td class="mono"${t.partial ? ` title="部分平仓：已平 ${t.volume_closed} / 开仓 ${t.volume}"` : ''}>${t.partial ? `${t.volume_closed}/${t.volume}` : t.volume}</td>
       <td class="mono">${fmt(t.entry_price, 3)}</td>
       <td class="mono">${fmt(t.exit_price, 3)}</td>
       <td class="mono ${signClass(t.profit)}">${money(t.profit)}</td>
       <td class="mini">${reasonCn(t.close_reason)}</td>
       <td class="mono">${mins((t.exit_time - t.entry_time) / 60)}</td>
       <td>${scoreCell}</td>
+      <td><input class="note-in" data-note-pid="${t.position_id}" value="${esc(note)}"
+                 placeholder="为什么进？" title="写一句进场理由，AI 复盘会读它"
+                 onchange="saveTradeNote(this)"></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">暂无平仓记录</td></tr>';
+    }).join('') : '<tr><td colspan="11" class="empty">暂无平仓记录</td></tr>';
+  }
 
   // ---- 本场复盘（盘后第一眼要看的） ----
   renderSessions(d);
+  renderMarks(d);
   syncDeleteButton(d);
+}
+
+/* ==================== 行为标记累计 ====================
+ * 单场的标记只是「今天手痒了一次」，跨场累计才能回答
+ * 「这个习惯一共让我亏了多少」——手动交易者唯一能直接改的东西。
+ */
+function renderMarks(d) {
+  const rows = d.mark_summary || [];
+  $('rowsMark').innerHTML = rows.length ? rows.map(m => `
+    <tr>
+      <td>${esc(m.label)}<div class="mini">${esc(m.hint || '')}</div></td>
+      <td class="mono">${m.count} ${m.unit || '笔'}</td>
+      <td class="mono ${m.net >= 0 ? 'pos' : 'neg'}">${money(m.net)}</td>
+      <td class="mono">${m.win_rate == null ? '—' : fmt(m.win_rate, 1) + '%'}</td>
+      <td class="mono">${m.sessions} 场</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">还没有触发任何行为标记</td></tr>';
+  if (!rows.length) { $('markNote').textContent = ''; return; }
+  const total = rows.reduce((a, m) => a + m.count, 0);
+  const worst = rows.filter(m => m.net < 0).sort((a, b) => a.net - b.net)[0];
+  $('markNote').textContent = `${total} 次标记`
+    + (worst ? ` · 最亏的是「${worst.label}」${money(worst.net)}` : '');
+}
+
+/* 逐笔进场理由：失焦/回车即保存，不打断看盘。
+ * 它是 AI 复盘唯一能看到「动机」的输入——只有价格和盈亏，
+ * 模型只能说「减少交易频率」这类正确但没用的话。
+ */
+async function saveTradeNote(el) {
+  const pid = el.dataset.notePid;
+  const note = (el.value || '').trim();
+  el.classList.remove('saved', 'failed');
+  try {
+    const r = await fetch('/api/trade_note', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position_id: pid, note, account: curLogin || undefined }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      el.value = j.note || '';
+      el.classList.add('saved');
+      setTimeout(() => el.classList.remove('saved'), 1200);
+      // 理由变了，上一份复盘就过期了（后端缓存键含理由签名）
+      const btn = $('btnAi');
+      if (btn) btn.textContent = '生成复盘';
+    } else {
+      el.classList.add('failed');
+    }
+  } catch (e) {
+    el.classList.add('failed');
+  }
 }
 
 /* ==================== 本场复盘 ====================
@@ -1439,7 +1522,7 @@ function sessionHtml(d, s) {
     return `<tr>
       <td class="mono">${ts2str(t.entry_time)}</td>
       <td class="${t.direction > 0 ? 'pos-long' : 'pos-short'}">${t.direction > 0 ? '多' : '空'}</td>
-      <td class="mono">${t.volume}</td>
+      <td class="mono"${t.partial ? ` title="部分平仓：已平 ${t.volume_closed} / 开仓 ${t.volume}"` : ''}>${t.partial ? `${t.volume_closed}/${t.volume}` : t.volume}</td>
       <td class="mono ${signClass(t.profit)}">${money(t.profit)}</td>
       <td class="mono">${t.r != null ? fmt(t.r, 2) + 'R' : '—'}</td>
       <td class="mono">${mins(t.hold_min)}</td>
@@ -1796,7 +1879,7 @@ function renderQuality(q) {
       <s>${d.pf != null ? '前序 ' + fmt(p.pf) + '（' + (d.pf > 0 ? '+' : '') + fmt(d.pf) + '）' : '无前序'}</s></div>
     <div class="qcell"><i>胜率</i>
       <b>${fmt(c.win_rate, 1)}%</b>
-      <s>95% CI [${c.win_ci[0]}%, ${c.win_ci[1]}%]</s></div>
+      <s>95% CI [${c.win_ci[0]}%, ${c.win_ci[1]}%]${c.flats ? ` · 含 ${c.flats} 平` : ''}</s></div>
     <div class="qcell"><i>盈亏比</i>
       <b>${c.rr != null ? fmt(c.rr) : '—'}</b>
       <s>均盈 ${fmt(c.avg_win)} / 均亏 ${fmt(c.avg_loss)}</s></div>
@@ -1805,7 +1888,7 @@ function renderQuality(q) {
       <s>约 ${fmt(c.dd_usd)} USD</s></div>
     <div class="qcell"><i>样本 / 天数</i>
       <b>${c.n}</b>
-      <s>${c.span_days} 天 · ${c.trades_per_day} 笔/天</s></div>
+      <s>${c.active_days} 个交易日 · ${c.trades_per_day} 笔/天</s></div>
   `;
 
   const row = (name, a, b, dv, fmtFn, suffix = '') => `
@@ -1887,7 +1970,7 @@ function syncAiButton() {
     btn.title = '这个账户还没有已平仓交易，没有可分析的东西';
     return;
   }
-  const has = !!(adviceState && adviceState.ok && adviceState.advice);
+  const has = !!(adviceState && adviceState.advice);
   btn.disabled = false;
   btn.textContent = has ? '重新生成' : '生成复盘';
   btn.title = has
@@ -1900,7 +1983,7 @@ function renderAdvice(box) {
   adviceState = box || null;
   syncAiButton();
 
-  if (!box || !box.ok || !box.advice) {
+  if (!box || !box.advice) {
     // 没确认过就绝不自己调 API：这里只放说明，按钮统一收在标题栏，避免两处重复
     if (box && box.need_confirm) {
       el.innerHTML = `
@@ -1917,7 +2000,8 @@ function renderAdvice(box) {
   const a = box.advice;
   const v = String(a.verdict || '');
   const vcls = /严重|亏损/.test(v) ? 'bad' : /打平/.test(v) ? 'warn' : 'good';
-  const badge = box.cached ? '已缓存' : '新生成';
+  // 补写了进场理由后，旧复盘是「过期」而不是「没有」——别把上一份结论藏起来
+  const badge = box.stale ? '已过期' : (box.cached ? '已缓存' : '新生成');
   const when = box.generated_at ? new Date(box.generated_at * 1000).toLocaleString('zh-CN') : '';
 
   const problems = (a.problems || []).map(p => `
@@ -1942,6 +2026,9 @@ function renderAdvice(box) {
     </div>`).join('');
 
   el.innerHTML = `
+    ${box.stale ? `<div class="note-box" style="border-color:rgba(240,180,41,.35)">
+      <b>这份复盘已过期。</b>你补写或修改了进场理由，旧结论没把这些理由算进去；
+      点「生成复盘」会按新输入重算。</div>` : ''}
     <div class="advice-head">
       <div class="hl">${a.headline || '—'}</div>
       <span class="verdict ${vcls}">${v || '—'}</span>
@@ -1961,7 +2048,7 @@ async function refreshAi() {
     return;
   }
 
-  const has = !!(adviceState && adviceState.ok && adviceState.advice);
+  const has = !!(adviceState && adviceState.advice);
   const ok = await confirmApiCall({
     title: has ? '确认重新生成 AI 复盘？' : '确认生成 AI 复盘？',
     desc: '将把当前账户统计发送给 DeepSeek API 并请求一份复盘报告。',

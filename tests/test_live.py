@@ -559,7 +559,9 @@ class TestTradeScore(unittest.TestCase):
         t = score_trade({"profit": 8.0, "close_reason": "tp", "entry_time": T0,
                          "exit_time": T0 + 600}, 10.0, 1000.0)
         self.assertIsNone(t["planned_rr"])
-        self.assertIn("无计划SL/TP记录", t["flags"])
+        # 对手动交易者「没挂单」是常态，措辞必须中性，不能像缺陷
+        self.assertTrue(any("无挂单 SL/TP" in f for f in t["flags"]))
+        self.assertTrue(any("不扣分" in f for f in t["flags"]))
 
     def test_score_within_bounds(self):
         for profit, reason in ((100, "tp"), (-100, "stop_out"), (0, "manual"), (-5, "sl")):
@@ -1193,3 +1195,275 @@ class TestHoldFlagUsesRealCost(unittest.TestCase):
         self.assertAlmostEqual(s["cost"]["spread_usd"], 5.76, places=2)
         self.assertAlmostEqual(s["cost"]["per_trade_usd"], 0.24, places=2)
         self.assertEqual(s["cost"]["symbols"], ["XAUUSDm"])
+
+
+class TestManualTraderScoring(unittest.TestCase):
+    """手动交易者的评分不能因为「手动平仓」被系统性压低。
+
+    旧口径：手动单纪律分赢 12 / 输 8（满分 30），账户纪律维度按手动占比定级
+    （≤20% 才 A）。手动交易者天然 100% 手动平仓 —— 等于所有这类账户统一判 F。
+    """
+
+    def _trades(self, n=20, reason="manual", profit=None):
+        rows = []
+        for i in range(n):
+            p = profit if profit is not None else (16.0 if i % 2 == 0 else -8.0)
+            exit_ts = T0 + i * 3600
+            rows.append({
+                "position_id": i, "symbol": "XAUUSDm", "direction": 1, "volume": 0.01,
+                "entry_time": exit_ts - 1800, "entry_price": 4000.0,
+                "exit_time": exit_ts, "exit_price": 4000.0,
+                "profit": p, "gross": p, "commission": 0.0, "swap": 0.0,
+                "comment": "", "close_reason": reason,
+            })
+        return rows
+
+    def test_manual_exit_is_neutral(self):
+        win = score_trade({"profit": 20.0, "close_reason": "manual", "entry_time": T0,
+                           "exit_time": T0 + 3600}, 10.0, 1000.0)
+        loss = score_trade({"profit": -20.0, "close_reason": "manual", "entry_time": T0,
+                            "exit_time": T0 + 3600}, 10.0, 1000.0)
+        # 纪律只看失控，不看盈亏方向：盈/亏都一样是中性 20 分
+        self.assertEqual(win["dims"]["discipline"], 20)
+        self.assertEqual(loss["dims"]["discipline"], 20)
+        # 但仍应该低于计划内止盈（30），高于穿仓（0）
+        self.assertLess(win["dims"]["discipline"], 30)
+
+    def test_all_manual_account_gets_a_discipline(self):
+        trades = self._trades()
+        s = compute(trades, {"balance": 1000}, 1000.0)
+        res = score_account(s, {"windows": []}, trades)
+        disc = next(d for d in res["dimensions"] if d["key"] == "discipline")
+        self.assertEqual(disc["grade"], "A")
+        self.assertIn("超风险 0 笔", disc["display"])
+        self.assertNotIn("手动", disc["display"])
+
+    def test_stop_out_forced_f(self):
+        trades = self._trades(n=20)
+        trades[0]["close_reason"] = "stop_out"
+        trades[0]["profit"] = -100.0
+        s = compute(trades, {"balance": 1000}, 1000.0)
+        res = score_account(s, {"windows": []}, trades)
+        disc = next(d for d in res["dimensions"] if d["key"] == "discipline")
+        self.assertEqual(disc["grade"], "F")
+        self.assertIn("穿仓 1 次", disc["display"])
+        self.assertTrue(any("穿仓" in f for f in res["red_flags"]))
+
+    def test_over_risk_counts_by_r_outlier(self):
+        # 平均亏损 15.2，-80 超过 2R → 算一笔失控（不看余额百分比）
+        trades = self._trades(n=20)
+        trades[1]["profit"] = -80.0
+        s = compute(trades, {"balance": 1000}, 1000.0)
+        res = score_account(s, {"windows": []}, trades)
+        disc = next(d for d in res["dimensions"] if d["key"] == "discipline")
+        self.assertIn("超风险 1 笔", disc["display"])
+        self.assertNotEqual(disc["grade"], "A")
+
+    def test_micro_account_not_dead_by_fixed_threshold(self):
+        # 12 USD 微型账户：每笔亏 1 USD 就占余额 8%，但相对自身平均亏损只是 1R，
+        # 不该被判成「每笔都超风险」。纪律维度只用 R 归一化。
+        trades = []
+        for i in range(20):
+            p = 1.2 if i % 2 == 0 else -1.0
+            ts = T0 + i * 3600
+            trades.append({
+                "position_id": i, "symbol": "XAUUSDm", "direction": 1, "volume": 0.01,
+                "entry_time": ts - 1800, "entry_price": 4000.0, "exit_time": ts,
+                "exit_price": 4000.0, "profit": p, "gross": p, "commission": 0.0,
+                "swap": 0.0, "comment": "", "close_reason": "manual",
+            })
+        s = compute(trades, {"balance": 12.0}, 12.0)
+        res = score_account(s, {"windows": []}, trades)
+        disc = next(d for d in res["dimensions"] if d["key"] == "discipline")
+        self.assertEqual(disc["display"], "超风险 0 笔")
+        self.assertEqual(disc["grade"], "A")
+
+
+class TestTradeNotes(unittest.TestCase):
+    """逐笔进场理由：AI 复盘唯一的动机输入，必须能存能读、能进 prompt。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        paths.set_root(self.tmp)
+
+    def tearDown(self):
+        paths.set_root(None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_roundtrip_and_delete(self):
+        paths.write_trade_note(101, "  数据公布前追进去的  ", login="999002")
+        data = paths.read_trade_notes("999002")
+        self.assertEqual(data["101"]["note"], "数据公布前追进去的")
+        self.assertTrue(data["101"]["updated_at"] > 0)
+        # 传空 = 删除，不留空壳记录
+        paths.write_trade_note(101, "   ", login="999002")
+        self.assertEqual(paths.read_trade_notes("999002"), {})
+
+    def test_prompt_includes_note(self):
+        trades = [{"position_id": 1, "symbol": "XAUUSDm", "direction": 1, "volume": 0.01,
+                   "entry_time": T0, "exit_time": T0 + 600, "profit": -5.0,
+                   "close_reason": "manual"}]
+        stats = {"account": {}, "count": 1}
+        text = build_prompt(stats, [], trades, notes={"1": {"note": "非农前追多", "updated_at": 1}})
+        self.assertIn("进场理由: 非农前追多", text)
+        self.assertIn("其中 1 笔写了进场理由", text)
+
+    def test_prompt_marks_missing_notes(self):
+        trades = [{"position_id": 2, "symbol": "XAUUSDm", "direction": 1, "volume": 0.01,
+                   "entry_time": T0, "exit_time": T0 + 600, "profit": -5.0,
+                   "close_reason": "manual"}]
+        text = build_prompt({"account": {}, "count": 1}, [], trades)
+        self.assertIn("其中 0 笔写了进场理由", text)
+        self.assertNotIn("进场理由:", text.split("最近")[-1] if "最近" in text else "")
+
+    def test_cache_key_changes_when_note_added(self):
+        trades = [{"position_id": 1, "symbol": "XAUUSDm", "profit": 1.0,
+                   "entry_time": T0, "exit_time": T0 + 60}]
+        k0 = advisor._cache_key({}, trades, {})
+        k1 = advisor._cache_key({}, trades, {"1": {"note": "a", "updated_at": 10}})
+        k2 = advisor._cache_key({}, trades, {"1": {"note": "b", "updated_at": 20}})
+        self.assertNotEqual(k0, k1)
+        self.assertNotEqual(k1, k2)   # 改了理由，旧复盘必须失效
+
+
+# ---------------------------------------------------------------- 记录与成本口径（审计修复）
+from live.cost import cost_summary
+
+
+class TestLedgerFixes(unittest.TestCase):
+    """审计发现的三处口径错误，逐条钉死。"""
+
+    def test_reason_recognises_so_with_colon(self):
+        # MT5 强平注释是 "so: 价格"，旧实现只匹配 "so " 会漏成 manual
+        self.assertEqual(_reason("so: 4000.00"), "stop_out")
+        self.assertEqual(_reason("[so 4000.00]"), "stop_out")
+        self.assertEqual(_reason("stop out"), "stop_out")
+        self.assertEqual(_reason("[tp 4000.0]"), "tp")
+        self.assertEqual(_reason("[sl 3900.0]"), "sl")
+        self.assertEqual(_reason(""), "manual")
+
+    def test_positive_swap_offsets_cost(self):
+        # 隔夜利息为正 = 收入，不能当成本累加
+        rows = [{"symbol": "XAUUSDm", "volume": 0.01, "profit": 5.0,
+                 "commission": 0.0, "swap": 0.35, "entry_price": 4000.0}]
+        c = cost_summary(rows)
+        self.assertAlmostEqual(c["spread_usd"], 0.24, places=2)
+        self.assertAlmostEqual(c["fee_usd"], -0.35, places=2)
+        self.assertAlmostEqual(c["total_usd"], -0.11, places=2)
+
+    def test_negative_commission_is_cost(self):
+        rows = [{"symbol": "XAUUSDm", "volume": 0.01, "profit": 1.0,
+                 "commission": -0.07, "swap": 0.0, "entry_price": 4000.0}]
+        c = cost_summary(rows)
+        self.assertAlmostEqual(c["fee_usd"], 0.07, places=2)
+        self.assertAlmostEqual(c["total_usd"], 0.31, places=2)
+
+    def test_partial_close_tracks_closed_volume(self):
+        deals = [
+            deal(1, 100, 0, 0, 0.02, 4000.0),
+            deal(2, 100, 1, 1, 0.01, 4010.0, profit=10.0, t=T0 + 60, comment="[tp 4010.0]"),
+        ]
+        t = build_trades(deals)[0]
+        self.assertEqual(t.volume, 0.02)          # 开仓总量
+        self.assertEqual(t.volume_closed, 0.01)   # 实际结算量
+        self.assertTrue(t.partial)
+        # 成本按 0.01 算：按 0.02 会重复计（剩余仓位平掉时再算一次）
+        c = cost_summary([{
+            "symbol": t.symbol, "volume": t.volume, "volume_closed": t.volume_closed,
+            "entry_price": t.entry_price, "profit": t.profit, "commission": 0.0, "swap": 0.0,
+        }])
+        self.assertAlmostEqual(c["spread_usd"], 0.24, places=2)
+
+    def test_full_close_is_not_partial(self):
+        deals = [
+            deal(1, 101, 0, 0, 0.02, 4000.0),
+            deal(2, 101, 1, 1, 0.01, 4010.0, profit=10.0, t=T0 + 60, comment="[tp 4010.0]"),
+            deal(3, 101, 1, 1, 0.01, 4020.0, profit=20.0, t=T0 + 120, comment="[tp 4020.0]"),
+        ]
+        t = build_trades(deals)[0]
+        self.assertFalse(t.partial)
+        self.assertAlmostEqual(t.volume_closed, 0.02)
+        self.assertAlmostEqual(t.profit, 30.0)
+
+
+class TestRiskDimUsesR(unittest.TestCase):
+    """逐笔 risk 维度必须按 R 判，不能按余额百分比——否则微型账户全判死。"""
+
+    def test_small_loss_on_micro_account_is_full_marks(self):
+        # 12 USD 账户亏 0.9 = 7.5% 余额，但只有 0.6R → 满分 20
+        t = score_trade({"profit": -0.9, "close_reason": "sl", "entry_time": T0,
+                         "exit_time": T0 + 600}, 1.48, 12.0)
+        self.assertEqual(t["dims"]["risk"], 20)
+        self.assertAlmostEqual(t["risk_pct"], 7.5, places=1)
+
+    def test_outlier_loss_scores_zero(self):
+        t = score_trade({"profit": -3.7, "close_reason": "sl", "entry_time": T0,
+                         "exit_time": T0 + 600}, 1.48, 12.0)
+        self.assertEqual(t["dims"]["risk"], 0)     # 2.5R
+        self.assertTrue(any("账户规模与最小手数不匹配" in f for f in t["flags"]))
+
+    def test_scores_are_monotonic_in_r(self):
+        # 1R 以内满分、1.5R 内 15、2R 内 8、超过 2R 归零
+        vals = []
+        for profit in (-1.0, -1.6, -2.6):
+            t = score_trade({"profit": profit, "close_reason": "sl", "entry_time": T0,
+                             "exit_time": T0 + 600}, 1.0, 100.0)
+            vals.append(t["dims"]["risk"])
+        self.assertEqual(vals, [20, 8, 0])
+
+
+class TestUnifiedMetrics(unittest.TestCase):
+    """统一口径：频率按活跃日、平局单列、risk_unit 不取整、未知品种不给风险数。"""
+
+    def _trades(self):
+        # 4 笔跨 2 个交易日（中间空一天），其中 1 笔平局
+        out = []
+        for i, (day, profit) in enumerate([(0, 10.0), (0, 0.0), (2, -5.93), (2, 3.0)]):
+            ts = T0 + day * DAY + 12 * 3600 + i * 60
+            out.append({
+                "position_id": i, "symbol": "XAUUSDm", "direction": 1, "volume": 0.01,
+                "entry_time": ts - 1800, "entry_price": 4000.0,
+                "exit_time": ts, "exit_price": 4000.0,
+                "profit": profit, "gross": profit, "commission": 0.0, "swap": 0.0,
+                "comment": "", "close_reason": "manual",
+            })
+        return out
+
+    def test_frequency_uses_active_days(self):
+        trades = self._trades()
+        s = compute(trades, {"balance": 100}, 100)
+        self.assertEqual(s["active_days"], 2)
+        self.assertAlmostEqual(s["trades_per_day"], 2.0)   # 4 笔 / 2 个交易日
+        q = quality_compute(trades, now=T0 + 5 * DAY)
+        w = next(x for x in q["windows"] if x["key"] == "20n")["current"]
+        self.assertEqual(w["active_days"], 2)
+        self.assertAlmostEqual(w["trades_per_day"], 2.0)
+
+    def test_flats_listed_but_stay_in_win_rate_denominator(self):
+        trades = self._trades()
+        s = compute(trades, {"balance": 100}, 100)
+        self.assertEqual(s["flats"], 1)
+        q = quality_compute(trades, now=T0 + 5 * DAY)
+        w = next(x for x in q["windows"] if x["key"] == "20n")["current"]
+        self.assertEqual(w["flats"], 1)
+        self.assertAlmostEqual(w["win_rate"], 50.0)   # 2 胜 / 4 笔，平局仍在分母
+
+    def test_risk_unit_preserved_across_modules(self):
+        trades = self._trades()
+        s = compute(trades, {"balance": 100}, 100)
+        q = quality_compute(trades, now=T0 + 5 * DAY)
+        self.assertAlmostEqual(s["risk_unit"], 5.93)   # 平均亏损，未取整
+        self.assertAlmostEqual(q["risk_unit"], 5.93)
+        self.assertAlmostEqual(s["risk_unit"], q["risk_unit"])
+
+    def test_unknown_symbol_returns_no_risk_number(self):
+        from live.sessions import enrich, symbol_spec
+
+        self.assertIsNone(symbol_spec("FOOm"))
+        rows = enrich([{
+            "position_id": 1, "symbol": "FOOm", "direction": 1, "volume": 0.01,
+            "entry_time": T0, "entry_price": 4000.0, "exit_time": T0 + 600,
+            "exit_price": 3990.0, "profit": -0.5, "close_reason": "sl",
+        }], plans={"1": {"sl": 3990.0, "tp": 4010.0}})
+        self.assertIsNone(rows[0]["sl_points"])
+        self.assertIsNone(rows[0]["risk_pct"])

@@ -397,3 +397,49 @@ class TestSessionAdviceGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMarkSummary(unittest.TestCase):
+    """行为标记跨场累计：次数、涉及净盈亏、胜率。"""
+
+    def _sess(self, sid, flags, trades, net):
+        return {"id": sid, "flags": flags, "trades": trades, "stats": {"net": net}}
+
+    def test_counts_and_nets(self):
+        s1 = self._sess(
+            "a",
+            [{"code": "revenge", "pid": "1"}, {"code": "itchy", "pid": "2"}],
+            [trade(1, T0, T0 + 60, -10.0), trade(2, T0 + 120, T0 + 180, 5.0)],
+            -5.0,
+        )
+        s2 = self._sess("b", [{"code": "revenge", "pid": "3"}],
+                        [trade(3, T0 + 86400, T0 + 87000, -7.0)], -7.0)
+        rows = sessions.mark_summary([s1, s2])
+        rev = next(r for r in rows if r["code"] == "revenge")
+        self.assertEqual(rev["count"], 2)
+        self.assertEqual(rev["sessions"], 2)
+        self.assertEqual(rev["net"], -17.0)
+        self.assertEqual(rev["win_rate"], 0.0)
+        self.assertEqual(rev["label"], "报复单")
+        self.assertEqual(rev["unit"], "笔")
+
+    def test_session_level_mark_counts_sessions(self):
+        s = self._sess("a", [{"code": "one_bad_trade", "pid": None}], [], -30.0)
+        row = next(r for r in sessions.mark_summary([s]) if r["code"] == "one_bad_trade")
+        self.assertEqual(row["count"], 1)
+        self.assertEqual(row["unit"], "场")
+        self.assertEqual(row["net"], -30.0)
+        self.assertEqual(row["label"], "一笔定输赢")
+
+    def test_win_rate_and_sorting(self):
+        s1 = self._sess("a", [{"code": "itchy", "pid": "1"}, {"code": "itchy", "pid": "2"}],
+                        [trade(1, T0, T0 + 60, 10.0), trade(2, T0 + 120, T0 + 180, -4.0)], 6.0)
+        s2 = self._sess("b", [{"code": "revenge", "pid": "3"}],
+                        [trade(3, T0 + 86400, T0 + 87000, -2.0)], -2.0)
+        rows = sessions.mark_summary([s1, s2])
+        # 次数多的排前面
+        self.assertEqual(rows[0]["code"], "itchy")
+        self.assertEqual(rows[0]["win_rate"], 50.0)
+
+    def test_empty(self):
+        self.assertEqual(sessions.mark_summary([]), [])

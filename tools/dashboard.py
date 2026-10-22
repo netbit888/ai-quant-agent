@@ -105,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
             force = "1" in (qs.get("force") or [])
             want = (qs.get("account") or [""])[0].strip()
             try:
+                from live import paths
                 from live.advisor import advise, api_call_summary, load_session_cache
                 from live.journal import collect, collect_offline
                 from live.stats import compute, risk_flags
@@ -131,13 +132,18 @@ class Handler(BaseHTTPRequestHandler):
                 stats = compute(info["trades"], info["account"], info["deposits"], info.get("flows"))
                 flags = risk_flags(stats)
                 login = info.get("login") or want or None
+                # 逐笔进场理由：AI 复盘的输入之一，也随结果一起回给面板
+                trade_notes = paths.read_trade_notes(login)
                 advice = advise(stats, flags, info["trades"], allow_call=False,
-                                scoring=info.get("scoring"), login=login)
+                                scoring=info.get("scoring"), login=login, notes=trade_notes)
 
                 # 场次复盘：只放最近 30 场，账本长期累积后不至于把响应撑爆
-                from live import paths, rules
+                from live import rules
+                from live.sessions import mark_summary
 
                 sessions = (info.get("sessions") or [])[:30]
+                # 行为标记累计要用**全部**场次（截断前），否则累计数会随窗口漂移
+                marks = mark_summary(info.get("sessions") or [])
                 note_map = paths.read_notes(login)
                 rule = rules.load(login).get("rule")
                 # 已生成过的场次 AI 一起带上，避免每次刷新都显示「未生成」
@@ -165,6 +171,8 @@ class Handler(BaseHTTPRequestHandler):
                     "quality": info.get("quality") or {},
                     "scoring": info.get("scoring") or {},
                     "sessions": sessions,
+                    "mark_summary": marks,
+                    "trade_notes": {k: (v or {}).get("note", "") for k, v in trade_notes.items()},
                     "sessions_error": info.get("sessions_error"),
                     "session_notes": note_map,
                     "session_advice": session_advice,
@@ -284,6 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         routes = {
             "/api/session_note": self._post_session_note,
             "/api/session_advice": self._post_session_advice,
+            "/api/trade_note": self._post_trade_note,
             "/api/accounts/delete": self._post_account_delete,
             "/api/rule": self._post_rule,
             "/api/advice": self._post_advice,
@@ -304,6 +313,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝调用付费 API"})
             return
         try:
+            from live import paths
             from live.advisor import advise, api_call_summary
             from live.journal import collect
             from live.stats import compute, risk_flags
@@ -318,6 +328,7 @@ class Handler(BaseHTTPRequestHandler):
                     stats, flags, info["trades"],
                     force=bool(body.get("force")), allow_call=True,
                     scoring=info.get("scoring"), login=info.get("login"),
+                    notes=paths.read_trade_notes(info.get("login")),
                 )
                 payload = {"ok": result.get("ok", False), "advice": result, "api_calls": api_call_summary()}
                 if not payload["ok"]:
@@ -340,6 +351,27 @@ class Handler(BaseHTTPRequestHandler):
                 login=body.get("account") or None,
             )
             self._json(200, {"ok": True, "session_notes": notes})
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_trade_note(self, body: dict) -> None:
+        """逐笔进场理由：为什么开这一单。不花钱，所以不需要 confirm。
+
+        这是 AI 复盘唯一能看到「动机」的输入——只看价格和盈亏，
+        模型只能给出「减少交易频率」这类正确但没用的话。
+        """
+        from live import paths
+
+        pid = body.get("position_id")
+        if pid in (None, ""):
+            self._json(400, {"ok": False, "error": "缺少 position_id"})
+            return
+        try:
+            data = paths.write_trade_note(
+                pid, body.get("note") or "", login=body.get("account") or None
+            )
+            row = data.get(str(pid)) or {}
+            self._json(200, {"ok": True, "position_id": str(pid), "note": row.get("note", "")})
         except Exception as exc:  # noqa: BLE001
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
@@ -369,6 +401,8 @@ class Handler(BaseHTTPRequestHandler):
             prev = next((s for s in sessions if s.get("index") == sess["index"] - 1), None)
             login = info.get("login")
             rule = rules.load(login).get("rule")
+            # 逐笔进场理由随场次一起喂给模型（只读，不改原对象）
+            sess = dict(sess, trade_notes=paths.read_trade_notes(login))
             res = advise_session(
                 sess, prev_session=prev,
                 note=(paths.read_notes(login) or {}).get(sid),

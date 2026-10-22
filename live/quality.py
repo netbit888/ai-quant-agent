@@ -181,6 +181,8 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
             "dd_usd": 0.0,
             "hold_median_min": None,
             "trades_per_day": 0.0,
+            "active_days": 0,
+            "flats": 0,
             "span_days": 0.0,
             "manual_pct": 0.0,
             "sl_pct": 0.0,
@@ -219,6 +221,9 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
 
     holds = sorted((t["exit_time"] - t["entry_time"]) / 60 for t in rows)
     span_days = max((rows[-1]["exit_time"] - rows[0]["entry_time"]) / 86400, 1 / 24)
+    # 频率分母用「有交易的天」，不是日历跨度：隔几天打一次的人不该被算成低频
+    active_days = len({_day(t["exit_time"]) for t in rows})
+    flats = sum(1 for t in rows if t["profit"] == 0)
 
     n_manual = sum(1 for t in rows if (t.get("close_reason") or "manual") == "manual")
     n_sl = sum(1 for t in rows if t.get("close_reason") == "sl")
@@ -239,7 +244,9 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
         "dd_r": round(dd_r, 2),
         "dd_usd": round(dd_usd, 2),
         "hold_median_min": round(statistics.median(holds), 1),
-        "trades_per_day": round(n / span_days, 2),
+        "trades_per_day": round(n / max(active_days, 1), 2),
+        "active_days": active_days,
+        "flats": flats,
         "span_days": round(span_days, 1),
         "manual_pct": round(n_manual / n * 100, 1),
         "sl_pct": round(n_sl / n * 100, 1),
@@ -336,7 +343,8 @@ def compute(trades: list[dict], now: int | None = None) -> dict:
     return {
         "empty": False,
         "min_sample": MIN_SAMPLE,
-        "risk_unit": round(unit, 2),
+        # 不取整：下游按 R 计算盈亏/评分，四舍五入到 2 位会让同一笔的 R 有偏差
+        "risk_unit": round(unit, 4),
         "total": len(closed),
         "windows": windows,
         "rolling": rolling_expectancy(closed, 20),

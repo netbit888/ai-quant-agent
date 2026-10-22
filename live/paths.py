@@ -197,6 +197,33 @@ def write_note(session_id: str, note: str = "", tags: list[str] | None = None,
     return data
 
 
+# ------------------------------------------------------------- 逐笔进场理由
+#
+# 场次备注回答「这一场在干什么」，逐笔理由回答「为什么开这一单」。
+# 后者是 AI 复盘的输入：没有它，模型只能从盈亏反推，说不出
+# 「你这 5 笔都是在数据公布前追进去的」这类真正有用的模式。
+
+
+def read_trade_notes(login: int | str | None = None) -> dict:
+    """逐笔进场理由：{position_id: {note, updated_at}}。"""
+    data = read_json(resolve_login(login), "trade_notes.json", {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_trade_note(position_id: int | str, note: str = "",
+                     login: int | str | None = None) -> dict:
+    """写一笔的进场理由。传空字符串 = 删除。"""
+    key = resolve_login(login)
+    data = read_trade_notes(key)
+    text = (note or "").strip()[:300]
+    if text:
+        data[str(position_id)] = {"note": text, "updated_at": int(time.time())}
+    else:
+        data.pop(str(position_id), None)
+    write_json(key, "trade_notes.json", data)
+    return data
+
+
 # ------------------------------------------------------------- 删除账户
 
 

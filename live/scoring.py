@@ -82,8 +82,9 @@ def score_trade(
 
     维度：
       result      结果：按 R 分档。这是唯一和运气直接相关的维度，所以权重不是最高。
-      discipline  纪律：按离场方式。计划内止盈 > 按计划止损 > 手动 > 穿仓强平。
-      risk        风险：亏损占当时余额的比例。盈利单没有超风险证据，给满分。
+      discipline  纪律：按离场方式。计划内止盈 > 按计划止损 > 手动 = 中性 >
+                  穿仓强平。手动平仓不扣分——手动交易者市价进出是常态。
+      risk        风险：亏损幅度按 R 分档（>2R 才算失控）。盈利单没有超风险证据，给满分。
       duration    时长：过短的持仓在黄金点差上成本占比过高。
     """
     profit = float(t.get("profit") or 0.0)
@@ -109,22 +110,33 @@ def score_trade(
         discipline = 15
     elif reason == "stop_out":
         discipline = 0
-    else:  # manual
-        discipline = 12 if profit > 0 else 8
+    else:
+        # 手动平仓本身不扣分。用户是手动交易者，市价进出就是常态——
+        # 以前赢 12 输 8（满分 30），等于给所有手动单预扣一半分。
+        # 真正该扣的是失控证据：穿仓（0 分）和单笔风险超限（risk 维度）。
+        discipline = 20
 
     flags: list[str] = []
     risk_pct = None
     if profit < 0 and balance_before and balance_before > 0:
         risk_pct = abs(profit) / balance_before * 100
-        if risk_pct <= 1:
+
+    # 亏损幅度按 R 分档（与账户纪律维度同口径）。
+    # 不能用「余额 5%」：12 USD 的微型账户做 0.01 手黄金，每笔亏损必然 >8%，
+    # 按余额百分比定档会把这类账户的每一笔都判 0 分——那是账户规模问题，
+    # 不是单笔失控。真正的失控是「这一笔亏得远超你平时的单笔亏损」。
+    if profit < 0:
+        r_loss = abs(r)
+        if r_loss <= 1.0:
             risk = 20
-        elif risk_pct <= 2:
+        elif r_loss <= 1.5:
             risk = 15
-        elif risk_pct <= 5:
+        elif r_loss <= 2.0:
             risk = 8
         else:
             risk = 0
-            flags.append("单笔亏损超过当时余额 5%")
+        if risk_pct is not None and risk_pct > 10:
+            flags.append(f"单笔亏损占余额 {risk_pct:.1f}%（账户规模与最小手数不匹配）")
     else:
         risk = 20
 
@@ -154,7 +166,8 @@ def score_trade(
 
     planned_rr = _plan_rr(plan)
     if planned_rr is None:
-        flags.append("无计划SL/TP记录")
+        # 说得中性一点：这对手动交易者是常态，不是缺陷。
+        flags.append("手动单：无挂单 SL/TP（常态，不扣分）")
     elif reason == "manual":
         flags.append(f"计划盈亏比 {planned_rr}，手动离场未按计划")
 
@@ -251,6 +264,10 @@ def score_account(
 
     red: list[str] = []
 
+    # 逐笔评分先算出来：纪律维度要用它里面的 risk_pct（超风险笔数）
+    per_trade = score_trades(trades, {**stats, "risk_unit": stats.get("risk_unit")},
+                             limit=100, plans=plans)
+
     # ---- 盈亏平衡边际（核心维度，不需要外部基准）----
     need = breakeven_win_rate(rr)
     margin = (win_rate - need) if need is not None else None
@@ -321,23 +338,32 @@ def score_account(
         "note": f"峰值余额 {stats.get('peak_balance')} → 谷值 {stats.get('trough_balance')}",
     })
 
-    manual = 0.0
-    for row in stats.get("by_reason") or []:
-        if row["key"] == "手动平仓" and n:
-            manual = row["trades"] / n * 100
+    # ---- 纪律：只看有没有失控，不看手动平仓占比 ----
+    # 手动交易者本来 100% 手动平仓，拿占比定级等于给这类账户统一判 F。
+    # 「失控」用账户自身的平均亏损归一化（>2R），不用「余额 5%」——
+    # 12 USD 的微型账户每笔都亏 20%+，固定百分比会把所有人判死，
+    # 这正是本文件开头说的「用 R 归一化，不受规模影响」。
     stop_outs = sum(1 for t in trades if (t.get("close_reason") or "") == "stop_out")
-    disc_grade = _grade_low(manual, [(20, "A"), (35, "B"), (50, "C"), (70, "D")])
-    if stop_outs > 0 and disc_grade in ("A", "B"):
-        disc_grade = "C"
-        red.append(f"出现 {stop_outs} 次穿仓强平 — 纪律评级上限压到 C")
+    risk_unit = float(stats.get("risk_unit") or 0.0)
+    over_risk = 0
+    if risk_unit > 0:
+        over_risk = sum(
+            1 for t in trades
+            if float(t.get("profit") or 0.0) < 0 and abs(float(t.get("profit") or 0.0)) > 2 * risk_unit
+        )
+    over_risk_pct = round(over_risk / n * 100, 1) if n else 0.0
+    disc_grade = _grade_low(over_risk_pct, [(0, "A"), (5, "B"), (15, "C"), (30, "D")])
+    if stop_outs > 0:
+        disc_grade = "F"
+        red.append(f"出现 {stop_outs} 次穿仓强平 — 仓位与账户规模不匹配")
     dims.append({
         "key": "discipline",
         "label": "纪律",
-        "value": manual,
-        "display": f"手动 {manual:.0f}%",
-        "target": "≤ 35%",
+        "value": over_risk_pct,
+        "display": f"超风险 {over_risk} 笔" + (f" · 穿仓 {stop_outs} 次" if stop_outs else ""),
+        "target": "0 次穿仓",
         "grade": disc_grade,
-        "note": "手动平仓占比越高，说明计划越没被执行",
+        "note": "只看失控证据：穿仓强平、单笔亏损超过你平均亏损的 2 倍。手动平仓占比不计入——手动交易者本来就是手动平仓。",
     })
 
     sample_grade = _grade_high(n, [(100, "A"), (50, "B"), (30, "C"), (20, "D")])
@@ -362,8 +388,6 @@ def score_account(
     scored = [LETTER_SCORE[d["grade"]] for d in dims if d["key"] != "sample"]
     score = min(scored) if scored else None
 
-    per_trade = score_trades(trades, {**stats, "risk_unit": stats.get("risk_unit")},
-                             limit=100, plans=plans)
     avg_trade = round(statistics.mean([x["score"] for x in per_trade]), 1) if per_trade else None
 
     planned = [x["planned_rr"] for x in per_trade if x.get("planned_rr")]

@@ -331,6 +331,10 @@ class Trade:
     swap: float = 0.0
     comment: str = ""
     close_reason: str = "open"
+    # 已平掉的手数。部分平仓时 volume 仍是开仓总量、profit 只含已平部分，
+    # 用这个字段区分「这一笔实际结算了多少」，成本也按它算，否则会重复计点差。
+    volume_closed: float = 0.0
+    partial: bool = False  # True = 还有剩余手数没平（这条记录只是已实现部分）
 
     @property
     def is_closed(self) -> bool:
@@ -487,6 +491,10 @@ def build_trades(deals: list[dict]) -> list[Trade]:
 
         if outs:
             out_vol = sum(x["volume"] for x in outs) or 1e-9
+            t.volume_closed = round(out_vol, 4)
+            # 只平了一部分：这条记录代表「已实现的那部分」，
+            # 剩余手数还在持仓里，不能当成整笔已平仓来重复计成本。
+            t.partial = out_vol + 1e-6 < vol
             t.exit_time = max(x["time"] for x in outs)
             t.exit_price = round(sum(x["price"] * x["volume"] for x in outs) / out_vol, 6)
             t.comment = outs[-1]["comment"]
@@ -505,7 +513,9 @@ def _reason(comment: str) -> str:
         return "tp"
     if c.startswith("[sl") or "sl " in c[:6]:
         return "sl"
-    if c.startswith("[so") or "so " in c[:6]:
+    # MT5 的强平注释是 "so: <价格>"（带冒号），只匹配 "so " 会漏掉，
+    # 穿仓就被记成手动平仓 —— 纪律维度和穿仓红旗全靠这个字段。
+    if c.startswith("[so") or c.startswith("so:") or "so " in c[:6] or "stop out" in c:
         return "stop_out"
     if "close by" in c:
         return "close_by"
@@ -525,7 +535,7 @@ def _write_daily(trades: list[Trade], deposits: float, login: int | str | None =
         row["trades"] += 1
         row["wins"] += 1 if t.profit > 0 else 0
         row["profit"] = round(row["profit"] + t.profit, 2)
-        row["volume"] = round(row["volume"] + t.volume, 4)
+        row["volume"] = round(row["volume"] + (t.volume_closed or t.volume), 4)
 
     payload = {
         "updated_at": int(time.time()),

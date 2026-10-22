@@ -42,28 +42,32 @@ REVENGE_GAP = 5 * 60
 # 「手痒」：持仓不到 1 分钟
 ITCHY_SECONDS = 60
 
-_SPEC_CACHE: dict[str, dict] = {}
+_SPEC_CACHE: dict[str, dict | None] = {}
 
 
 # ------------------------------------------------------------------ 品种规格
 
 
-def symbol_spec(symbol: str) -> dict:
+def symbol_spec(symbol: str) -> dict | None:
     """拿到 point 与合约大小，用来把价格距离换算成 money。
 
-    优先用 `aqa.SYMBOLS`（唯一权威来源），拿不到再退回画像里的 point。
-    测试环境没有 aqa 也不会炸。
+    权威来源是 `backtest/symbols.py`（回测与实盘共用一份）。
+    不在表里的品种返回 None：宁可这一笔不给风险百分比，也不能拿黄金的
+    规格去猜——猜出来的数会静默错掉，而且看起来跟真的一样。
     """
     if symbol in _SPEC_CACHE:
         return _SPEC_CACHE[symbol]
-    spec = {"point": 0.001, "contract": 100.0}
+    spec: dict | None = None
     try:
-        from aqa import SYMBOLS
+        from backtest.symbols import SYMBOLS
 
         s = SYMBOLS.get(symbol)
         if s:
             spec = {"point": float(s["point"]), "contract": float(s["contract"])}
     except Exception:  # noqa: BLE001
+        pass
+    if spec is None:
+        # 退回画像里的 point（只在品种与画像一致时成立）
         try:
             from live.profile import load_profile
 
@@ -129,7 +133,8 @@ def enrich(trades: list[dict], *, flows: list[dict] | None = None, deposits: flo
         row = dict(t)
         pid = str(t.get("position_id"))
         entry = float(t.get("entry_price") or 0.0)
-        volume = float(t.get("volume") or 0.0)
+        # 部分平仓只结算了 volume_closed，风险金额按已平部分算
+        volume = float(t.get("volume_closed") or t.get("volume") or 0.0)
         spec = symbol_spec(str(t.get("symbol") or ""))
 
         hold = None
@@ -141,9 +146,9 @@ def enrich(trades: list[dict], *, flows: list[dict] | None = None, deposits: flo
         plan = plans.get(pid) or {}
         sl_price = float(plan.get("sl") or 0.0)
         sl_points = None
-        if sl_price > 0 and entry > 0:
+        if spec and sl_price > 0 and entry > 0:
             sl_points = abs(entry - sl_price) / spec["point"]
-        elif t.get("close_reason") == "sl" and t.get("exit_price") and entry > 0:
+        elif spec and t.get("close_reason") == "sl" and t.get("exit_price") and entry > 0:
             # 没有快照时用止损成交价反推：价格差等于止损距离（滑点让结果偏保守）
             sl_points = abs(float(t["exit_price"]) - entry) / spec["point"]
         row["sl_price"] = round(sl_price, 6) if sl_price > 0 else None
@@ -153,7 +158,7 @@ def enrich(trades: list[dict], *, flows: list[dict] | None = None, deposits: flo
         before = bal.get(pid)
         risk_amount = None
         risk_pct = None
-        if sl_points and volume > 0:
+        if spec and sl_points and volume > 0:
             risk_amount = sl_points * spec["point"] * volume * spec["contract"]
             if before and before > 0:
                 risk_pct = round(risk_amount / before * 100, 1)
@@ -300,6 +305,65 @@ def _flags(items: list[dict], st: dict) -> list[dict]:
                                    f"{worst / st['avg_loss']:.1f} 倍",
                           "detail": "这一笔的结果基本决定了本场，其余笔数接近打平。"})
     return flags
+
+
+# 行为标记的中文名与一句话解释，面板和 CLI 共用
+MARK_LABELS: dict[str, tuple[str, str]] = {
+    "revenge": ("报复单", "上一笔亏损后 5 分钟内再入场"),
+    "itchy": ("手痒", "持仓不到 1 分钟"),
+    "wide_stop": ("止损过宽", "止损宽过本场中位数 2 倍"),
+    "oversize": ("超仓", "单笔风险超本场中位数 2 倍"),
+    "one_bad_trade": ("一笔定输赢", "单笔亏损 ≥ 本场平均亏损 2 倍"),
+}
+
+
+def mark_summary(sessions: list[dict]) -> list[dict]:
+    """跨场累计行为标记：出现次数、涉及净盈亏、胜率。
+
+    单场看一次标记没有意义（「今天手痒一次」）。累计起来才能回答
+    「这个习惯一共让我亏了多少」——对手动交易者，这是唯一能直接改的东西，
+    比任何策略参数都值钱。
+
+    口径：
+    - 笔级标记（pid 有值）：次数 = 笔数，净盈亏/胜率取该笔交易
+    - 场级标记（pid 为 None，如一笔定输赢）：次数 = 场数，净盈亏取本场
+    """
+    agg: dict[str, dict] = {}
+    for s in sessions:
+        trades = {str(t.get("position_id")): t for t in (s.get("trades") or [])}
+        st = s.get("stats") or {}
+        for f in s.get("flags") or []:
+            code = f.get("code") or "?"
+            row = agg.setdefault(code, {"sessions": set(), "count": 0, "net": 0.0, "wins": 0})
+            row["sessions"].add(s.get("id"))
+            if f.get("pid"):
+                t = trades.get(str(f["pid"]))
+                row["count"] += 1
+                if t is not None:
+                    p = float(t.get("profit") or 0.0)
+                    row["net"] += p
+                    row["wins"] += 1 if p > 0 else 0
+            else:
+                row["count"] += 1
+                p = float(st.get("net") or 0.0)
+                row["net"] += p
+                row["wins"] += 1 if p > 0 else 0
+
+    out: list[dict] = []
+    for code, r in agg.items():
+        label, hint = MARK_LABELS.get(code, (code, ""))
+        out.append({
+            "code": code,
+            "label": label,
+            "hint": hint,
+            "count": r["count"],
+            "unit": "场" if code == "one_bad_trade" else "笔",
+            "sessions": len(r["sessions"]),
+            "net": round(r["net"], 2),
+            "win_rate": round(r["wins"] / r["count"] * 100, 1) if r["count"] else None,
+        })
+    # 次数多的在前；次数相同按亏得多在前
+    return sorted(out, key=lambda x: (x["count"], -x["net"]), reverse=True)
 
 
 def metrics(items: list[dict], st: dict | None = None) -> dict:

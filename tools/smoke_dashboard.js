@@ -111,8 +111,23 @@ try {
   console.log(`  样本护栏: ${warn.includes('warn-strip') ? '已触发（该窗口样本不足或期望为负）' : '未触发'}`);
 
   console.log(`\n风险标记 ${(made.flagBox.innerHTML.match(/class="flag /g) || []).length} 条`);
+  const markRows = (made.rowsMark.innerHTML.match(/<tr>/g) || []).length;
+  console.log(`行为标记累计 ${markRows} 种 ${(liveJson.mark_summary || []).length === markRows ? '✓' : '✗'}`);
+  if ((liveJson.mark_summary || []).length !== markRows) failed = true;
+  if (made.rowsMark.innerHTML.includes('undefined') || made.rowsMark.innerHTML.includes('NaN')) {
+    console.log('  ✗ 行为标记表出现 undefined / NaN');
+    failed = true;
+  }
   console.log(`AI 建议 ${(made.adviceBox.innerHTML.match(/class="n"/g) || []).length} 条`);
   console.log(`最近交易 ${(made.rowsTrade.innerHTML.match(/<tr>/g) || []).length} 行`);
+  const noteInputs = (made.rowsTrade.innerHTML.match(/class="note-in"/g) || []).length;
+  const noteCount = Object.keys(liveJson.trade_notes || {}).length;
+  console.log(`  进场理由输入框 ${noteInputs} 个（已填 ${noteCount} 条）${noteInputs ? '✓' : '✗'}`);
+  if (!noteInputs) failed = true;
+  if (/value="undefined"|value="null"/.test(made.rowsTrade.innerHTML)) {
+    console.log('  ✗ 进场理由输入框出现 undefined/null');
+    failed = true;
+  }
   console.log(`余额图: ${made.chartEquity.children.length ? '已绘制' : '空'}  日盈亏图: ${made.chartDaily.children.length ? '已绘制' : '空'}`);
   const sc = liveJson.scoring || {};
   console.log(`\n交易评分：等级 ${made.scoreGrade.textContent} (class=${made.scoreGrade.className})`);
@@ -126,7 +141,11 @@ try {
   if (!made.scoreGrade.textContent || made.scoreGrade.textContent === '—') failed = true;
   console.log(`API 计费表: ${made.apiMeter.textContent || '(空)'}`);
   const adviceHtml = made.adviceBox.innerHTML;
-  console.log(`AI 面板模式: ${adviceHtml.includes('生成 AI 复盘') ? '等待确认（不会自动调 API）' : adviceHtml.includes('advice-head') ? '显示缓存结果' : '空'}`);
+  const adviceMode = adviceHtml.includes('已过期') ? '旧复盘已过期（等重新生成）'
+    : adviceHtml.includes('尚未生成复盘') ? '等待确认（不会自动调 API）'
+    : adviceHtml.includes('advice-head') ? '显示缓存结果' : '空';
+  console.log(`AI 面板模式: ${adviceMode}`);
+  if (adviceMode === '空' && liveJson.ok) { console.log('  ✗ AI 面板空白'); failed = true; }
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);
