@@ -6,19 +6,35 @@
  * /api/live 漏传 trades 导致「最近成交」整块空白的问题。
  *
  * 用法：先起面板，然后
- *   curl -s --noproxy '*' http://127.0.0.1:8765/api/live -o live_probe.json
- *   node tools/smoke_dashboard.js
+ *   curl -s --noproxy '*' "http://127.0.0.1:8765/api/live" -o live_probe.json
+ *   node tools/smoke_dashboard.js            # 也可指定探针：node tools/smoke_dashboard.js other.json
+ *
+ * 断言原则：**期望值一律从探针现算，不写死账户数字。**
+ * 以前这里写死了旧账户的 11.60 USD / -119.03，换个账户就整片报错——
+ * 那种失败跟渲染对不对无关，只会让人误判。
  */
 const fs = require('fs');
 const src = fs.readFileSync('tools/dashboard_template.html', 'utf8');
+const probePath = process.argv[2] || 'live_probe.json';
+
+let liveJson;
+try {
+  liveJson = JSON.parse(fs.readFileSync(probePath, 'utf8'));
+} catch (e) {
+  console.log(`读不到探针 ${probePath}：${e.message}`);
+  console.log('先起面板，再抓一份：curl -s --noproxy \'*\' "http://127.0.0.1:8765/api/live" -o live_probe.json');
+  process.exit(2);
+}
+
 const script = src.match(/<script>([\s\S]*?)<\/script>/)[1];
-const liveJson = JSON.parse(fs.readFileSync('live_probe.json', 'utf8'));
 
 const made = {};
 function makeEl(id) {
   const el = {
     id, textContent: '', innerHTML: '', className: '', disabled: false, title: '',
     dataset: {}, children: [],
+    // style 必须有：renderLive 会写 syncEl.style.display，缺这个字段整块渲染直接抛错
+    style: {},
     classList: {
       _s: new Set(['hidden']),
       add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
@@ -46,17 +62,21 @@ global.URLSearchParams = class { constructor() {} set() {} toString() { return '
 let failed = false;
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, reasonCn, mins, money, ts2str};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, reasonCn, mins, money, fmt, ts2str};');
   const api = fn();
   api.renderLive(liveJson);
-  console.log('renderLive 执行成功');
+  console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
 
+  const a = liveJson.account || {};
+  const s = liveJson.stats || {};
+  const mode = a.trade_mode === 'real' ? '真实账户'
+    : (a.trade_mode === 'demo' ? '模拟账户' : (a.trade_mode || '—'));
   const checks = [
-    ['账户', made.acctLogin.textContent, '#232307606'],
-    ['模式', made.acctMode.textContent, '真实账户'],
-    ['余额', made.acctBalance.textContent, '11.60 USD'],
-    ['累计净利', made.lvNet.textContent, '-119.03'],
-    ['回撤', made.lvDd.textContent, '100.0%'],
+    ['账户', made.acctLogin.textContent, a.login ? '#' + a.login : '—'],
+    ['模式', made.acctMode.textContent, mode],
+    ['余额', made.acctBalance.textContent, `${api.fmt(a.balance)} ${a.currency || ''}`],
+    ['累计净利', made.lvNet.textContent, api.money(s.net)],
+    ['回撤', made.lvDd.textContent, s.max_dd_pct != null ? api.fmt(s.max_dd_pct, 1) + '%' : '—'],
   ];
   for (const [name, val, want] of checks) {
     const ok = want ? String(val).includes(want) : true;
@@ -73,10 +93,19 @@ try {
   const kpiCount = (made.qualKpis.innerHTML.match(/class="qcell"/g) || []).length;
   console.log(`  指标卡 ${kpiCount} 个 ${kpiCount === 6 ? '✓' : '✗'}`);
   if (kpiCount !== 6) failed = true;
-  const cmpRows = (made.qualCmp.innerHTML.match(/<tr>/g) || []).length;
-  const procRows = (made.qualProc.innerHTML.match(/<tr>/g) || []).length;
-  console.log(`  对比表 ${cmpRows} 行，过程指标 ${procRows} 行`);
-  if (procRows !== 5) failed = true;
+
+  // 过程指标：行数固定 5；说明列必须来自数据，不许是写死文案
+  const proc = [...made.qualProc.innerHTML.matchAll(
+    /<tr><td>(.*?)<\/td><td class="mono">(.*?)<\/td><td class="mini">(.*?)<\/td><\/tr>/g)];
+  console.log(`  过程指标 ${proc.length} 行 ${proc.length === 5 ? '✓' : '✗'}`);
+  if (proc.length !== 5) failed = true;
+  for (const [, name, val, note] of proc) console.log(`    ${name} ${val} | ${note}`);
+  const c = ((q.windows || [])[0] || {}).current || {};
+  if (c.low_sample && proc.some(([, , , note]) => !note.includes('样本不足'))) {
+    console.log('  ✗ 窗口样本不足，但说明列仍在给结论');
+    failed = true;
+  }
+
   console.log(`  滚动图: ${made.chartRolling.children.length ? '已绘制' : '空'}`);
   const warn = made.qualWarn.innerHTML;
   console.log(`  样本护栏: ${warn.includes('warn-strip') ? '已触发（该窗口样本不足或期望为负）' : '未触发'}`);

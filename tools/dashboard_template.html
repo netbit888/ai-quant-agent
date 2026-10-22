@@ -1824,12 +1824,35 @@ function renderQuality(q) {
   ].join('') : '<tr><td colspan="4" class="empty">该窗口之前没有等长样本可对比</td></tr>';
 
   const proc = (name, val, note) => `<tr><td>${name}</td><td class="mono">${val}</td><td class="mini">${note}</td></tr>`;
+  // 过程指标：说明列只讲这个窗口里真实发生过的事。
+  // 样本不足（n < min_sample）时整列退化为「样本不足」——n=9 时止损率 44.4%
+  // 的 Wilson 区间是 [18.9%, 73.3%]，点估计连方向都可能是反的，
+  // 这时候写「止损占比高说明入场偏远」不是诊断，是编故事。
+  const lowS = !!c.low_sample;
+  const samp = `样本不足 ${c.n}/${q.min_sample} 笔，此列无数值意义`;
+  const rn = c.reason_net || {};
+  const reason = k => rn[k] || { trades: 0, net: 0.0 };
+  const earners = Object.keys(rn).filter(k => rn[k].net > 0);
+  const ci = pair => `CI [${fmt(pair[0], 1)}, ${fmt(pair[1], 1)}]%`;
+  const cost = c.cost || {};
+  const freq = c.freq || {};
+  const onlyEarner = k => (earners.length === 1 && earners[0] === k) ? ' · 窗口内唯一赚钱的离场' : '';
   $('qualProc').innerHTML = [
-    proc('手动平仓', fmt(c.manual_pct, 1) + '%', c.manual_pct > 50 ? '过半靠手动，规则执行不稳定' : '正常'),
-    proc('止损离场', fmt(c.sl_pct, 1) + '%', '止损占比高说明入场偏远'),
-    proc('止盈离场', fmt(c.tp_pct, 1) + '%', '止盈占比低说明拿不住'),
-    proc('持仓中位数', mins(c.hold_median_min), c.hold_median_min != null && c.hold_median_min < 10 ? '过短，成本占比高' : '—'),
-    proc('交易频率', fmt(c.trades_per_day, 1) + ' 笔/天', '高频日往往是亏损日'),
+    proc('手动平仓', fmt(c.manual_pct, 1) + '%', lowS ? samp
+      : `${ci(c.manual_ci)} · ${reason('manual').trades} 笔 ${money(reason('manual').net)}${onlyEarner('manual')}`),
+    proc('止损离场', fmt(c.sl_pct, 1) + '%', lowS ? samp
+      : `${ci(c.sl_ci)} · ${reason('sl').trades} 笔 ${money(reason('sl').net)}${onlyEarner('sl')}`),
+    proc('止盈离场', fmt(c.tp_pct, 1) + '%', lowS ? samp
+      : `${ci(c.tp_ci)} · ${reason('tp').trades} 笔 ${money(reason('tp').net)}${onlyEarner('tp')}`),
+    proc('持仓中位数', mins(c.hold_median_min), lowS ? samp
+      : cost.spread_unknown
+        ? `佣金/库存费 ${fmt(cost.fee_usd)} USD；无实测点差数据，点差成本未计入`
+        : `点差 ${fmt(cost.spread_usd)} + 费用 ${fmt(cost.fee_usd)} USD，占毛盈亏 ${fmt(cost.cost_pct, 1)}%`),
+    proc('交易频率', fmt(c.trades_per_day, 1) + ' 笔/天', lowS ? samp
+      : freq.days >= 4
+        ? `高频日均 ${money(freq.hi_mean)} vs 低频日均 ${money(freq.lo_mean)}（${freq.days} 个交易日）`
+          + (freq.corr != null ? ` · 日笔数与当日盈亏相关 ${Number(freq.corr).toFixed(2)}` : ' · 日笔数无波动，相关测不出')
+        : `${freq.days} 个交易日，分不出高低频`),
   ].join('');
 
   // 滚动期望曲线

@@ -13,6 +13,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._stubs import install_missing_stubs
+
+install_missing_stubs()  # 没装 openai 时用最小桩，别让无关用例在 import 阶段就红
+
 from live import paths, rules, sessions
 
 T0 = 1_792_000_000

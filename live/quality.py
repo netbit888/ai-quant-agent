@@ -26,6 +26,19 @@
 - R = 该笔盈亏 / 全历史平均亏损。用固定基准而不是窗口内基准，
   这样不同窗口的 R 可以横向比较。
 - 窗口内回撤用**累计 R** 的峰谷差，不受手数变化影响；同时给美元值供参考。
+
+过程指标（manual/sl/tp、持仓时长、频率）
+--------------------------------------
+这些数字不随行情运气漂移，所以容易被拿来当「诊断结论」。三条红线：
+
+1. **比例一律带 Wilson 区间**。n=9 时止损率 44.4% 的区间是 [18.9%, 73.3%]，
+   点估计本身没有信息量。没有 CI 的比例禁止写进任何结论。
+2. **归因必须用窗口内的真实数据算**，不许写死文案。「止盈占比低说明拿不住」
+   这类话把一种可能印成了唯一解释；本模块只回答可证伪的问题——
+   各离场方式各赚亏多少、点差成本占多少、高频日与低频日的日均盈亏差多少。
+3. **成本按 backtest/symbols.py 的实测点差 + 回测引擎同款公式估算**。
+   账本 profit 不含点差（点差做在成交价里），不估就等于把成本记成 0。
+   未知品种没有点差数据时标记 spread_unknown，不猜 0。
 """
 
 from __future__ import annotations
@@ -34,6 +47,8 @@ import math
 import statistics
 import time
 from datetime import datetime, timezone
+
+from live.cost import cost_summary
 
 MIN_SAMPLE = 20
 
@@ -72,6 +87,62 @@ def _risk_unit(all_trades: list[dict]) -> float:
     """全历史平均亏损，作为 R 的基准。窗口之间共用，保证可比。"""
     losses = [abs(t["profit"]) for t in all_trades if t["profit"] < 0]
     return sum(losses) / len(losses) if losses else 1.0
+
+
+def _day(ts: int) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _reason_net(rows: list[dict]) -> dict:
+    """各平仓方式的笔数与净盈亏（净盈亏 = 账本 profit，不含点差）。
+
+    回答的是「这个窗口里钱是从哪种离场方式上来/下去的」，
+    而不是给离场方式贴「拿不住」「入场偏远」这类标签。
+    """
+    out: dict[str, dict] = {}
+    for t in rows:
+        r = t.get("close_reason") or "manual"
+        b = out.setdefault(r, {"trades": 0, "net": 0.0})
+        b["trades"] += 1
+        b["net"] = round(b["net"] + t["profit"], 2)
+    return out
+
+
+def _freq(rows: list[dict]) -> dict:
+    """按自然日分高低频组，检验「高频日往往是亏损日」。
+
+    这句话以前是模板里的写死文案，现在由数据说：
+    交易日按当日笔数排序，下半部分为低频日、上半为高频日（奇数天时
+    中间那天不进任何一组），比较两组日均盈亏；日笔数-当日盈亏的
+    Pearson 相关只在 ≥5 个交易日时给（3 个点能拟合出任何结论）。
+    天数不够时对应字段留 None，面板显示「分不出高低频」，不硬给结论。
+    """
+    days: dict[str, dict] = {}
+    for t in rows:
+        b = days.setdefault(_day(t["exit_time"]), {"trades": 0, "profit": 0.0})
+        b["trades"] += 1
+        b["profit"] = round(b["profit"] + t["profit"], 2)
+    ordered = sorted(days.values(), key=lambda r: r["trades"])
+    n = len(ordered)
+    out: dict = {"days": n, "median_trades": None, "hi_mean": None, "lo_mean": None, "corr": None}
+    if n >= 4:
+        mid = n // 2
+        lo, hi = ordered[:mid], ordered[n - mid:]
+        out["median_trades"] = statistics.median(r["trades"] for r in ordered)
+        out["lo_mean"] = round(sum(r["profit"] for r in lo) / len(lo), 2)
+        out["hi_mean"] = round(sum(r["profit"] for r in hi) / len(hi), 2)
+    if n >= 5:
+        # 少于 5 个交易日时相关系数基本是噪声（3 个点能拟合出任何结论），不算
+        xs = [r["trades"] for r in ordered]
+        ys = [r["profit"] for r in ordered]
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        # 笔数没有波动（每天都一样多）或盈亏没有波动时，相关无定义
+        if sxx > 0 and syy > 0:
+            sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            out["corr"] = round(sxy / math.sqrt(sxx * syy), 2)
+    return out
 
 
 def _pick(closed: list[dict], window: dict, now: int) -> tuple[list[dict], list[dict]]:
@@ -114,6 +185,16 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
             "manual_pct": 0.0,
             "sl_pct": 0.0,
             "tp_pct": 0.0,
+            "manual_ci": [0.0, 0.0],
+            "sl_ci": [0.0, 0.0],
+            "tp_ci": [0.0, 0.0],
+            "reason_net": {},
+            "cost": {
+                "spread_usd": 0.0, "fee_usd": 0.0, "total_usd": 0.0,
+                "per_trade_usd": 0.0, "gross_abs": 0.0, "cost_pct": None,
+                "spread_unknown": False, "symbols": [],
+            },
+            "freq": {"days": 0, "median_trades": None, "hi_mean": None, "lo_mean": None, "corr": None},
         }
 
     wins = [t for t in rows if t["profit"] > 0]
@@ -139,8 +220,9 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
     holds = sorted((t["exit_time"] - t["entry_time"]) / 60 for t in rows)
     span_days = max((rows[-1]["exit_time"] - rows[0]["entry_time"]) / 86400, 1 / 24)
 
-    def pct(pred) -> float:
-        return round(sum(1 for t in rows if pred(t)) / n * 100, 1)
+    n_manual = sum(1 for t in rows if (t.get("close_reason") or "manual") == "manual")
+    n_sl = sum(1 for t in rows if t.get("close_reason") == "sl")
+    n_tp = sum(1 for t in rows if t.get("close_reason") == "tp")
 
     return {
         "n": n,
@@ -159,9 +241,16 @@ def _metrics(rows: list[dict], risk_unit: float) -> dict:
         "hold_median_min": round(statistics.median(holds), 1),
         "trades_per_day": round(n / span_days, 2),
         "span_days": round(span_days, 1),
-        "manual_pct": pct(lambda t: (t.get("close_reason") or "manual") == "manual"),
-        "sl_pct": pct(lambda t: t.get("close_reason") == "sl"),
-        "tp_pct": pct(lambda t: t.get("close_reason") == "tp"),
+        "manual_pct": round(n_manual / n * 100, 1),
+        "sl_pct": round(n_sl / n * 100, 1),
+        "tp_pct": round(n_tp / n * 100, 1),
+        # 比例必须带区间：n=9 时点估计的方向都可能是反的
+        "manual_ci": wilson_ci(n_manual, n),
+        "sl_ci": wilson_ci(n_sl, n),
+        "tp_ci": wilson_ci(n_tp, n),
+        "reason_net": _reason_net(rows),
+        "cost": cost_summary(rows),
+        "freq": _freq(rows),
     }
 
 

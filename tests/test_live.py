@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import unittest
 
+from tests._stubs import install_missing_stubs
+
+install_missing_stubs()  # 没装 MetaTrader5 / openai 时用最小桩，别让无关用例变红
+
 from live.journal import Trade, _reason, build_trades
 from live.stats import compute, risk_flags
 
@@ -1038,3 +1042,154 @@ class TestTerminalAutostart(unittest.TestCase):
             info = self.journal.collect(force=True, allow_launch=True)
         ensure.assert_called_once()
         self.assertFalse(info["ok"])
+
+
+# ---------------------------------------------------------------- 过程指标
+from live.quality import _metrics
+
+
+class TestProcessMetrics(unittest.TestCase):
+    """过程指标的口径必须可证伪：CI 能算、归因有数、成本不记 0、频率有对照组。"""
+
+    def _t(self, profit, reason="manual", day=0, idx=0, volume=0.1, symbol="XAUUSDm"):
+        """第 day 天的第 idx 笔，平仓时间落在当天 12:00 UTC 之后。"""
+        exit_ts = T0 + day * DAY + 12 * 3600 + idx * 60
+        return {
+            "position_id": day * 1000 + idx, "symbol": symbol, "direction": 1,
+            "volume": volume, "entry_time": exit_ts - 1800, "entry_price": 4000.0,
+            "exit_time": exit_ts, "exit_price": 4000.0,
+            "profit": profit, "gross": profit, "commission": 0.0, "swap": 0.0,
+            "comment": "", "close_reason": reason,
+        }
+
+    def _cur(self, trades):
+        q = quality_compute(trades, now=T0 + 200 * DAY)
+        return next(x for x in q["windows"] if x["key"] == "20n")["current"]
+
+    def test_reason_net_groups_by_close_reason(self):
+        trades = [
+            self._t(20.0, "tp", 0, 0), self._t(10.0, "tp", 0, 1),
+            self._t(-30.0, "sl", 1, 0), self._t(-5.0, "sl", 1, 1),
+            self._t(7.0, "manual", 2, 0),
+        ]
+        c = self._cur(trades)
+        self.assertEqual(c["reason_net"]["tp"], {"trades": 2, "net": 30.0})
+        self.assertEqual(c["reason_net"]["sl"], {"trades": 2, "net": -35.0})
+        self.assertEqual(c["reason_net"]["manual"], {"trades": 1, "net": 7.0})
+
+    def test_pct_carries_wilson_ci(self):
+        # 4 个止损 / 20 笔 = 20%，区间必须与 wilson_ci 一致且不比点估计窄
+        trades = [self._t(-10.0, "sl") for _ in range(4)] + [self._t(10.0, "tp") for _ in range(16)]
+        trades = [dict(t, exit_time=t["exit_time"] + i * 60,
+                       entry_time=t["entry_time"] + i * 60,
+                       position_id=i) for i, t in enumerate(trades)]
+        c = self._cur(trades)
+        self.assertEqual(c["sl_pct"], 20.0)
+        self.assertEqual(tuple(c["sl_ci"]), wilson_ci(4, 20))
+        lo, hi = c["sl_ci"]
+        self.assertLess(lo, 20.0)
+        self.assertGreater(hi, 20.0)
+
+    def test_cost_uses_measured_spread(self):
+        # XAUUSDm 0.1 手：240 points × 0.001 × 0.1 × 100 = 每笔 2.4 USD
+        trades = [self._t(50.0, "tp") for _ in range(10)] + [self._t(-25.0, "sl") for _ in range(10)]
+        trades = [dict(t, exit_time=t["exit_time"] + i * 60, entry_time=t["entry_time"] + i * 60,
+                       position_id=i) for i, t in enumerate(trades)]
+        c = self._cur(trades)
+        self.assertAlmostEqual(c["cost"]["spread_usd"], 48.0, places=2)  # 20 笔 × 2.4
+        self.assertEqual(c["cost"]["fee_usd"], 0.0)
+        self.assertFalse(c["cost"]["spread_unknown"])
+        # 毛盈亏规模 = 500 + 250
+        self.assertAlmostEqual(c["cost"]["cost_pct"], 48.0 / 750.0 * 100, places=1)
+
+    def test_unknown_symbol_does_not_pretend_zero_cost(self):
+        trades = [self._t(-10.0, "sl", 0, i, symbol="FOOm") for i in range(20)]
+        c = self._cur(trades)
+        self.assertTrue(c["cost"]["spread_unknown"])
+        self.assertEqual(c["cost"]["spread_usd"], 0.0)
+
+    def test_cost_pct_none_when_no_gross(self):
+        # 全部打平：没有分母，宁可不给结论也不给 0%
+        trades = [self._t(0.0, "manual", 0, i) for i in range(20)]
+        c = self._cur(trades)
+        self.assertIsNone(c["cost"]["cost_pct"])
+
+    def test_freq_splits_high_and_low_days(self):
+        # 4 天：2 / 3 / 5 / 10 笔；低两天日均 +2.5，高两天日均 -12.5
+        trades = (
+            [self._t(10.0, "tp", 0, i) for i in range(2)]
+            + [self._t(-5.0, "sl", 1, i) for i in range(3)]
+            + [self._t(1.0, "tp", 2, i) for i in range(5)]
+            + [self._t(-3.0, "sl", 3, i) for i in range(10)]
+        )
+        c = self._cur(trades)
+        f = c["freq"]
+        self.assertEqual(f["days"], 4)
+        self.assertAlmostEqual(f["lo_mean"], 2.5, places=2)
+        self.assertAlmostEqual(f["hi_mean"], -12.5, places=2)
+        self.assertIsNone(f["corr"])  # 4 天不给相关
+
+    def test_freq_corr_needs_five_days(self):
+        # 5 天，笔数 1..5，每笔固定亏 1 → 完美负相关 -1.0
+        trades, pid = [], 0
+        for day, cnt in enumerate([1, 2, 3, 4, 5]):
+            for idx in range(cnt):
+                trades.append(self._t(-1.0, "sl", day, idx))
+                trades[-1]["position_id"] = pid
+                pid += 1
+        c = self._cur(trades)
+        f = c["freq"]
+        self.assertEqual(f["days"], 5)
+        self.assertAlmostEqual(f["corr"], -1.0, places=2)
+        self.assertAlmostEqual(f["lo_mean"], -1.5, places=2)
+        self.assertAlmostEqual(f["hi_mean"], -4.5, places=2)
+
+    def test_empty_metrics_keep_same_schema(self):
+        m = _metrics([], 1.0)
+        for key in ("manual_ci", "sl_ci", "tp_ci"):
+            self.assertEqual(list(m[key]), [0.0, 0.0])
+        self.assertEqual(m["reason_net"], {})
+        self.assertIsNone(m["cost"]["cost_pct"])
+        self.assertEqual(m["freq"]["days"], 0)
+
+
+class TestHoldFlagUsesRealCost(unittest.TestCase):
+    """「持仓过短」告警里的成本必须按本账户真实品种/手数算。
+
+    以前 detail 写死「点差 240 points 的黄金、每笔 2.4 USD/0.1 手」，
+    账户做 0.01 手时报的就是 10 倍错数，还会印在面板上当结论。
+    """
+
+    def _trades(self, n=24, symbol="XAUUSDm", volume=0.01):
+        trades = []
+        for i in range(n):
+            exit_ts = T0 + i * 3600
+            trades.append({
+                "position_id": i, "symbol": symbol, "direction": 1, "volume": volume,
+                "entry_time": exit_ts - 120, "entry_price": 4000.0,
+                "exit_time": exit_ts, "exit_price": 4000.2,
+                "profit": 1.0, "gross": 1.0, "commission": 0.0, "swap": 0.0,
+                "comment": "", "close_reason": "tp",
+            })
+        return trades
+
+    def test_detail_computed_from_lots(self):
+        stats = compute(self._trades(), {"balance": 1000}, 1000.0)
+        flag = next(f for f in risk_flags(stats) if "持仓中位数" in f["title"])
+        # 0.01 手 XAUUSDm：每笔 0.24 USD × 24 笔 = 5.76，占毛盈亏 24.0%
+        self.assertIn("5.76", flag["detail"])
+        self.assertIn("24.0%", flag["detail"])
+        self.assertIn("0.24", flag["detail"])
+        self.assertNotIn("240 points", flag["detail"])
+        self.assertNotIn("0.1 手", flag["detail"])
+
+    def test_unknown_symbol_says_cost_missing(self):
+        stats = compute(self._trades(symbol="FOOm"), {"balance": 1000}, 1000.0)
+        flag = next(f for f in risk_flags(stats) if "持仓中位数" in f["title"])
+        self.assertIn("没有实测点差数据", flag["detail"])
+
+    def test_stats_exposes_cost_summary(self):
+        s = compute(self._trades(), {"balance": 1000}, 1000.0)
+        self.assertAlmostEqual(s["cost"]["spread_usd"], 5.76, places=2)
+        self.assertAlmostEqual(s["cost"]["per_trade_usd"], 0.24, places=2)
+        self.assertEqual(s["cost"]["symbols"], ["XAUUSDm"])

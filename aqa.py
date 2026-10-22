@@ -27,32 +27,9 @@ if str(ROOT) not in sys.path:
 DATA_DIR = ROOT / "data"
 STRATEGY_DIR = ROOT / "strategies"
 
-# 品种规格。
-#
-# `atr_pts` = 该品种 H4 上 ATR(14) 的中位数，**以 point 计**。策略的结构阈值
-# 一律按 ATR 的倍数给出，而不是硬编码 point 数——否则同一组参数在黄金上成立、
-# 换到指数上就差了 100 倍。下面三个系数是用黄金标定的：
-#     min_structure_points = 1.63 × ATR   （实测最优值 14000 / 8583 = 1.63）
-#     min_stop_points      = 0.93 × ATR   （8000 / 8583）
-#     pullback_tol_points  = 0.05 × ATR   （400 / 8583）
-# 黄金上正好还原为 14000 / 8000 / 400，即已验证通过 Gate 2 的那组。
-#
-# `spread` = 实测点差中位数与当前值里较大的那个（保守估计）。
-# 已排除的品种：UK100m / AUS200m / HK50m —— 点差占 ATR 的 15% 以上，
-# H4 级别每笔开仓先亏 0.15 ATR，结构策略无法覆盖这个成本。
-SYMBOLS = {
-    "XAUUSDm": {"point": 0.001, "contract": 100.0, "spread": 240, "atr_pts": 8583},
-    "USDJPYm": {"point": 0.001, "contract": 100000.0, "spread": 10, "atr_pts": 318, "quote_from_price": True},
-    "EURUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 8, "atr_pts": 259},
-    "GBPUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 10, "atr_pts": 333},
-    "JP225m": {"point": 0.1, "contract": 1.0, "spread": 123, "atr_pts": 2350, "quote_rate": 158.0},
-    "US30_x10m": {"point": 0.1, "contract": 10.0, "spread": 19, "atr_pts": 1924},
-    "US500_x100m": {"point": 0.01, "contract": 100.0, "spread": 64, "atr_pts": 2679},
-}
-
-STRUCT_ATR = 1.63
-STOP_ATR = 0.93
-TOL_ATR = 0.05
+# 品种规格抽到 backtest/symbols.py：回测与实盘成本核算必须用同一套点差，
+# 两处各存一份必然漂移。见该模块顶部的口径说明。
+from backtest.symbols import STRUCT_ATR, STOP_ATR, SYMBOLS, TOL_ATR
 
 
 

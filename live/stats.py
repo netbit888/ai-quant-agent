@@ -18,6 +18,8 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from live.cost import cost_summary
+
 
 def _day(ts: int) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
@@ -148,6 +150,7 @@ def compute(
             "empty": True,
             "count": 0,
             "note": "账本里还没有已平仓的交易",
+            "cost": cost_summary([]),
             "daily": [],
             "by_symbol": [],
             "by_direction": [],
@@ -285,6 +288,8 @@ def compute(
         "deposits": round(deposits, 2),
         "return_pct": round(net / deposits * 100, 1) if deposits > 0 else None,
         "account": account,
+        # 点差按实测规格表补算：账本 profit 不含点差，不补就等于成本记 0
+        "cost": cost_summary(closed),
         "daily": daily,
         "equity": equity,
         "by_symbol": by_symbol,
@@ -356,11 +361,32 @@ def risk_flags(stats: dict) -> list[dict]:
 
     hold = stats.get("hold_median_min")
     if hold is not None and hold < 10 and stats.get("count", 0) >= 20:
+        # 成本必须按本账户真实成交（品种规格 + 实际手数）算，
+        # 以前这里写死「240 points 的黄金、2.4 USD/0.1 手」，
+        # 换个手数或品种就报错十倍，还当成结论印在面板上。
+        c = stats.get("cost") or {}
+        if c.get("spread_unknown"):
+            detail = (
+                f"持仓中位数只有 {hold} 分钟；部分品种没有实测点差数据，"
+                "成本未计入，先补 backtest/symbols.py 的规格再判断。"
+            )
+        elif c.get("cost_pct") is not None:
+            detail = (
+                f"{stats.get('count', 0)} 笔合计成本 {c['total_usd']:.2f} USD"
+                f"（点差 {c['spread_usd']:.2f} + 费用 {c['fee_usd']:.2f}），"
+                f"占毛盈亏规模 {c['cost_pct']}%，平均每笔 {c['per_trade_usd']:.2f} USD。"
+                "持仓越短，这笔成本越难被单笔盈亏覆盖。"
+            )
+        else:
+            detail = (
+                f"持仓中位数只有 {hold} 分钟；全部交易盈亏为 0，"
+                "摊不出成本占比。"
+            )
         flags.append(
             {
                 "level": "mid",
                 "title": f"持仓中位数只有 {hold} 分钟",
-                "detail": "超短线在点差 240 points 的黄金上，每笔开仓先亏约 2.4 USD/0.1 手，成本占比过高。",
+                "detail": detail,
             }
         )
 

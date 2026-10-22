@@ -13,6 +13,9 @@ venv/
 !tools/*.html
 !docs/*.md
 
+# 面板冒烟用的 API 快照（含账户数据，本地生成，不入库）
+live_probe.json
+
 # 密钥（永远不要提交）
 .env
 *.key
