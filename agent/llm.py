@@ -63,9 +63,14 @@ def chat(prompt: str, model: str | None = None, system: str | None = None) -> st
 
 
 def chat_ex(
-    prompt: str, model: str | None = None, system: str | None = None
+    prompt: str, model: str | None = None, system: str | None = None,
+    json_mode: bool = False,
 ) -> tuple[str, dict]:
     """同 `chat`，但额外返回用量信息，供调用方记账（花了多少 token）。
+
+    `json_mode=True` 时要求服务端强制输出合法 JSON（response_format）。
+    超短线决策只输出一个对象，开这个能省下不少输出 token、也省掉解析失败。
+    注意 deepseek-reasoner 不支持这个参数，调用方要能接受失败后重试。
 
     返回 (文本, {"model": ..., "prompt_tokens": ..., "completion_tokens": ...})
     用量字段在服务端未返回时为空。
@@ -76,18 +81,27 @@ def chat_ex(
     messages.append({"role": "user", "content": prompt})
 
     used_model = model or os.getenv("LLM_MODEL", DEFAULT_MODEL)
-    resp = _client().chat.completions.create(model=used_model, messages=messages)
+    kwargs: dict = {"model": used_model, "messages": messages}
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    resp = _client().chat.completions.create(**kwargs)
 
     text = resp.choices[0].message.content or ""
     usage: dict = {"model": used_model}
     u = getattr(resp, "usage", None)
     if u is not None:
+        extra = getattr(u, "model_extra", None) or {}
         for src, dst in (
             ("prompt_tokens", "prompt_tokens"),
             ("completion_tokens", "completion_tokens"),
             ("total_tokens", "total_tokens"),
+            # DeepSeek 的前缀缓存计量。拿不到就是平台没返回，不做假设。
+            ("prompt_cache_hit_tokens", "cache_hit_tokens"),
+            ("prompt_cache_miss_tokens", "cache_miss_tokens"),
         ):
             val = getattr(u, src, None)
+            if val is None:
+                val = extra.get(src)
             if val is not None:
                 usage[dst] = int(val)
     return text, usage

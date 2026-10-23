@@ -707,7 +707,9 @@ def collect_offline(login: int | str) -> dict:
 # ------------------------------------------------------------------ 对外入口
 
 _cache: dict = {"ts": 0.0, "data": None, "login": None}
-CACHE_TTL = 15.0
+CACHE_TTL = 3.0
+# 面板要"实时"，这一层就不能压 15 秒：前端 3 秒刷一次，缓存要是 15 秒，
+# 界面上看到的还是旧数字。实测一次 force 查询约 33ms，3 秒一次完全撑得住。
 
 
 def collect(days: int = 365, force: bool = False, allow_launch: bool = False) -> dict:

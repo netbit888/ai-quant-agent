@@ -8,7 +8,14 @@
     data/current_state.json   —— 由 agent/core.py 每轮实时写入
     若文件不存在，页面显示「未连接」/「暂无数据」
 
-只读设计：不提供任何控制接口（开始/停止），纯观测。
+写入口（都是显式 POST，且必须带 confirm）：
+    /api/advice            生成账户级 AI 复盘（花钱）
+    /api/session_advice    生成场次级 AI 复盘（花钱）
+    /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
+    /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
+    /api/autotrade/reset   清空教训与战绩（旧流水归档，不删除；会停掉 AI）
+
+除上面几个和备注类接口外全是只读：GET 一律不产生费用、不下单。
 """
 
 from __future__ import annotations
@@ -185,6 +192,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(), "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/autotrade":
+            # AI 实时做单：只读状态，绝不在这里下单。
+            # 启动/停止一律走 POST，且必须带 confirm。
+            qs = parse_qs(parsed.query)
+            want = (qs.get("account") or [""])[0].strip()
+            try:
+                from live import autotrade
+
+                payload = autotrade.summary(want or None)
+            except Exception as exc:  # noqa: BLE001
+                payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                       "application/json; charset=utf-8")
+            return
+
         if parsed.path == "/api/strategies":
             items = []
             for path in sorted(CODE_ROOT.glob("*.py")):
@@ -296,6 +318,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/accounts/delete": self._post_account_delete,
             "/api/rule": self._post_rule,
             "/api/advice": self._post_advice,
+            "/api/autotrade/start": self._post_autotrade_start,
+            "/api/autotrade/stop": self._post_autotrade_stop,
+            "/api/autotrade/reset": self._post_autotrade_reset,
         }
         handler = routes.get(parsed.path)
         if handler is None:
@@ -336,6 +361,104 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         self._json(200, payload)
+
+    def _post_autotrade_start(self, body: dict) -> None:
+        """启动 AI 做单。会真下单、会花钱调模型，所以 confirm 是硬要求。"""
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝启动"})
+            return
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is None:
+                self._json(200, {"ok": False,
+                                 "error": "MT5 未连接或未登录，无法启动"})
+                return
+            want = str(body.get("account") or "").strip()
+            if want and want != str(login):
+                self._json(400, {"ok": False,
+                                 "error": "只能对终端当前登录的账户做单，归档账户不行"})
+                return
+            paths.set_login(login)
+
+            cfg = autotrade.Cfg(
+                symbol=(body.get("symbol") or "XAUUSDm").strip(),
+                lots=float(body.get("lots") or 0.01),
+                interval_sec=int(body.get("interval_sec") or autotrade.Cfg.interval_sec),
+                cooldown_sec=int(body.get("cooldown_sec") or 30),
+                dry_run=bool(body.get("dry_run", True)),
+                max_trades=int(body.get("max_trades") or 0),
+                max_loss_usd=float(body.get("max_loss_usd") or 0.0),
+                max_minutes=int(body.get("max_minutes") or 0),
+            )
+            # 间隔太短等于把点差当水喝；冷却太长则做不到「1 分钟内重新开仓」。
+            # 这些是逻辑约束，启动时就说清楚，别让它跑起来再悄悄违约。
+            issues = autotrade.validate_cfg(cfg)
+            if issues:
+                self._json(400, {"ok": False, "error": "；".join(issues),
+                                 "errors": issues})
+                return
+            # 真单先体检：最常见的失败是终端「算法交易」按钮没点开，
+            # 提前查出来直接告诉用户去点按钮，比让他看一串「开仓失败」强。
+            check = autotrade.precheck(cfg)
+            if not check["ok"]:
+                self._json(200, {"ok": False,
+                                 "error": "；".join(check["errors"]),
+                                 "errors": check["errors"]})
+                return
+            result = autotrade.WORKER.start(cfg, login=login)
+            result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_autotrade_stop(self, body: dict) -> None:
+        """停止 AI 并（默认）平掉所有持仓。
+
+        `flatten` 默认为 True：用户点的是「关闭」，不是「暂停」。
+        但平仓会动到他手动开的单，所以必须带 confirm。
+        """
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝平仓"})
+            return
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is not None:
+                paths.set_login(login)
+            flatten = bool(body.get("flatten", True))
+            result = autotrade.WORKER.stop(login=login, flatten=flatten)
+            result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_autotrade_reset(self, body: dict) -> None:
+        """清空教训和战绩（归档旧文件，不删）。会停掉 AI，所以必须带 confirm。"""
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝重置"})
+            return
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is not None:
+                paths.set_login(login)
+            want = str(body.get("account") or "").strip()
+            if want and login is not None and want != str(login):
+                self._json(400, {"ok": False,
+                                 "error": "只能重置终端当前登录账户的 AI 流水"})
+                return
+            result = autotrade.reset_history(login=login)
+            result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     def _post_session_note(self, body: dict) -> None:
         """场次备注：一句话 + 可选标签。不花钱，所以不需要 confirm。"""

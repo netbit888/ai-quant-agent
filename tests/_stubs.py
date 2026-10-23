@@ -43,6 +43,18 @@ def install_missing_stubs() -> None:
             mt5.orders_get = lambda *a, **k: ()
             mt5.symbol_info = lambda *a, **k: None
             mt5.symbol_info_tick = lambda *a, **k: None
+            mt5.symbol_select = lambda *a, **k: True
+            mt5.copy_rates_from_pos = lambda *a, **k: None
+            mt5.copy_ticks_range = lambda *a, **k: None
+            # mt5.bridge 在模块顶层就引用这些常量，缺一个整个模块 import 失败
+            mt5.TIMEFRAME_M1 = 1
+            mt5.TIMEFRAME_M5 = 5
+            mt5.TIMEFRAME_M15 = 15
+            mt5.TIMEFRAME_M30 = 30
+            mt5.TIMEFRAME_H1 = 16385
+            mt5.TIMEFRAME_H4 = 16388
+            mt5.TIMEFRAME_D1 = 16408
+            mt5.COPY_TICKS_ALL = -1
             sys.modules["MetaTrader5"] = mt5
 
     if "openai" not in sys.modules:

@@ -34,6 +34,10 @@ class ExecConfig:
     deviation_points: int = 30  # 允许滑点
     dry_run: bool = True
     terminal_path: str | None = None
+    # 常驻进程（面板里的做单线程）必须置 True：
+    # MT5 的 initialize/shutdown 是进程级引用计数，每发一单就 shutdown 一次，
+    # 会把整个进程的连接关掉，下一轮连报价都拿不到。
+    keep_alive: bool = False
 
 
 class Executor:
@@ -48,6 +52,18 @@ class Executor:
         kwargs = {}
         if self.cfg.terminal_path:
             kwargs["path"] = self.cfg.terminal_path
+
+        if self.cfg.keep_alive:
+            # 已经连上就直接复用，不要再 initialize 一次（引用计数会一直涨）
+            if mt5.terminal_info() is not None:
+                self.connected = True
+                return True
+            if mt5.initialize(**kwargs):
+                self.connected = True
+                return True
+            self._record("connect_failed", {"error": str(mt5.last_error())})
+            return False
+
         for attempt in range(1, retries + 1):
             if mt5.initialize(**kwargs):
                 self.connected = True
@@ -57,7 +73,7 @@ class Executor:
         return False
 
     def shutdown(self) -> None:
-        if self.connected:
+        if self.connected and not self.cfg.keep_alive:
             mt5.shutdown()
             self.connected = False
 
@@ -114,6 +130,69 @@ class Executor:
             return False, "未连接到交易服务器"
         return True, "可交易"
 
+    # ---------------------------------------------------------- 下单底层
+
+    def _ensure_symbol(self) -> None:
+        """确保品种在 Market Watch 里。
+
+        不在的话 `symbol_info_tick` 返回 None、`order_send` 报「未知品种」，
+        表面上像行情断了，实际只是没勾选这个品种。
+        """
+        try:
+            info = mt5.symbol_info(self.cfg.symbol)
+            if info is None:
+                return
+            if not info.visible:
+                mt5.symbol_select(self.cfg.symbol, True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _filling_modes(self) -> list[int]:
+        """券商支持的成交方式，按优先级排。
+
+        很多券商（Exness 等）对市价单只认其中一种，传错直接返回 10030
+        「不支持的成交方式」，而这条错误信息里根本不提 filling——
+        硬编码 ORDER_FILLING_IOC 的结果就是真单一笔都发不出去。
+        """
+        fok = getattr(mt5, "ORDER_FILLING_FOK", 0)
+        ioc = getattr(mt5, "ORDER_FILLING_IOC", 1)
+        ret = getattr(mt5, "ORDER_FILLING_RETURN", 2)
+        modes: list[int] = []
+        try:
+            info = mt5.symbol_info(self.cfg.symbol)
+            fm = int(getattr(info, "filling_mode", 0) or 0)
+            if fm & 1:  # SYMBOL_FILLING_FOK
+                modes.append(fok)
+            if fm & 2:  # SYMBOL_FILLING_IOC
+                modes.append(ioc)
+        except Exception:  # noqa: BLE001
+            pass
+        for m in (ioc, fok, ret):
+            if m not in modes:
+                modes.append(m)
+        return modes
+
+    def _send(self, request: dict):
+        """发单；遇到「不支持的成交方式」就换下一种重试。
+
+        返回 (mt5 结果, 说明)。说明里记下试过哪些 filling，
+        这样失败时能看出是券商拒绝成交方式，不是价格或手数的问题。
+        """
+        invalid_fill = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
+        done = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+        tried: list[dict] = []
+        result = None
+        for mode in self._filling_modes():
+            req = dict(request)
+            req["type_filling"] = mode
+            result = mt5.order_send(req)
+            rc = getattr(result, "retcode", None)
+            tried.append({"filling": mode, "retcode": rc})
+            if rc == done or rc != invalid_fill:
+                return result, {"tried": tried}
+        return result, {"tried": tried,
+                        "error": "所有成交方式都被券商拒绝（10030）"}
+
     # ---------------------------------------------------------- 下单
 
     def open_market(
@@ -127,6 +206,7 @@ class Executor:
         """市价开仓。dry_run=True 时只返回构造好的请求。"""
         if not self.connected and not self.connect():
             raise RuntimeError("MT5 连接失败")
+        self._ensure_symbol()
 
         tick = mt5.symbol_info_tick(self.cfg.symbol)
         if tick is None:
@@ -170,13 +250,14 @@ class Executor:
             self._record("dry_run_order", request)
             return {"ok": True, "dry_run": True, "request": request}
 
-        result = mt5.order_send(request)
+        result, meta = self._send(request)
         payload = {
             "retcode": result.retcode if result else None,
             "comment": result.comment if result else None,
             "order": result.order if result else None,
             "price": result.price if result else None,
             "request_price": price,
+            "filling": meta,
         }
         ok = bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
         if ok:
@@ -185,6 +266,7 @@ class Executor:
         return {"ok": ok, **payload}
 
     def close_position(self, ticket: int) -> dict:
+        self._ensure_symbol()
         positions = mt5.positions_get(ticket=ticket) or []
         if not positions:
             return {"ok": False, "reason": "持仓不存在"}
@@ -211,10 +293,12 @@ class Executor:
             self._record("dry_run_close", request)
             return {"ok": True, "dry_run": True, "request": request}
 
-        result = mt5.order_send(request)
+        result, meta = self._send(request)
         ok = bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
-        self._record("close_sent" if ok else "close_failed", {"retcode": getattr(result, "retcode", None)})
-        return {"ok": ok, "retcode": getattr(result, "retcode", None)}
+        self._record("close_sent" if ok else "close_failed",
+                     {"retcode": getattr(result, "retcode", None), **meta})
+        return {"ok": ok, "retcode": getattr(result, "retcode", None),
+                "comment": getattr(result, "comment", None), "filling": meta}
 
     # ---------------------------------------------------------- 记录
 

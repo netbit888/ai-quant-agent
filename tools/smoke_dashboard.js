@@ -62,7 +62,7 @@ global.URLSearchParams = class { constructor() {} set() {} toString() { return '
 let failed = false;
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, reasonCn, mins, money, fmt, ts2str};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, closeModal, reasonCn, mins, money, fmt, ts2str};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -146,6 +146,112 @@ try {
     : adviceHtml.includes('advice-head') ? '显示缓存结果' : '空';
   console.log(`AI 面板模式: ${adviceMode}`);
   if (adviceMode === '空' && liveJson.ok) { console.log('  ✗ AI 面板空白'); failed = true; }
+
+  // ---- AI 实时做单：用合成数据测渲染，不依赖有没有真跑过 ----
+  // 重点是钉住「开仓理由」和「平仓理由」是两列：合成一条平仓记录，
+  // 它的 entry_reason 来自当初的开仓行，reason 来自这次的离场判断。
+  const atSample = {
+    ok: true, running: true, dry_run: true, stale: false, stop_reason: null,
+    position: { direction: 1, lots: 0.01, price_open: 4000.5, p_up: 0.62 },
+    last_decision: { ts: 1790000000, kind: 'entry', p_up: 0.62, direction: 1, act: false },
+    trades: 2, closed: 1, wins: 1, pnl: 0.88,
+    llm_closes: 1, llm_hit_rate: 1.0,
+    pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
+    dir_recent: { n: 10, long: 9, short: 1, skew: true },
+    cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
+    recent: [
+      { ts: 1790000000, kind: 'open', direction: 1, p_up: 0.62,
+        reason: '近 5 根连阳', source: 'llm' },
+      { ts: 1790000060, kind: 'close', direction: 1, pnl: 0.88,
+        entry_reason: '近 5 根连阳', reason: '动能衰竭', source: 'llm' },
+      { ts: 1790000120, kind: 'skip', reason: '平仓后冷却中，还需 20 秒' },
+      { ts: 1790000180, kind: 'review', direction: 1, pnl: 0.88,
+        lesson: '第一根大阳线后追多容易吃回撤' },
+    ],
+  };
+  api.renderAutoTrade(atSample);
+  const atRows = (made.rowsAuto.innerHTML.match(/<tr/g) || []).length;
+  console.log(`\nAI 做单表 ${atRows} 行 ${atRows === 4 ? '✓' : '✗'}`);
+  if (atRows !== 4) failed = true;
+  const atCols = (made.rowsAuto.innerHTML.match(/<td/g) || []).length / Math.max(atRows, 1);
+  console.log(`  每行 ${atCols} 列 ${atCols === 8 ? '✓' : '✗'}（开仓理由 / 平仓理由 分列）`);
+  if (atCols !== 8) failed = true;
+  if (made.rowsAuto.innerHTML.includes('undefined') || made.rowsAuto.innerHTML.includes('NaN')) {
+    console.log('  ✗ AI 做单表出现 undefined / NaN');
+    failed = true;
+  }
+  console.log(`  平仓行带开仓理由 ${made.rowsAuto.innerHTML.includes('近 5 根连阳') ? '✓' : '✗'}`);
+  const lessonShown = made.rowsAuto.innerHTML.includes('第一根大阳线后追多容易吃回撤');
+  console.log(`  复盘行显示结论 ${lessonShown ? '✓' : '✗'}`);
+  if (!lessonShown) failed = true;
+  const cacheTxt = String(made.atCache.textContent || '');
+  console.log(`  缓存命中率显示 ${cacheTxt.includes('45.0%') ? '✓' : '✗'} (${cacheTxt.trim() || '空'})`);
+  if (!cacheTxt.includes('45.0%')) failed = true;
+
+  // 平仓后要等 7 根 K 线才复盘：等待期间面板必须说清"还要走几根"，
+  // 否则用户看到平仓了却没有复盘，会以为坏了。
+  const pendTxt = String(made.atPending.textContent || '');
+  console.log(`  待复盘提示 ${pendTxt.includes('待复盘') ? '✓' : '✗'} (${pendTxt.trim() || '空'})`);
+  if (!pendTxt.includes('待复盘')) failed = true;
+
+  // 只做多这种偏置必须能一眼看出来：多空分布 + 偏斜警告
+  const dirTxt = String(made.atDir.textContent || '');
+  console.log(`  多空偏斜提示 ${dirTxt.includes('偏斜') ? '✓' : '✗'} (${dirTxt.trim() || '空'})`);
+  if (!dirTxt.includes('偏斜')) failed = true;
+
+  // 全屏提醒幕布：按钮点了要能盖上、要显示当前持仓，Esc/退出全屏要能收掉
+  api.enterTradingFullscreen();
+  const curtainUp = !made.atCurtain.classList.contains('hidden');
+  console.log(`  全屏幕布可打开 ${curtainUp ? '✓' : '✗'}`);
+  if (!curtainUp) failed = true;
+  const curtTxt = String(made.atCurtainStat.innerHTML || '');
+  console.log(`  幕布显示当前状态 ${curtTxt.includes('当前持仓') ? '✓' : '✗'}`);
+  if (!curtTxt.includes('当前持仓')) failed = true;
+  api.exitTradingFullscreen();
+  if (!made.atCurtain.classList.contains('hidden')) {
+    console.log('  ✗ 幕布收不起来（按 Esc 也没用）');
+    failed = true;
+  }
+
+  // act=false 时"最近一次判断"要写「不做」，不能只显示一个 62% 让人误解
+  const verb = String(made.atCallSub.textContent || '');
+  console.log(`  act=false 显示为「不做」 ${verb.includes('不做') ? '✓' : '✗'} (${verb})`);
+  if (!verb.includes('不做')) failed = true;
+  console.log(`  状态徽标: ${made.atState.textContent} | 运行中时「开始」按钮 disabled=${made.atStart.disabled}`);
+  if (!made.atStart.disabled) { console.log('  ✗ 运行中却没禁用「开始做单」'); failed = true; }
+
+  // ---- 「点了没反应」回归测试 ----
+  // atNote 每 15 秒被轮询覆写一次。失败提示曾经写在 atNote 里，
+  // 于是写进去的下一秒就被清空，用户看到的就是「没反应」。
+  // 现在结果写在 atMsg，轮询不许碰它。
+  api.atSay('<b>启动失败：终端未开启算法交易</b>', 'err');
+  api.renderAutoTrade(atSample);
+  const kept = String(made.atMsg.innerHTML || '');
+  console.log(`\n失败提示不被轮询清空 ${kept.includes('启动失败') ? '✓' : '✗'}`);
+  if (!kept.includes('启动失败')) failed = true;
+  console.log(`  结果条样式: ${made.atMsg.className}`);
+  if (!String(made.atMsg.className).includes('err')) { console.log('  ✗ 失败没标成 err'); failed = true; }
+
+  const hintHtml = api.atErrHtml('终端未开启算法交易（AutoTrading 按钮）');
+  console.log(`  AutoTrading 错误带操作步骤 ${hintHtml.includes('Ctrl+E') ? '✓' : '✗'}`);
+  if (!hintHtml.includes('Ctrl+E')) failed = true;
+  const otherHtml = api.atErrHtml('手数必须大于 0');
+  console.log(`  普通错误原样展示 ${otherHtml.includes('手数必须大于 0') ? '✓' : '✗'}`);
+  if (!otherHtml.includes('手数必须大于 0')) failed = true;
+
+  // 按钮真的接上处理函数了吗？「点了没反应」有一半是 handler 没挂上/没定义。
+  const wired = src.includes('onclick="startAutoTrade()"') &&
+                src.includes('onclick="stopAutoTrade()"') &&
+                src.includes('onclick="resetAutoTrade()"') &&
+                src.includes('onclick="enterTradingFullscreen()"') &&
+                typeof api.startAutoTrade === 'function' &&
+                typeof api.stopAutoTrade === 'function' &&
+                typeof api.resetAutoTrade === 'function' &&
+                typeof api.enterTradingFullscreen === 'function';
+  console.log(`  开始/关闭/重置/全屏按钮已接 handler ${wired ? '✓' : '✗'}`);
+  if (!wired) failed = true;
+  console.log(`  弹窗可用 ${typeof api.closeModal === 'function' ? '✓' : '✗'}`);
+  if (typeof api.closeModal !== 'function') failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);

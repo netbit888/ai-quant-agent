@@ -495,6 +495,46 @@
   .btn-danger { background: rgba(255,77,79,.1); color: #ff8b8d; border-color: rgba(255,77,79,.4); }
   .btn-danger:hover { background: rgba(255,77,79,.18); border-color: var(--bad); }
 
+  /* AI 实时做单：跳过 / 持有行置灰 —— 这些行没有下单，也不花钱，
+     和真正成交的行混在一起看会高估交易频率 */
+  #rowsAuto tr.at-skip td { opacity: .5; }
+  #rowsAuto tr.at-skip td:nth-child(2) { font-style: italic; }
+
+  /* 做单模式二选一：纸面 / 真实。单选按钮保持可见，
+     这是个会动钱的开关，不该藏在复选框里让人找。 */
+  .at-mode { display: flex; align-items: center; gap: 12px; margin-left: 12px; }
+  .at-mode label { display: flex; align-items: center; gap: 4px; font-size: 12.5px; cursor: pointer; }
+  .at-mode input { accent-color: #4a9eff; margin: 0; cursor: pointer; }
+  .at-int { display: flex; align-items: center; gap: 4px; }
+  .at-int select { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
+                   border-radius: 4px; padding: 2px 4px; font-size: 12px; cursor: pointer; }
+
+  /* 操作结果条：只由 start/stop 写，轮询不碰它 */
+  .at-msg { margin: 0 0 10px; padding: 9px 12px; border-radius: 6px;
+            font-size: 13px; line-height: 1.6; }
+  .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
+  .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
+  .at-msg b { color: #fff; }
+
+  /* 全屏提醒幕布：铺满整块屏幕的红字，防止人在它做单时误操作。
+     用黑底而不是纯红底：红底看久了眼睛累，黑底红字对比度更高、也更像警告。 */
+  .curtain { position: fixed; inset: 0; z-index: 9999; display: flex;
+             align-items: center; justify-content: center; text-align: center;
+             padding: 4vw; background: #08090c; }
+  .curtain.hidden { display: none; }
+  .curtain-kicker { font-family: var(--mono); font-size: clamp(14px, 1.4vw, 22px);
+                    letter-spacing: .3em; color: #6b7686; margin-bottom: 2.4vh; }
+  .curtain-title { font-size: clamp(44px, 9.5vw, 150px); line-height: 1.06;
+                   font-weight: 900; letter-spacing: .03em; color: #ff2d2d;
+                   text-shadow: 0 0 60px rgba(255,45,45,.45); }
+  .curtain-sub { font-size: clamp(28px, 5.6vw, 88px); line-height: 1.15;
+                 font-weight: 800; color: #ffd7d7; margin-top: 1.6vh; }
+  .curtain-stat { margin-top: 4vh; font-size: clamp(15px, 1.9vw, 30px); line-height: 1.9;
+                  color: #c9d3de; }
+  .curtain-stat b { color: #fff; }
+  .curtain-hint { margin-top: 4vh; font-size: clamp(13px, 1.3vw, 20px); color: #6b7686; }
+  .curtain-hint b { color: #9fb0c2; }
+
 </style>
 </head>
 <body>
@@ -553,6 +593,67 @@
     </div>
   </div>
   <div class="acct-note" id="acctNote"></div>
+
+  <!-- AI 交易员：自己猜方向、自己发市价单平仓。不挂止盈止损。
+       信息边界：只能看当前 K 线 + 之前 13 根；平仓后才可以回看更长一段做复盘。 -->
+  <div class="card">
+    <div class="card-head">
+      <h2>AI 交易员</h2>
+      <span class="badge-off" id="atState" style="display:none">未启动</span>
+      <div class="at-mode" role="radiogroup" aria-label="做单模式">
+        <label title="只调模型、只在本地记账，不发单给券商">
+          <input type="radio" name="atMode" id="atModePaper" value="paper" checked
+                 onchange="updateModeHint()"> 纸面
+        </label>
+        <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
+          <input type="radio" name="atMode" id="atModeLive" value="live"
+                 onchange="updateModeHint()"> 真实做单
+        </label>
+      </div>
+      <span class="mini" id="atModeHint">只调模型，不发单</span>
+      <label class="mini at-int" title="两次决策之间的间隔。3 秒是物理下限：模型单次调用约 2.6 秒">
+        间隔
+        <select id="atInterval" onchange="updateCostHint()">
+          <option value="3">3 秒</option>
+          <option value="5" selected>5 秒</option>
+          <option value="10">10 秒</option>
+          <option value="30">30 秒</option>
+          <option value="60">60 秒</option>
+        </select>
+      </label>
+      <button class="btn-ghost" id="atStart" onclick="startAutoTrade()">开始做单</button>
+      <button class="btn-ghost btn-danger" id="atStop" onclick="stopAutoTrade()">关闭并清仓</button>
+      <button class="btn-ghost" id="atReset" onclick="resetAutoTrade()"
+              title="清空 AI 自己攒的教训和战绩（旧流水归档保留），换参数前用">重置</button>
+      <button class="btn-ghost" id="atCurtainBtn" onclick="enterTradingFullscreen()"
+              title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
+      <span class="mini" id="atNote"></span>
+    </div>
+    <!-- 操作结果单独一块：atNote 归轮询用（每 15 秒被 renderAutoTrade 覆写），
+         把「启动失败」写在那里等于写了个寂寞——下一秒就被清空，
+         用户看到的就是「点了没反应」。 -->
+    <div class="at-msg hidden" id="atMsg"></div>
+    <div class="kpis" id="atKpis">
+      <div class="kpi"><div class="k">当前持仓</div><div class="v" id="atPos">—</div><div class="s" id="atPosSub">—</div></div>
+      <div class="kpi"><div class="k">最近一次判断</div><div class="v mono" id="atCall">—</div><div class="s" id="atCallSub">—</div></div>
+      <div class="kpi"><div class="k">已平仓</div><div class="v mono" id="atClosed">—</div><div class="s" id="atClosedSub">—</div></div>
+      <div class="kpi"><div class="k">方向命中率</div><div class="v mono" id="atHit">—</div><div class="s" id="atHitSub">只算模型自己决定的</div></div>
+      <div class="kpi"><div class="k">累计盈亏</div><div class="v mono" id="atPnl">—</div><div class="s" id="atPnlSub">—</div></div>
+    </div>
+    <div class="mini" style="margin:10px 0 6px">
+      规则：XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b> · 不挂 SL/TP（退出靠它主动下市价单）
+      · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
+      <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
+      <br><b>无视点差成本</b>（不由模型负责）· <b>最短持仓 60 秒</b>（浮亏超 0.5 USD 可提前平）。
+      <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」，等这几根才看得出平得早还是平得对。等待期间照常分析行情做下一笔。
+      置灰的行是「跳过」——不花钱、没下单。
+      <span id="atDecline"></span>
+      <span id="atDir"></span>
+      <span id="atPending"></span>
+      <span id="atCache"></span>
+    </div>
+    <table><thead><tr><th>时间</th><th>动作</th><th>方向</th><th>p_up</th><th>盈亏</th><th>来源</th><th>开仓理由</th><th>平仓理由</th></tr></thead><tbody id="rowsAuto"></tbody></table>
+  </div>
 
   <!-- 本场复盘：盘后打开先看这一块。按「上一笔平仓→下一笔开仓」超过 30 分钟切场 -->
   <div class="card">
@@ -784,6 +885,10 @@ function svgEl(tag, attrs) {
 }
 
 let gradSeq = 0;
+
+// 最近一次 /api/autotrade 的结果。全屏幕布用它显示状态——
+// 幕布自己的刷新跟着 1 秒轮询走，不额外发请求。
+let lastAutoData = null;
 
 function ensureGradient(svg, color, opacityTop) {
   const id = 'g' + (++gradSeq);
@@ -1132,9 +1237,15 @@ async function loadLive(force = false) {
   }
 }
 
-async function refreshLive(force = false) {
+// 只刷账户下拉：在 MT5 终端里切了账户，最多 20 秒后这里能看到。
+// 和 loadLive 拆开，是因为账户列表很少变，没必要每 3 秒重建一次 DOM。
+async function refreshAccounts() {
   const want = await loadAccounts();
   if (want) $('acctPick').value = want;
+}
+
+async function refreshLive(force = false) {
+  await refreshAccounts();
   await loadLive(force);
 }
 
@@ -1171,9 +1282,11 @@ function renderLive(d) {
     syncEl.className = 'badge-off';
     $('acctNote').textContent = '这是已归档账户的历史数据（本地账本），不连 MT5、不刷新、不能生成新的 AI 复盘。';
   } else {
-    syncEl.textContent = '实时';
+    // 带上刷新时刻：否则"实时"只是个词，你没法确认它真的在动
+    const hh = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    syncEl.textContent = '实时 · ' + hh;
     syncEl.className = 'badge-live';
-    $('acctNote').textContent = '切换账户请在 MT5 终端里操作，这里会自动识别并归档到独立账本。';
+    $('acctNote').textContent = '每 3 秒刷新一次（AI 交易员那块每 1 秒）。切换账户请在 MT5 终端里操作，这里会自动识别并归档到独立账本。';
   }
 
   $('acctLogin').textContent = '#' + (a.login || '—');
@@ -1330,6 +1443,439 @@ function renderLive(d) {
   renderSessions(d);
   renderMarks(d);
   syncDeleteButton(d);
+  // AI 卡片不在这里刷：它有自己 1 秒一次的独立循环（见文件末尾），
+  // 否则账本一刷新就顺带拉一次，两边节奏互相打乱。
+}
+
+/* ==================== AI 交易员 ====================
+ * 这块和后端 live/autotrade.py 是一对：那边每 60 秒做一次决策，这边只读结果。
+ * 关键是把「模型判断」和「规则兜底」分开显示——模型挂掉时会退回动量规则，
+ * 两种来源的命中率混在一起算，就永远看不出模型到底有没有用。
+ */
+let atLoading = false;
+
+async function loadAutoTrade() {
+  if (atLoading) return;          // 慢响应时别把请求堆起来
+  atLoading = true;
+  try {
+    const r = await fetch('/api/autotrade');
+    renderAutoTrade(await r.json());
+  } catch (e) {
+    // 静默失败：这块挂了不该把整个实盘面板拖下水
+    const st = $('atState');
+    st.style.display = '';
+    st.textContent = '读取失败';
+    st.className = 'badge-off';
+  } finally {
+    atLoading = false;
+  }
+}
+
+const AT_KIND = {
+  open: '开仓', close: '平仓', hold: '持有', skip: '跳过',
+  stop: '停止', open_failed: '开仓失败', close_failed: '平仓失败',
+  review: '复盘', flatten: '清仓', error: '异常',
+};
+
+function renderAutoTrade(a) {
+  const st = $('atState');
+  st.style.display = '';
+  if (!a || !a.ok) {
+    st.textContent = '读取失败';
+    st.className = 'badge-off';
+    return;
+  }
+  if (a.running) {
+    st.textContent = a.dry_run ? '运行中 · 纸面' : '运行中 · 真实';
+    st.className = 'badge-live';
+  } else if (a.stale) {
+    // 面板重启过，磁盘上还留着 running=true 但线程早没了。必须说清楚，
+    // 否则用户会以为 AI 还在做单，其实一笔都不会开。
+    st.textContent = '已停止（面板曾重启）';
+    st.className = 'badge-off';
+  } else if (a.stop_reason) {
+    st.textContent = '已停止';
+    st.className = 'badge-off';
+  } else {
+    st.textContent = '未启动';
+    st.className = 'badge-off';
+  }
+  if (a.stale) {
+    $('atNote').className = 'mini red';
+    $('atNote').textContent = '上次的线程已不在，请重新点「开始做单」';
+  } else {
+    $('atNote').className = 'mini';
+    $('atNote').textContent = a.stop_reason ? ('停止原因：' + a.stop_reason) : '';
+  }
+
+  // 当前持仓
+  const p = a.position;
+  if (p) {
+    $('atPos').textContent = (p.direction > 0 ? '多' : '空') + ' ' + p.lots + ' 手';
+    $('atPos').className = 'v ' + (p.direction > 0 ? 'pos-long' : 'pos-short');
+    $('atPosSub').textContent = '开仓 ' + fmt(p.price_open, 3) +
+      ' · AI 给的方向概率 ' + fmt((p.p_up || 0) * 100, 0) + '%';
+  } else {
+    $('atPos').textContent = '空仓';
+    $('atPos').className = 'v neut';
+    $('atPosSub').textContent = '等下一次判断';
+  }
+
+  // 最近一次判断
+  const ld = a.last_decision;
+  if (ld) {
+    if (ld.kind === 'entry') {
+      $('atCall').textContent = fmt((ld.p_up || 0) * 100, 0) + '% 看涨';
+      // act 是模型自己说的"做不做"。以前只能从 p_up 猜，理由写"不追"、
+      // 数值却在开仓，看着拧巴。现在直接显示它的决定。
+      const verb = ld.act === false ? '不做'
+        : (ld.act === true ? (ld.direction > 0 ? '→ 做多' : '→ 做空')
+                           : (ld.direction > 0 ? '→ 偏多' : '→ 偏空'));
+      $('atCallSub').textContent = verb + ' · ' + ts2str(ld.ts).slice(11);
+    } else {
+      $('atCall').textContent = ld.close ? '平仓' : '继续持有';
+      $('atCallSub').textContent = ts2str(ld.ts).slice(11);
+    }
+  } else {
+    $('atCall').textContent = '—';
+    $('atCallSub').textContent = '还没跑过';
+  }
+
+  $('atClosed').textContent = a.closed + ' 笔';
+  $('atClosedSub').textContent = '共开仓 ' + a.trades + ' 笔';
+
+  // 命中率：样本少时不给数字，避免「1 胜 0 负 = 100%」这种假精确
+  if (a.llm_hit_rate == null) {
+    $('atHit').textContent = '—';
+    $('atHitSub').textContent = a.llm_closes ? '样本不足' : '只算模型自己决定的';
+  } else {
+    $('atHit').textContent = fmt(a.llm_hit_rate * 100, 1) + '%';
+    $('atHitSub').textContent = a.llm_closes + ' 笔模型决策样本';
+  }
+
+  $('atPnl').textContent = money(a.pnl || 0);
+  $('atPnl').className = 'v mono ' + signClass(a.pnl || 0);
+  $('atPnlSub').textContent = a.dry_run ? '纸面记账（不发真单）' : '真实成交';
+
+  // 模型自己说"不做"的次数。它和"被闸门挡掉"是两回事：
+  // 如果这个数一直涨、开仓一直是 0，说明它变胆小了，那是另一种失败。
+  $('atDecline').textContent = a.model_declines
+    ? `　·　模型主动放弃 ${a.model_declines} 次` : '';
+
+  // 最近 10 笔多空分布：只看盈亏发现不了"只会做多"这种偏置，必须单独显示。
+  const dr = a.dir_recent || {};
+  if (dr.n) {
+    $('atDir').textContent = `　·　最近 ${dr.n} 笔：多 ${dr.long} / 空 ${dr.short}`
+      + (dr.skew ? '（⚠ 方向偏斜，检查是不是被教训锁死了）' : '');
+    $('atDir').style.color = dr.skew ? 'var(--warn)' : '';
+  } else {
+    $('atDir').textContent = '';
+  }
+
+  // 已平仓但还没到复盘时机：平仓后要等 7 根 K 线才复盘。
+  // 不显示的话用户会以为复盘坏了（平了却没看到复盘）。
+  const pend = Number(a.pending_reviews || 0);
+  if (pend && a.next_review_ts) {
+    const left = Math.max(0, Math.ceil((a.next_review_ts - Date.now() / 1000) / 60));
+    $('atPending').textContent = left
+      ? `　·　待复盘 ${pend} 笔（最早再走 ${left} 根 K 线）`
+      : `　·　待复盘 ${pend} 笔（下一轮就复盘）`;
+  } else {
+    $('atPending').textContent = '';
+  }
+
+  // 前缀缓存命中率：静态规则全在 system、动态数据放末尾，命中率本该很高。
+  // 拿不到服务端计量时就不显示百分比，别编。
+  const ck = a.cache || {};
+  $('atCache').textContent = ck.hit_rate == null ? ''
+    : `　·　缓存命中 ${fmt(ck.hit_rate * 100, 1)}%（命中 ${ck.hit_tokens} / 未命中 ${ck.miss_tokens} tokens）`;
+
+  // 幕布上的状态跟着刷新：它每 1 秒拿到的就是这份数据，不用另开请求
+  lastAutoData = a;
+  updateCurtain(a);
+
+  // 按钮：跑着的时候不许再点「开始」，避免起两个线程互相抢仓位
+  $('atStart').disabled = !!a.running;
+  $('atStart').textContent = a.running ? '运行中…' : '开始做单';
+
+  // 跑起来之后模式锁死：中途切换会造成「界面说真实、实际发纸面」的错位
+  const lockMode = !!a.running;
+  $('atModePaper').disabled = lockMode;
+  $('atModeLive').disabled = lockMode;
+  $('atInterval').disabled = lockMode;
+  if (lockMode) {
+    $('atModePaper').checked = !!a.dry_run;
+    $('atModeLive').checked = !a.dry_run;
+    // 把选择器对齐到实际在跑的那个周期，别让界面说 60 秒而实际跑 5 秒
+    const runningIv = a.cfg && a.cfg.interval_sec;
+    if (runningIv) $('atInterval').value = String(runningIv);
+    updateModeHint();
+  }
+
+  const rows = (a.recent || []).slice().reverse();
+  $('rowsAuto').innerHTML = rows.length ? rows.map(r => {
+    const dir = r.direction ? (r.direction > 0 ? '多' : '空') : '—';
+    const pUp = r.p_up == null ? '—' : fmt(r.p_up * 100, 0) + '%';
+    const pnl = r.pnl == null ? '—' : money(r.pnl);
+    const src = r.source === 'llm' ? '模型'
+      : r.source === 'fallback' ? '规则兜底'
+      : r.source === 'external' ? '终端外平仓'
+      : r.source === 'panel' ? '面板'
+      : '—';
+    // 开仓理由在 open 行；平仓理由在 close 行，且 close 行会把当初的
+    // 进场理由一起带上，这样一笔单的「为什么进 / 为什么出」能在同一行看完。
+    const whyIn = r.kind === 'open' ? (r.reason || '') : (r.entry_reason || '');
+    // 平仓行写「为什么出」；复盘行写平仓后回看那段的结论，单独标出来
+    const whyOut = r.kind === 'close' ? (r.reason || '')
+      : (r.kind === 'review' ? ('💡 ' + (r.lesson || r.error || '')) : '');
+    const isSkip = r.kind === 'skip' || r.kind === 'hold';
+    return `<tr${isSkip ? ' class="at-skip"' : ''}>
+      <td class="mono">${ts2str(r.ts).slice(11)}</td>
+      <td>${AT_KIND[r.kind] || r.kind || '—'}</td>
+      <td class="${r.direction > 0 ? 'pos-long' : (r.direction < 0 ? 'pos-short' : '')}">${dir}</td>
+      <td class="mono">${pUp}</td>
+      <td class="mono ${r.pnl == null ? '' : signClass(r.pnl)}">${pnl}</td>
+      <td class="mini">${esc(src)}</td>
+      <td class="mini">${esc(String(whyIn).slice(0, 80))}${r.error ? `<div class="red">${esc(String(r.error).slice(0, 60))}</div>` : ''}</td>
+      <td class="mini">${esc(String(whyOut).slice(0, 80))}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="8" class="empty">还没有决策记录。点「开始做单」，或先跑 <code>python -m live.autotrade --once</code> 试一轮。</td></tr>';
+}
+
+/* 开始 / 关闭。
+ * 两个动作都会真动钱（模型调用、下单），所以都走同一套确认弹窗，
+ * 而且后端还会再校验一次 confirm —— 前端弹窗只是让人看清后果，
+ * 不是安全边界。安全边界在 /api/autotrade/* 那两个 handler 里。 */
+function atLiveMode() {
+  return !!($('atModeLive') && $('atModeLive').checked);
+}
+
+function atIntervalSec() {
+  const v = parseInt(($('atInterval') || {}).value, 10);
+  return Number.isFinite(v) && v >= 3 ? v : 5;
+}
+
+/* 把代价直接写在选择器旁边。
+ * 周期一缩短，模型调用次数线性上涨；真实模式下点差成本也跟着上涨。
+ * 这些数字不摆出来，用户只会把间隔调到 3 秒然后奇怪为什么账户在流血。 */
+function updateModeHint() {
+  const el = $('atModeHint');
+  if (!el) return;
+  const iv = atIntervalSec();
+  const calls = Math.round(3600 / iv);
+  // 冷却 30 秒 ⇒ 每小时最多 120 笔往返；每笔点差约 0.24 USD
+  const trips = Math.min(calls, 120);
+  if (atLiveMode()) {
+    el.textContent = `真实 · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
+      + `最多 ${trips} 笔往返 ≈ 点差 ${fmt(trips * 0.24, 0)} USD/小时`;
+    el.className = 'mini red';
+  } else {
+    el.textContent = `纸面 · 每 ${iv} 秒判断 · 约 ${calls} 次模型调用/小时`;
+    el.className = 'mini';
+  }
+}
+
+/* 操作结果条。和 atNote 分开：atNote 每 15 秒被轮询覆写一次，
+   把「启动失败」写在那里等于没写——用户只会看到「点了没反应」。 */
+function atSay(msg, kind) {
+  const el = $('atMsg');
+  if (!el) return;
+  if (!msg) { el.className = 'at-msg hidden'; el.innerHTML = ''; return; }
+  el.className = 'at-msg ' + (kind === 'ok' ? 'ok' : 'err');
+  el.innerHTML = msg;
+}
+
+// 后端把 retcode 翻成了人话，这里再补一句「怎么解决」
+function atErrHtml(err) {
+  const raw = String(err || '未知错误');
+  if (/算法交易|AutoTrading|10027/i.test(raw)) {
+    return `<b>启动失败：终端未开启「算法交易」</b><br>
+      MT5 工具栏的「算法交易 / Algo Trading」按钮（快捷键 <b>Ctrl+E</b>）要先点亮，
+      再点一次「开始做单」。<br>如果按钮是灰的：工具 → 选项 → 专家顾问 → 勾选「允许算法交易」。`;
+  }
+  return '<b>启动失败：</b>' + esc(raw);
+}
+
+async function startAutoTrade() {
+  const live = atLiveMode();
+  const iv = atIntervalSec();
+  const calls = Math.round(3600 / iv);
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: live ? `真实下单：每 ${iv} 秒判断一次，开始？` : `纸面：每 ${iv} 秒判断一次，开始？`,
+      desc: live
+        ? `会向券商发真实市价单，不挂止损止盈。每小时约 ${calls} 次模型调用；`
+          + `冷却 30 秒，最多 120 笔往返/小时，光点差就可能烧掉约 29 USD。`
+        : `只调模型、只在本地记账，不发单给券商。每小时约 ${calls} 次模型调用。`,
+      cost: live ? '真实下单 + 模型调用' : '仅模型调用',
+      okText: live ? '真实开始' : '开始（纸面）',
+    });
+  } catch (e) {
+    // 弹窗本身炸了也要让用户看见，否则又是「点了没反应」
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!ok) return;
+
+  atSay('');
+  $('atStart').disabled = true;
+  try {
+    const r = await fetch('/api/autotrade/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirm: true, dry_run: !live, symbol: 'XAUUSDm', lots: 0.01,
+        interval_sec: iv,
+        account: curLogin || undefined,
+      }),
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      atSay(atErrHtml(j.error), 'err');
+    } else {
+      atSay(`<b>已启动${j.dry_run ? '（纸面）' : '（真实做单）'}</b>：${esc(j.symbol)} ${j.lots} 手，
+             每 ${j.interval_sec} 秒判断一次。第一笔决策马上会出现在下面的表里。`, 'ok');
+    }
+  } catch (e) {
+    atSay('<b>启动请求失败：</b>' + esc(String(e)), 'err');
+  } finally {
+    $('atStart').disabled = false;
+    loadAutoTrade();
+  }
+}
+
+// 重置：清空 AI 自己攒的教训和战绩。
+// 为什么需要它：教训和战绩都拼进提示词，之前的亏损样本会让它越来越保守
+// （实测空单 1 胜 8 负 → 两条铁律 → 干脆不做空）。换参数前要个干净起点。
+// 旧流水不是删除，是改名归档，随时能翻。
+async function resetAutoTrade() {
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: '清空教训和战绩？',
+      desc: '会停掉 AI，把「复盘教训 / 战绩统计 / 待复盘队列」全部清零，'
+        + '新流水从零开始。旧流水改名成 autotrade_log.<时间戳>.jsonl 留在账户目录里，不删除。'
+        + '已经平掉的仓位记录不受影响。',
+      cost: '会停掉 AI（不平仓）',
+      okText: '重置',
+    });
+  } catch (e) {
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!ok) return;
+
+  atSay('');
+  $('atReset').disabled = true;
+  try {
+    const r = await fetch('/api/autotrade/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, account: curLogin || undefined }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const c = j.cleared || {};
+      const a = j.archived || {};
+      atSay(`<b>已重置</b>：清掉 ${c.rows || 0} 条流水（含 ${c.reviews || 0} 条教训、`
+        + `${c.closes || 0} 笔平仓记录）。旧文件已归档：`
+        + `${esc(a.log || '—')} / ${esc(a.state || '—')}。下一笔决策就是干净的起点。`, 'ok');
+    } else {
+      atSay('<b>重置失败：</b>' + esc(j.error || '未知错误'), 'err');
+    }
+  } catch (e) {
+    atSay('<b>重置请求失败：</b>' + esc(String(e)), 'err');
+  } finally {
+    $('atReset').disabled = false;
+    loadAutoTrade();
+  }
+}
+
+/* ==================== 全屏提醒幕布 ====================
+ * 目的只有一个：人离开屏幕时，别让别人（或自己）瞎点这台机器。
+ * 为什么不做成新开窗口：浏览器只允许「用户点击」的那一刻进全屏，
+ * 新窗口里的 requestFullscreen 没有这个手势，会被直接拒绝。
+ * 所以用当前页面全屏 + 一层盖住一切的幕布，效果一样、还不会被弹窗拦截。
+ */
+function enterTradingFullscreen() {
+  const el = $('atCurtain');
+  if (el) el.classList.remove('hidden');
+  const root = (typeof document !== 'undefined' && document.documentElement)
+    || (typeof document !== 'undefined' && document.body) || null;
+  const req = root && (root.requestFullscreen || root.webkitRequestFullscreen);
+  if (req) {
+    try {
+      const p = req.call(root);
+      if (p && typeof p.catch === 'function') p.catch(() => {});   // 被拒就只留幕布
+    } catch (e) { /* 老浏览器没有全屏 API：幕布照样能用 */ }
+  }
+  updateCurtain(lastAutoData);
+}
+
+function exitTradingFullscreen() {
+  const el = $('atCurtain');
+  if (el) el.classList.add('hidden');
+  if (typeof document === 'undefined') return;
+  const d = document;
+  if (d.fullscreenElement && d.exitFullscreen) {
+    try { d.exitFullscreen(); } catch (e) { /* 忽略 */ }
+  }
+}
+
+// 幕布上的状态是「顺便有用」：不显示的话它就是一块纯红字，看不出 AI 死没死
+function updateCurtain(a) {
+  const el = $('atCurtainStat');
+  if (!el || !a || !a.ok) return;
+  const p = a.position;
+  const posText = p
+    ? `${p.direction > 0 ? '多' : '空'} ${p.lots} 手 @ ${fmt(p.price_open, 3)}`
+    : '空仓（等下一次信号）';
+  const d = a.last_decision || {};
+  const call = d.reason ? `${d.kind === 'exit' ? '平仓判断' : '进场判断'}：${d.reason}` : '—';
+  const stopped = a.running ? '' : '<div style="color:#f0b429;margin-top:10px">⚠ AI 已停止，可以按 Esc 退出了</div>';
+  el.innerHTML = `<div>当前持仓　<b>${esc(posText)}</b></div>
+    <div>最近判断　${esc(call)}</div>
+    <div>已平仓 ${a.closed || 0} 笔　累计
+      <span class="${signClass(a.pnl || 0)}">${money(a.pnl || 0)}</span>
+      　·　${new Date().toLocaleTimeString('zh-CN')}</div>
+    ${stopped}`;
+}
+
+async function stopAutoTrade() {
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: '关闭 AI 并平掉所有仓位？',
+      desc: '停掉 AI 做单，然后向券商发送平仓单：账户上所有持仓都会平掉，包括你自己手动开的那些。平完不可撤销。',
+      cost: '会立刻平仓',
+      okText: '关闭并平仓',
+    });
+  } catch (e) {
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!ok) return;
+
+  atSay('');
+  $('atStop').disabled = true;
+  try {
+    const r = await fetch('/api/autotrade/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, flatten: true, account: curLogin || undefined }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      atSay('<b>已停止</b>：' + esc(j.note || `平掉 ${j.count || 0} 笔`), 'ok');
+    } else {
+      atSay('<b>关闭失败：</b>' + esc(j.error ||
+            ('有 ' + (j.failed || []).length + ' 笔平仓失败，请回终端确认')), 'err');
+    }
+  } catch (e) {
+    atSay('<b>关闭请求失败：</b>' + esc(String(e)), 'err');
+  } finally {
+    $('atStop').disabled = false;
+    loadAutoTrade();
+    refreshLive(true);
+  }
 }
 
 /* ==================== 行为标记累计 ====================
@@ -2144,16 +2690,61 @@ pollState();
 setInterval(pollState, 1500);
 
 // 实盘视图：进入页面先加载一次，之后每 20 秒刷新（只在实盘页可见时）
-// refreshLive 会顺带刷新账户列表——在 MT5 终端里切了账户，最多 20 秒后这里就能看到
+// 刷新分三档，别再整体 20 秒一次——盯着做单的人等不起。
+//   1 秒：AI 交易员（只读 state + 日志，6KB，完全不碰 MT5）
+//   3 秒：账本/持仓/账户数字（服务端缓存 TTL 也是 3 秒，读一次 MT5 约 33ms）
+//  20 秒：账户下拉列表（只在你于终端里切账户时才变）
+// 页面不可见 / 不在实盘页时不发请求，免得长期开着白烧 MT5。
+function pollVisible() {
+  return !document.hidden && !$('view-live').classList.contains('hidden');
+}
+
 refreshLive();
+loadAutoTrade();
+updateModeHint();
+
 setInterval(() => {
-  if (!$('view-live').classList.contains('hidden') && !document.hidden) refreshLive();
+  if (pollVisible()) loadAutoTrade();
+}, 1000);
+
+setInterval(() => {
+  if (pollVisible()) loadLive();
+}, 3000);
+
+setInterval(() => {
+  if (pollVisible()) refreshAccounts();
 }, 20000);
 
 $('acctPick').addEventListener('change', () => { sessSel = null; loadLive(true); });
 $('btnDelAcct').addEventListener('click', deleteAccount);
 
+// 幕布要能出得来：Esc 直接收，退出全屏也自动收。
+// 少这一条就成了"打开就关不掉"，只能刷新页面。
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') exitTradingFullscreen();
+});
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) {
+    const el = $('atCurtain');
+    if (el) el.classList.add('hidden');
+  }
+});
+
 loadEvalList().then(() => loadStrategies());
 </script>
+
+<!-- 全屏提醒幕布：默认隐藏，点「全屏提醒」才出来。
+     字是给"路过的人"看的，所以只有三层：正在做什么 / 别碰什么 / 怎么退出。 -->
+<div class="curtain hidden" id="atCurtain">
+  <div>
+    <div class="curtain-kicker">XAUUSD · M1 · 超短线</div>
+    <div class="curtain-title">AI 交易员正在交易</div>
+    <div class="curtain-sub">请勿操作这台电脑</div>
+    <div class="curtain-stat" id="atCurtainStat">—</div>
+    <div class="curtain-hint">
+      别手动开平仓 · 别让电脑睡眠 · 别切走 MT5 终端　·　按 <b>Esc</b> 退出
+    </div>
+  </div>
+</div>
 </body>
 </html>
