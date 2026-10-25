@@ -1951,5 +1951,74 @@ class TestSummary(TempLedger):
         self.assertEqual(len(autotrade.read_log()), 1)
 
 
+class TestSymbolSupport(unittest.TestCase):
+    """多品种：BTCUSDm 上线，价格精度必须跟着品种走。
+
+    背景：以前黄金写死 3 位小数、启动请求里写死 symbol='XAUUSDm'。
+    加第二个品种时这两处都会静默失效——BTC 会显示 80185.810，
+    前端选了下拉框也永远只发黄金。
+    """
+
+    def test_btc_spec_is_measured(self):
+        """规格必须来自实测，不能拍：point/contract 读 symbol_info，
+        spread 是 tick 中位数，atr 是 H4 ATR(14) 中位数。"""
+        from backtest.symbols import SYMBOLS
+
+        s = SYMBOLS["BTCUSDm"]
+        self.assertEqual(s["point"], 0.01)
+        self.assertEqual(s["contract"], 1.0)
+        self.assertEqual(s["digits"], 2)
+        self.assertEqual(s["spread"], 640)
+        self.assertEqual(s["atr_pts"], 82706)
+        # 成本占 ATR 的比例必须远低于 15% 的排除线，否则不该上实盘
+        self.assertLess(s["spread"] / s["atr_pts"], 0.05)
+
+    def test_btc_in_whitelist_and_unknown_rejected(self):
+        self.assertIn("BTCUSDm", autotrade.TRADABLE_SYMBOLS)
+        self.assertIn("XAUUSDm", autotrade.TRADABLE_SYMBOLS)
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(symbol="BTCUSDm")), [])
+        # 没实测过的品种必须被挡：点差成本会退回 0，把"没测过"显示成"零成本"
+        issues = autotrade.validate_cfg(autotrade.Cfg(symbol="EURUSDm"))
+        self.assertTrue(any("白名单" in i for i in issues), issues)
+
+    def test_symbol_options_only_whitelisted(self):
+        """面板下拉框的数据源必须等于后端白名单，前端不许另存一份。"""
+        opts = autotrade.symbol_options()
+        self.assertEqual([o["symbol"] for o in opts],
+                         list(autotrade.TRADABLE_SYMBOLS))
+        for o in opts:
+            self.assertTrue(o["label"])
+            self.assertTrue(o["digits"])
+            self.assertIsNotNone(o["point"])
+
+    def test_price_precision_follows_symbol(self):
+        self.assertEqual(autotrade._px("BTCUSDm", 80185.812), "80185.81")
+        self.assertEqual(autotrade._px("BTCUSDm", 80185.0), "80185.00")
+        self.assertEqual(autotrade._px("XAUUSDm", 4024.1394), "4024.139")
+        self.assertEqual(autotrade._digits("BTCUSDm"), 2)
+        self.assertEqual(autotrade._digits("XAUUSDm"), 3)
+        # 未知品种退回 3 位，不抛异常（不能让一个品种名把 prompt 构建搞崩）
+        self.assertEqual(autotrade._digits("WHATEVER"), 3)
+
+    def test_entry_prompt_btc_two_decimals(self):
+        rows = [{"time": NOW + i * 60, "open": 80000.0 + i * 10,
+                 "high": 80050.0 + i * 10, "low": 79950.0 + i * 10,
+                 "close": 80000.0 + i * 10} for i in range(14)]
+        p = autotrade.build_entry_prompt(rows, 80185.81, 80192.21,
+                                        symbol="BTCUSDm", point=0.01)
+        self.assertIn("80185.81", p)          # 2 位，不是 80185.810
+        self.assertIn("点差=640 点", p)        # (80192.21-80185.81)/0.01
+        self.assertNotIn("80185.810", p)
+        self.assertIn("品种 BTCUSDm", p)
+
+    def test_btc_spread_cost_scales_with_contract(self):
+        """0.01 手 BTC 的点差成本 = 640 × 0.01 × 0.01 × 1 = 0.064 USD，
+        黄金 = 240 × 0.001 × 0.01 × 100 = 0.24 USD。公式必须同一个。"""
+        c_btc = autotrade._spread_cost("BTCUSDm", 0.01)
+        c_xau = autotrade._spread_cost("XAUUSDm", 0.01)
+        self.assertAlmostEqual(c_btc, 0.064, places=6)
+        self.assertAlmostEqual(c_xau, 0.24, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

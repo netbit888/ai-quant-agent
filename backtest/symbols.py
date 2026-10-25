@@ -20,13 +20,19 @@ H4 级别每笔开仓先亏 0.15 ATR，结构策略无法覆盖这个成本。
 from __future__ import annotations
 
 SYMBOLS = {
-    "XAUUSDm": {"point": 0.001, "contract": 100.0, "spread": 240, "atr_pts": 8583},
-    "USDJPYm": {"point": 0.001, "contract": 100000.0, "spread": 10, "atr_pts": 318, "quote_from_price": True},
-    "EURUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 8, "atr_pts": 259},
-    "GBPUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 10, "atr_pts": 333},
-    "JP225m": {"point": 0.1, "contract": 1.0, "spread": 123, "atr_pts": 2350, "quote_rate": 158.0},
-    "US30_x10m": {"point": 0.1, "contract": 10.0, "spread": 19, "atr_pts": 1924},
-    "US500_x100m": {"point": 0.01, "contract": 100.0, "spread": 64, "atr_pts": 2679},
+    "XAUUSDm": {"point": 0.001, "contract": 100.0, "spread": 240, "atr_pts": 8583, "digits": 3},
+    "USDJPYm": {"point": 0.001, "contract": 100000.0, "spread": 10, "atr_pts": 318, "quote_from_price": True, "digits": 3},
+    "EURUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 8, "atr_pts": 259, "digits": 5},
+    "GBPUSDm": {"point": 0.00001, "contract": 100000.0, "spread": 10, "atr_pts": 333, "digits": 5},
+    "JP225m": {"point": 0.1, "contract": 1.0, "spread": 123, "atr_pts": 2350, "quote_rate": 158.0, "digits": 1},
+    "US30_x10m": {"point": 0.1, "contract": 10.0, "spread": 19, "atr_pts": 1924, "digits": 1},
+    "US500_x100m": {"point": 0.01, "contract": 100.0, "spread": 64, "atr_pts": 2679, "digits": 2},
+    # 2026-10-25 实测（MT5 symbol_info + H4 500 根 ATR14 中位数 + 最近 30 分钟 tick）：
+    #   point=0.01 / contract=1.0 / digits=2（symbol_info('BTCUSDm')）
+    #   spread=640 点 —— 1921 笔 tick 的点差中位数，同时也是当前值
+    #   atr_pts=82706 点 —— H4 ATR(14) 中位数，即 827.06 USD
+    # 成本占比：640 / 82706 = 0.77%，远低于 15% 的排除线，可以上。
+    "BTCUSDm": {"point": 0.01, "contract": 1.0, "spread": 640, "atr_pts": 82706, "digits": 2},
 }
 
 STRUCT_ATR = 1.63

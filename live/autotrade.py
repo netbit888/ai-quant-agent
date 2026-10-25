@@ -474,10 +474,11 @@ def summarize_ticks(ticks: list[dict], bars: list[dict],
     }
 
 
-def _fmt_tick_block(summary: dict) -> str:
+def _fmt_tick_block(summary: dict, digits: int = 3) -> str:
     if not summary or not summary.get("ok"):
         return "（tick 数据暂不可用，只能依据上面的 K 线判断）"
 
+    d = max(0, int(digits))
     lines = ["分钟   tick数  买价区间                  卖价区间                  点差 均/最大"]
     for r in summary["rows"]:
         if not r.get("n"):
@@ -485,8 +486,8 @@ def _fmt_tick_block(summary: dict) -> str:
             continue
         lines.append(
             f"{r['tag']:<6} {r['n']:>6}  "
-            f"{r['bid_lo']:.3f}-{r['bid_hi']:.3f}          "
-            f"{r['ask_lo']:.3f}-{r['ask_hi']:.3f}          "
+            f"{r['bid_lo']:.{d}f}-{r['bid_hi']:.{d}f}          "
+            f"{r['ask_lo']:.{d}f}-{r['ask_hi']:.{d}f}          "
             f"{r['spread_avg']:.0f}/{r['spread_max']:.0f}"
         )
 
@@ -498,7 +499,7 @@ def _fmt_tick_block(summary: dict) -> str:
             ts = int(t.get("time") or 0)
             clock = time.strftime("%H:%M:%S", time.gmtime(ts)) if ts else "--"
             lines.append(
-                f"  {clock}  {float(t.get('bid') or 0):.3f}/{float(t.get('ask') or 0):.3f}"
+                f"  {clock}  {float(t.get('bid') or 0):.{d}f}/{float(t.get('ask') or 0):.{d}f}"
                 f"  点差 {_spread_points(t, summary.get('point') or 0.001):.0f}"
             )
 
@@ -624,10 +625,10 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 【主】{structure}
 【辅】Tick 级数据（逐笔 bid/ask，时间段与上面 14 根完全相同；只用于确认突破真假与点差）
 {ticks}
-短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span:.3f}
+短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
 战绩 样本={n_closed} 笔  命中率={hit}
 {lessons}
-报价 bid={bid:.3f}  ask={ask:.3f}  点差={spread_pts} 点
+报价 bid={bid}  ask={ask}  点差={spread_pts} 点
 时间 {clock} UTC"""
 
 EXIT_SYSTEM = """你是 XAUUSD 超短线交易员的持仓管理模块，只决定「继续持有」还是「立刻平仓」。
@@ -680,11 +681,11 @@ EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 
 【辅】Tick 级数据（逐笔 bid/ask，时间段与上面 14 根完全相同）
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}
-持仓 {direction_text} {lots} 手  开仓 {entry:.3f}  已持仓 {held_text}  浮动 {pnl_text}
+持仓 {direction_text} {lots} 手  开仓 {entry}  已持仓 {held_text}  浮动 {pnl_text}
 开仓依据 {entry_reason}
 你从自己交易里总结的教训
 {lessons}
-报价 bid={bid:.3f}  ask={ask:.3f}
+报价 bid={bid}  ask={ask}
 时间 {clock} UTC"""
 
 REVIEW_SYSTEM = """你是一名 XAUUSD 超短线交易员的复盘教练。仓位已经平掉了，这一笔的钱已经落袋，
@@ -699,7 +700,7 @@ REVIEW_SYSTEM = """你是一名 XAUUSD 超短线交易员的复盘教练。仓�
 不要客套，不要复述数字以外的事实。"""
 
 REVIEW_PROMPT = """这一笔刚平掉。
-方向：{direction_text}　手数：{lots}　开仓 {entry:.3f} → 平仓 {exit_price:.3f}
+方向：{direction_text}　手数：{lots}　开仓 {entry} → 平仓 {exit_price}
 最终盈亏：{pnl:+.2f} USD　持仓 {held_text}
 开仓理由：{why_in}
 平仓理由：{why_out}
@@ -839,7 +840,8 @@ def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
     return -1                  # 震荡或跌势贴上沿：倾向做空
 
 
-def _structure_text(rows: list[dict], zone_edge: float = 0.35) -> str:
+def _structure_text(rows: list[dict], zone_edge: float = 0.35,
+                    digits: int = 3) -> str:
     s = _structure(rows)
     if not s.get("ok"):
         return "结构 数据不足"
@@ -864,31 +866,37 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35) -> str:
     # 净移动带符号：只给 0.12 这种绝对值，模型分不清是在跌还是在涨
     drift = s["drift"]
     dir_text = "上行" if drift > 0 else ("下行" if drift < 0 else "走平")
-    return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.3f}（{dir_text}）/ 总行程 {s['path']:.3f}）"
-            f"｜振幅 {s['span']:.3f}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
+    d = max(0, int(digits))
+    return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.{d}f}（{dir_text}）/ 总行程 {s['path']:.{d}f}）"
+            f"｜振幅 {s['span']:.{d}f}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
             f"｜{streak_text}｜位置判定：{zone}｜行情判定：{regime}")
 
 
-def _fmt_bar_lines(rows: list[dict]) -> str:
-    """K 线表格。序号列用 T-13…T-1 / 当前，让模型一眼知道"只有这么点数据"。"""
+def _fmt_bar_lines(rows: list[dict], digits: int = 3) -> str:
+    """K 线表格。序号列用 T-13…T-1 / 当前，让模型一眼知道"只有这么点数据"。
+
+    digits 必须跟着品种走：黄金 3 位、BTC 2 位。写死 3 位在 BTC 上只是多一个
+    没意义的 0，但在 5 位报价的外汇上会把价格截断——那是真的误导。
+    """
     lines = []
     n = len(rows)
+    d = max(0, int(digits))
     for i, r in enumerate(rows):
         ts = int(r.get("time") or 0)
         clock = time.strftime("%m-%d %H:%M", time.gmtime(ts)) if ts else "--"
         tag = "当前" if i == n - 1 else f"T-{n - 1 - i:<2}"
         lines.append(
-            f"{tag}  {clock}  {float(r.get('open') or 0):.3f}  "
-            f"{float(r.get('high') or 0):.3f}  "
-            f"{float(r.get('low') or 0):.3f}  "
-            f"{float(r.get('close') or 0):.3f}"
+            f"{tag}  {clock}  {float(r.get('open') or 0):.{d}f}  "
+            f"{float(r.get('high') or 0):.{d}f}  "
+            f"{float(r.get('low') or 0):.{d}f}  "
+            f"{float(r.get('close') or 0):.{d}f}"
         )
     return "\n".join(lines)
 
 
-def _fmt_bars(rows: list[dict]) -> str:
+def _fmt_bars(rows: list[dict], digits: int = 3) -> str:
     """喂给决策提示词的 K 线。**永远只有 14 根**，不接受"多给一点"。"""
-    return _fmt_bar_lines(visible_bars(rows))
+    return _fmt_bar_lines(visible_bars(rows), digits)
 
 
 def _returns(rows: list[dict]) -> tuple[float, float, float, float]:
@@ -922,6 +930,25 @@ def _point(symbol: str) -> float:
         return 0.001
 
 
+def _digits(symbol: str) -> int:
+    """报价小数位。黄金 3 位、BTC 2 位——写死 3 位会让 80185.81 显示成
+    80185.810，看着像精度过剩；更有害的是 EURUSD 5 位会被砍成 3 位。"""
+    try:
+        from backtest.symbols import SYMBOLS
+
+        return int((SYMBOLS.get(symbol) or {}).get("digits") or 3)
+    except Exception:  # noqa: BLE001
+        return 3
+
+
+def _px(symbol: str, value) -> str:
+    """按品种精度格式化价格。"""
+    try:
+        return f"{float(value):.{_digits(symbol)}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _spread_cost(symbol: str, lots: float) -> float:
     try:
         from backtest.symbols import spread_cost_usd
@@ -936,7 +963,8 @@ def _ticks_text(cfg: Cfg, bars: list[dict]) -> str:
     if not cfg.ticks:
         return "（tick 数据已关闭，只能依据 K 线判断）"
     ticks = fetch_ticks(cfg, bars)
-    return _fmt_tick_block(summarize_ticks(ticks, bars, _point(cfg.symbol)))
+    return _fmt_tick_block(summarize_ticks(ticks, bars, _point(cfg.symbol)),
+                           _digits(cfg.symbol))
 
 
 def build_entry_prompt(rows: list[dict], bid: float, ask: float,
@@ -955,11 +983,13 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
 
     spread_pts = int(round((ask - bid) / point)) if point else 0
     clock = time.strftime("%Y-%m-%d %H:%M", time.gmtime())
+    dg = _digits(symbol)
     return ENTRY_PROMPT.format(
-        symbol=symbol, clock=clock, bid=bid, ask=ask, spread_pts=spread_pts,
-        n=len(w), tf=tf, bars=_fmt_bar_lines(w),
-        structure=_structure_text(w, zone_edge),
-        r1=r1, r5=r5, r13=r13, span=span,
+        symbol=symbol, clock=clock, bid=_px(symbol, bid), ask=_px(symbol, ask),
+        spread_pts=spread_pts,
+        n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
+        structure=_structure_text(w, zone_edge, dg),
+        r1=r1, r5=r5, r13=r13, span=_px(symbol, span),
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
@@ -980,16 +1010,17 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
 
     held = int(time.time()) - int(position.get("opened_at") or time.time())
     held_text = f"{held // 60} 分 {held % 60} 秒" if held >= 60 else f"{max(held, 0)} 秒"
-    pnl_text = f"{pnl:+.2f} USD（{cur - entry:+.3f}）"
+    dg = _digits(symbol)
+    pnl_text = f"{pnl:+.2f} USD（{cur - entry:+.{dg}f}）"
 
     return EXIT_PROMPT.format(
         symbol=symbol, clock=time.strftime("%Y-%m-%d %H:%M", time.gmtime()),
         direction_text="多" if direction > 0 else "空",
-        lots=lots, entry=entry, held_text=held_text,
-        bid=bid, ask=ask, pnl_text=pnl_text,
+        lots=lots, entry=_px(symbol, entry), held_text=held_text,
+        bid=_px(symbol, bid), ask=_px(symbol, ask), pnl_text=pnl_text,
         entry_reason=(position.get("entry_reason") or "未记录")[:120],
-        n=len(w), tf=tf, bars=_fmt_bar_lines(w),
-        structure=_structure_text(w, zone_edge),
+        n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
+        structure=_structure_text(w, zone_edge, dg),
         r1=r1, r5=r5, r13=r13,
         lessons=lessons or "暂无复盘笔记。",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
@@ -1032,7 +1063,7 @@ def review_window(rows: list[dict], close_ts: int, tf_sec: int = 60,
     return [r for r in rows if start <= int(r.get("time") or 0) <= end]
 
 
-def _fmt_review_bars(window: list[dict], close_ts: int) -> str:
+def _fmt_review_bars(window: list[dict], close_ts: int, digits: int = 3) -> str:
     """复盘用的 K 线表，额外标出「哪根是平仓那根」。
 
     不标的话模型看到 20 根只会笼统点评，分不清"平仓后走势"和"持仓中走势"，
@@ -1044,7 +1075,7 @@ def _fmt_review_bars(window: list[dict], close_ts: int) -> str:
     for i, r in enumerate(window):
         if int(r.get("time") or 0) <= int(close_ts):
             idx = i                        # 最后一个不晚于平仓时刻的，就是平仓那根
-    lines = _fmt_bar_lines(window).splitlines()
+    lines = _fmt_bar_lines(window, digits).splitlines()
     lines[idx] = lines[idx] + "  ← 平仓"
     return "\n".join(lines) + ("\n（「← 平仓」之后的是平仓后的走势）"
                                if idx < len(lines) - 1 else "")
@@ -1053,19 +1084,21 @@ def _fmt_review_bars(window: list[dict], close_ts: int) -> str:
 def build_review_prompt(rows: list[dict], position: dict, exit_price: float,
                         pnl: float, held_sec: int, tf: str = "M1",
                         close_ts: int | None = None,
-                        after: int = REVIEW_AFTER_BARS) -> str:
+                        after: int = REVIEW_AFTER_BARS,
+                        symbol: str = "XAUUSDm") -> str:
     direction = int(position.get("direction") or 1)
     held_text = f"{held_sec // 60} 分 {held_sec % 60} 秒" if held_sec >= 60 else f"{max(held_sec, 0)} 秒"
     close_ts = int(close_ts if close_ts is not None else (rows[-1].get("time") if rows else 0))
+    dg = _digits(symbol)
     return REVIEW_PROMPT.format(
         direction_text="多" if direction > 0 else "空",
         lots=float(position.get("lots") or 0.0),
-        entry=float(position.get("price_open") or 0.0),
-        exit_price=exit_price, pnl=pnl, held_text=held_text,
+        entry=_px(symbol, position.get("price_open")),
+        exit_price=_px(symbol, exit_price), pnl=pnl, held_text=held_text,
         why_in=(position.get("entry_reason") or "未记录")[:120],
         why_out=(position.get("exit_reason") or "外部平仓")[:120],
         before=REVIEW_BEFORE_BARS, after=after, n=len(rows), tf=tf,
-        bars=_fmt_review_bars(rows, close_ts),
+        bars=_fmt_review_bars(rows, close_ts, dg),
     )
 
 
@@ -1089,7 +1122,7 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
 
     prompt = build_review_prompt(window, position, exit_price, pnl, held_sec,
                                  cfg.tf, close_ts=closed_at,
-                                 after=REVIEW_AFTER_BARS)
+                                 after=REVIEW_AFTER_BARS, symbol=cfg.symbol)
     try:
         text, usage = _chat(prompt, REVIEW_SYSTEM)
     except Exception as exc:  # noqa: BLE001
@@ -1467,6 +1500,35 @@ def _exit_hold(why: str) -> dict:
 # "平仓后 1 分钟内必须重新开仓"这条要求下，用 interval_sec(60) 当守卫
 # 会把重开直接顶到 60 秒开外，自己把自己锁死。真正的间隔由 cooldown_sec 管。
 MIN_OPEN_GAP_SEC = 3
+
+# 允许上真单的品种。不直接用 SYMBOLS.keys()：那张表是回测用的全量清单，
+# 里面的外汇/指数没在实盘验证过——实盘白名单必须显式列出来，加一个要想一次。
+# 每个品种的 point/contract/spread/atr 都在 backtest/symbols.py 里带实测来源。
+TRADABLE_SYMBOLS = ("XAUUSDm", "BTCUSDm")
+
+# 给面板用的品种展示名（下拉框文案）。键必须都在 TRADABLE_SYMBOLS 里。
+SYMBOL_LABELS = {
+    "XAUUSDm": "黄金 XAUUSD",
+    "BTCUSDm": "比特币 BTCUSD",
+}
+
+
+def symbol_options() -> list[dict]:
+    """面板下拉框的数据源：只给白名单，附 point/contract 供前端显示成本。"""
+    from backtest.symbols import SYMBOLS
+
+    out = []
+    for s in TRADABLE_SYMBOLS:
+        spec = SYMBOLS.get(s) or {}
+        out.append({
+            "symbol": s,
+            "label": SYMBOL_LABELS.get(s, s),
+            "point": spec.get("point"),
+            "contract": spec.get("contract"),
+            "spread": spec.get("spread"),
+            "digits": spec.get("digits"),
+        })
+    return out
 
 
 def can_open(state: dict, now: int, has_position: bool, cfg: Cfg) -> tuple[bool, str]:
@@ -2053,6 +2115,13 @@ def validate_cfg(cfg: Cfg) -> list[str]:
     不如启动时就说清楚。
     """
     issues: list[str] = []
+    # 品种必须在白名单里：SYMBOLS 里没测过 point/contract/spread 的品种，
+    # 点差成本会退回 0（把「没测过」显示成「零成本」），风险直接失控。
+    if cfg.symbol not in TRADABLE_SYMBOLS:
+        issues.append(
+            f"品种 {cfg.symbol} 不在可交易白名单（{'/'.join(TRADABLE_SYMBOLS)}）："
+            "没有实测 point/contract/spread 的品种不能上真单"
+        )
     # 3 秒是物理下限：一次模型调用实测 ~2.6 秒，再短线程就在堆请求，
     # 上一轮没回来下一轮已经开始，决策全挤在一起。
     if cfg.interval_sec < 3:
@@ -2493,6 +2562,10 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "model_failures": failures,
         "cache": cache_stats(login),
         "model": model_name,
+        # 品种选择器：面板下拉框直接读这个，别在前端另存一份白名单——
+        # 前端写死一份、后端校验另一份，加品种时必然漂移。
+        "symbols": symbol_options(),
+        "symbol": saved_cfg.get("symbol", _defaults.symbol),
         "recent": rows[-recent:],
     }
 

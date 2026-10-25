@@ -646,6 +646,10 @@
     <div class="card-head">
       <h2>AI 交易员</h2>
       <span class="badge-off" id="atState" style="display:none">未启动</span>
+      <label class="mini at-int" title="做单品种。只列实测过 point/contract/spread 的品种——没测过的品种点差成本会算成 0，风险失控">
+        品种
+        <select id="atSymbol" onchange="updateCostHint()"></select>
+      </label>
       <div class="at-mode" role="radiogroup" aria-label="做单模式">
         <label title="只调模型、只在本地记账，不发单给券商">
           <input type="radio" name="atMode" id="atModePaper" value="paper" checked
@@ -1693,6 +1697,9 @@ function renderAutoTrade(a) {
   $('atModePaper').disabled = lockMode;
   $('atModeLive').disabled = lockMode;
   $('atInterval').disabled = lockMode;
+  // 品种同样锁死：跑起来之后换品种等于换了一个策略，仓位还在旧品种上
+  fillSymbolOptions(a);
+  if ($('atSymbol')) $('atSymbol').disabled = lockMode;
   if (lockMode) {
     $('atModePaper').checked = !!a.dry_run;
     $('atModeLive').checked = !a.dry_run;
@@ -1755,16 +1762,53 @@ function updateModeHint() {
   if (!el) return;
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
-  // 冷却 30 秒 ⇒ 每小时最多 120 笔往返；每笔点差约 0.24 USD
+  // 冷却 30 秒 ⇒ 每小时最多 120 笔往返；每笔点差按当前品种现算
   const trips = Math.min(calls, 120);
+  const perTrip = atSpreadCostUsd();
   if (atLiveMode()) {
-    el.textContent = `真实 · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
-      + `最多 ${trips} 笔往返 ≈ 点差 ${fmt(trips * 0.24, 0)} USD/小时`;
+    const total = perTrip == null ? '未知' : fmt(trips * perTrip, 2) + ' USD/小时';
+    el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
+      + `最多 ${trips} 笔往返 ≈ 点差 ${total}`;
     el.className = 'mini red';
   } else {
-    el.textContent = `纸面 · 每 ${iv} 秒判断 · 约 ${calls} 次模型调用/小时`;
+    el.textContent = `纸面 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次模型调用/小时`;
     el.className = 'mini';
   }
+}
+
+/* 品种规格表：从 /api/autotrade 的 symbols 字段来，前端不另存白名单——
+   写死一份、后端校验另一份，加品种时必然漂移。 */
+let atSymbolSpecs = {};
+
+function atSymbol() {
+  const el = $('atSymbol');
+  return (el && el.value) || 'XAUUSDm';
+}
+
+function atSymbolLabel() {
+  const s = atSymbolSpecs[atSymbol()];
+  return s ? s.label : atSymbol();
+}
+
+/* 一笔往返的点差成本（USD），公式与后端 spread_cost_usd 逐字一致：
+   spread_points × point × volume × contract。拿不到规格就返回 null，
+   绝不返回 0——把「没测过」显示成「零成本」会直接误导。 */
+function atSpreadCostUsd(lots) {
+  const spec = atSymbolSpecs[atSymbol()];
+  if (!spec || spec.spread == null || spec.point == null || spec.contract == null) return null;
+  return spec.spread * spec.point * (lots || 0.01) * spec.contract;
+}
+
+function fillSymbolOptions(a) {
+  const el = $('atSymbol');
+  if (!el || !Array.isArray(a.symbols) || !a.symbols.length) return;
+  const cur = a.symbol || 'XAUUSDm';
+  a.symbols.forEach(s => { atSymbolSpecs[s.symbol] = s; });
+  // 运行中要把下拉框对齐到实际在跑的品种，否则界面说黄金、实际在跑 BTC
+  const want = a.running ? cur : (el.value || cur);
+  el.innerHTML = a.symbols.map(s =>
+    `<option value="${esc(s.symbol)}">${esc(s.label)}</option>`).join('');
+  if (a.symbols.some(s => s.symbol === want)) el.value = want;
 }
 
 /* 操作结果条。和 atNote 分开：atNote 每 15 秒被轮询覆写一次，
@@ -1792,14 +1836,19 @@ async function startAutoTrade() {
   const live = atLiveMode();
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
+  const sym = atSymbol();
+  const perTrip = atSpreadCostUsd();
   let ok = false;
   try {
     ok = await confirmApiCall({
-      title: live ? `真实下单：每 ${iv} 秒判断一次，开始？` : `纸面：每 ${iv} 秒判断一次，开始？`,
+      title: live ? `真实下单：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
+                  : `纸面：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`,
       desc: live
-        ? `会向券商发真实市价单，不挂止损止盈。每小时约 ${calls} 次模型调用；`
-          + `冷却 30 秒，最多 120 笔往返/小时，光点差就可能烧掉约 29 USD。`
-        : `只调模型、只在本地记账，不发单给券商。每小时约 ${calls} 次模型调用。`,
+        ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
+          + `每小时约 ${calls} 次模型调用；冷却 30 秒，最多 120 笔往返/小时，`
+          + `光点差就可能烧掉约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
+        : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
+          + `每小时约 ${calls} 次模型调用。`,
       cost: live ? '真实下单 + 模型调用' : '仅模型调用',
       okText: live ? '真实开始' : '开始（纸面）',
     });
@@ -1816,7 +1865,7 @@ async function startAutoTrade() {
     const r = await fetch('/api/autotrade/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        confirm: true, dry_run: !live, symbol: 'XAUUSDm', lots: 0.01,
+        confirm: true, dry_run: !live, symbol: sym, lots: 0.01,
         interval_sec: iv,
         account: curLogin || undefined,
       }),

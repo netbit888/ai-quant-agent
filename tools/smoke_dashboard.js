@@ -78,7 +78,7 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -168,6 +168,11 @@ try {
   // 它的 entry_reason 来自当初的开仓行，reason 来自这次的离场判断。
   const atSample = {
     ok: true, running: true, dry_run: true, stale: false, stop_reason: null,
+    symbol: 'BTCUSDm',
+    symbols: [
+      { symbol: 'XAUUSDm', label: '黄金 XAUUSD', point: 0.001, contract: 100.0, spread: 240, digits: 3 },
+      { symbol: 'BTCUSDm', label: '比特币 BTCUSD', point: 0.01, contract: 1.0, spread: 640, digits: 2 },
+    ],
     position: { direction: 1, lots: 0.01, price_open: 4000.5, p_up: 0.62 },
     last_decision: { ts: 1790000000, kind: 'entry', p_up: 0.62, direction: 1, act: false },
     trades: 2, closed: 1, wins: 1, pnl: 0.88,
@@ -196,6 +201,23 @@ try {
   const detailBtns = (made.rowsAuto.innerHTML.match(/tradeDetailShow/g) || []).length;
   console.log(`  open/close 行带「详情」按钮 ${detailBtns >= 2 ? '✓' : '✗'}（${detailBtns} 个）`);
   if (detailBtns < 2) failed = true;
+
+  // 品种选择：下拉框必须由后端 symbols 填充，且运行中锁定并显示实际在跑的品种
+  const symHtml = String(made.atSymbol.innerHTML || '');
+  const optCount = (symHtml.match(/<option/g) || []).length;
+  console.log(`  品种下拉 ${optCount} 个 ${optCount === 2 ? '✓' : '✗'}`);
+  if (optCount !== 2) failed = true;
+  console.log(`  下拉含 BTC ${symHtml.includes('BTCUSDm') ? '✓' : '✗'}`);
+  if (!symHtml.includes('BTCUSDm')) failed = true;
+  console.log(`  运行中锁定品种 ${made.atSymbol.disabled === true ? '✓' : '✗'}`);
+  if (made.atSymbol.disabled !== true) failed = true;
+  console.log(`  对齐到实际在跑的品种 ${made.atSymbol.value === 'BTCUSDm' ? '✓' : '✗'}（${made.atSymbol.value}）`);
+  if (made.atSymbol.value !== 'BTCUSDm') failed = true;
+  // 点差成本必须按品种算：BTC 640×0.01×0.01×1 = 0.064，不是黄金的 0.24
+  const btcCost = api.atSpreadCostUsd(0.01);
+  const costOk = btcCost != null && Math.abs(btcCost - 0.064) < 1e-9;
+  console.log(`  BTC 点差成本按品种计算 ${costOk ? '✓' : '✗'}（${btcCost}）`);
+  if (!costOk) failed = true;
   if (made.rowsAuto.innerHTML.includes('undefined') || made.rowsAuto.innerHTML.includes('NaN')) {
     console.log('  ✗ AI 做单表出现 undefined / NaN');
     failed = true;
