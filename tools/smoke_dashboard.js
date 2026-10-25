@@ -177,9 +177,9 @@ try {
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
     recent: [
-      { ts: 1790000000, kind: 'open', direction: 1, p_up: 0.62,
+      { ts: 1790000000, kind: 'open', ticket: 1001, direction: 1, p_up: 0.62,
         reason: '近 5 根连阳', source: 'llm' },
-      { ts: 1790000060, kind: 'close', direction: 1, pnl: 0.88,
+      { ts: 1790000060, kind: 'close', ticket: 1001, direction: 1, pnl: 0.88,
         entry_reason: '近 5 根连阳', reason: '动能衰竭', source: 'llm' },
       { ts: 1790000120, kind: 'skip', reason: '平仓后冷却中，还需 20 秒' },
       { ts: 1790000180, kind: 'review', direction: 1, pnl: 0.88,
@@ -191,8 +191,11 @@ try {
   console.log(`\nAI 做单表 ${atRows} 行 ${atRows === 4 ? '✓' : '✗'}`);
   if (atRows !== 4) failed = true;
   const atCols = (made.rowsAuto.innerHTML.match(/<td/g) || []).length / Math.max(atRows, 1);
-  console.log(`  每行 ${atCols} 列 ${atCols === 8 ? '✓' : '✗'}（开仓理由 / 平仓理由 分列）`);
-  if (atCols !== 8) failed = true;
+  console.log(`  每行 ${atCols} 列 ${atCols === 9 ? '✓' : '✗'}（开仓理由 / 平仓理由 / 详情 分列）`);
+  if (atCols !== 9) failed = true;
+  const detailBtns = (made.rowsAuto.innerHTML.match(/tradeDetailShow/g) || []).length;
+  console.log(`  open/close 行带「详情」按钮 ${detailBtns >= 2 ? '✓' : '✗'}（${detailBtns} 个）`);
+  if (detailBtns < 2) failed = true;
   if (made.rowsAuto.innerHTML.includes('undefined') || made.rowsAuto.innerHTML.includes('NaN')) {
     console.log('  ✗ AI 做单表出现 undefined / NaN');
     failed = true;

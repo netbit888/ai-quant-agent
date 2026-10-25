@@ -410,6 +410,26 @@
   .btn-ok:disabled, .btn-cancel:disabled { opacity: .5; cursor: default; }
   .api-meter { font-size: 10.5px; color: var(--dim); font-family: var(--mono); }
 
+  /* ---------------- 单笔交易溯源弹窗 ---------------- */
+  .modal-wide { width: min(860px, calc(100vw - 40px)); max-height: calc(100vh - 60px); overflow-y: auto; }
+  .td-sec { margin: 14px 0 0; }
+  .td-sec > b { display: block; font-size: 12px; color: var(--accent, #4a9eff); margin-bottom: 6px; letter-spacing: .5px; }
+  .td-sec pre {
+    margin: 0; padding: 9px 11px; border-radius: 8px; font-size: 11px; line-height: 1.65;
+    background: rgba(255,255,255,.04); border: 1px solid var(--border-hi);
+    overflow-x: auto; font-family: var(--mono); color: var(--text); white-space: pre;
+  }
+  .td-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
+  .td-grid .mini { color: var(--muted); font-size: 11px; }
+  .td-verdict-ok  { color: #4ade80; font-weight: 700; }
+  .td-verdict-dif { color: #f0b429; font-weight: 700; }
+  .td-note { font-size: 11px; color: var(--dim); font-style: italic; margin-top: 4px; }
+  .link-btn {
+    background: none; border: none; color: var(--accent, #4a9eff); cursor: pointer;
+    font-size: 11px; padding: 0 2px; text-decoration: underline; font-family: inherit;
+  }
+  .link-btn:hover { filter: brightness(1.2); }
+
   /* ---------------- 交易评分 ---------------- */
   .score-top { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
   .grade-badge {
@@ -566,6 +586,17 @@
   </div>
 </div>
 
+<!-- 单笔交易溯源：原料 → 结构 → 程序判断 vs 模型判断 → 执行结果 → 复盘 -->
+<div class="modal-mask hidden" id="tradeMask" onclick="if(event.target===this) tradeMaskClose()">
+  <div class="modal modal-wide" role="dialog" aria-modal="true">
+    <h4 id="tdTitle">交易详情</h4>
+    <div id="tdBody" class="mini">读取中…</div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="tradeMaskClose()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <h1>AI Quant</h1>
   <span class="pill"><span id="dot" class="dot"></span><span id="statusText">连接中</span></span>
@@ -688,7 +719,7 @@
       <span id="atCache"></span>
       <span id="atModel"></span>
     </div>
-    <table><thead><tr><th>时间</th><th>动作</th><th>方向</th><th>p_up</th><th>盈亏</th><th>来源</th><th>开仓理由</th><th>平仓理由</th></tr></thead><tbody id="rowsAuto"></tbody></table>
+    <table><thead><tr><th>时间</th><th>动作</th><th>方向</th><th>p_up</th><th>盈亏</th><th>来源</th><th>开仓理由</th><th>平仓理由</th><th></th></tr></thead><tbody id="rowsAuto"></tbody></table>
   </div>
 
   <!-- 本场复盘：盘后打开先看这一块。按「上一笔平仓→下一笔开仓」超过 30 分钟切场 -->
@@ -1697,8 +1728,10 @@ function renderAutoTrade(a) {
       <td class="mini">${esc(src)}</td>
       <td class="mini">${esc(String(whyIn).slice(0, 80))}${r.error ? `<div class="red">${esc(String(r.error).slice(0, 60))}</div>` : ''}</td>
       <td class="mini">${esc(String(whyOut).slice(0, 80))}</td>
+      <td>${r.ticket && (r.kind === 'open' || r.kind === 'close')
+            ? `<button class="link-btn" onclick="tradeDetailShow(${r.ticket})">详情</button>` : ''}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="8" class="empty">还没有决策记录。点「开始做单」，或先跑 <code>python -m live.autotrade --once</code> 试一轮。</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">还没有决策记录。点「开始做单」，或先跑 <code>python -m live.autotrade --once</code> 试一轮。</td></tr>';
 }
 
 /* 开始 / 关闭。
@@ -2020,6 +2053,80 @@ function updateCurtain(a) {
     ${stopped}`;
 }
 
+/* ==================== 单笔交易溯源 ====================
+ * 点「详情」按钮后展示一笔交易的全链路：
+ * 原料（14 根 K 线 / tick）→ 结构（ER/位置判定）→ 程序建议 vs 模型判断
+ * → 执行结果 → 复盘。数据来自 GET /api/trade?ticket=，只读、不花钱。
+ * 终端离线时原料部分会如实标注「无法重建」，不冒充。 */
+const PROG_DIR_TEXT = { 1: '做多', '-1': '做空', 0: '不动手（无建议）' };
+
+function tradeMaskClose() {
+  $('tradeMask').classList.add('hidden');
+}
+
+function tradeRow(label, val, cls) {
+  return `<div><span class="mini">${esc(label)}　</span><span class="${cls || ''}">${val}</span></div>`;
+}
+
+function tradeDetailShow(ticket) {
+  $('tradeMask').classList.remove('hidden');
+  $('tdTitle').textContent = `交易详情 · #${ticket}`;
+  $('tdBody').textContent = '读取中…';
+  fetch(`/api/trade?ticket=${ticket}`)
+    .then(r => r.json())
+    .then(d => { $('tdBody').innerHTML = d.ok ? renderTradeDetail(d) : `读取失败：${esc(d.error)}`; })
+    .catch(e => { $('tdBody').textContent = `请求失败：${e}`; });
+}
+
+function renderTradeDetail(d) {
+  const o = d.open || {}, c = d.close || {}, res = d.result || {},
+        j = d.judgement || {}, rc = d.recon || {}, rv = d.review;
+  const dirText = o.direction > 0 ? '多' : '空';
+
+  // 1. 执行结果
+  let html = `<div class="td-sec"><b>执行结果</b><div class="td-grid">`
+    + tradeRow('方向 / 手数', `${dirText} ${o.lots} 手 @ ${fmt(o.price_open, 3)}`)
+    + tradeRow('盈亏', money(res.pnl), res.pnl > 0 ? 'pos' : (res.pnl < 0 ? 'neg' : ''))
+    + tradeRow('持仓时长', res.held_sec != null ? `${res.held_sec} 秒` : '—')
+    + tradeRow('平仓方式', res.exit_source === 'llm' ? '模型判断平仓'
+        : res.exit_source === 'sl' ? '程序硬止损'
+        : res.exit_source === 'timeout' ? '持仓超时'
+        : res.exit_source === 'external' ? '外部平仓（手动/强平）'
+        : esc(res.exit_source || '—'))
+    + `</div></div>`;
+
+  // 2. 程序判断 vs 模型判断
+  const pd = j.prog_dir, md = j.model_dir;
+  const pdText = pd == null ? '—（旧数据未记录）' : (PROG_DIR_TEXT[pd] || pd);
+  const vdCls = j.verdict === '一致' ? 'td-verdict-ok' : 'td-verdict-dif';
+  html += `<div class="td-sec"><b>程序判断 vs 模型判断</b><div class="td-grid">`
+    + tradeRow('程序建议', pdText)
+    + tradeRow('模型方向', md == null ? '—' : (md > 0 ? '做多' : '做空'))
+    + tradeRow('模型 p_up', j.p_up != null ? fmt(j.p_up * 100, 0) + '%' : '—')
+    + tradeRow('模型自称同意', j.agree_field === true ? '是' : j.agree_field === false ? '<b style="color:#f0b429">否</b>' : '未答')
+    + `</div>`
+    + (j.verdict ? `<div style="margin-top:6px">裁决：<span class="${vdCls}">${esc(j.verdict)}</span></div>` : '')
+    + `<div class="mini" style="margin-top:5px">开仓理由：${esc(o.reason || '—')}</div>`
+    + `</div>`;
+
+  // 3. 原料与结构（重建）
+  html += `<div class="td-sec"><b>决策时的原料与结构</b>`;
+  if (rc.note) html += `<div class="td-note">${esc(rc.note)}——原始行情没存盘（决策时刻的 14 根不落日志），需要 MT5 终端在线且历史覆盖到开仓时刻才能重建。</div>`;
+  if (rc.structure) html += `<pre>${esc(rc.structure)}</pre>`;
+  if (rc.prog_dir != null && rc.structure) html += `<div class="mini" style="margin-top:4px">由以上结构算出程序建议：${PROG_DIR_TEXT[rc.prog_dir] || rc.prog_dir}</div>`;
+  if (rc.bars) html += `<pre style="margin-top:8px">${esc(rc.bars)}</pre>`;
+  if (rc.ticks && !rc.ticks.startsWith('（')) html += `<details style="margin-top:8px"><summary class="mini" style="cursor:pointer">tick 聚合数据</summary><pre>${esc(rc.ticks)}</pre></details>`;
+  html += `</div>`;
+
+  // 4. 平仓与复盘
+  if (c && c.ts) {
+    html += `<div class="td-sec"><b>平仓与复盘</b><div class="mini" style="margin-top:4px">平仓理由：${esc(c.reason || '—')}</div>`;
+    if (rv && rv.lesson) html += `<div class="mini" style="margin-top:4px">复盘教训（${esc(rv.regime || '通用')}）：${esc(rv.lesson)}</div>`;
+    html += `</div>`;
+  }
+  return html;
+}
+
 async function stopAutoTrade() {
   let ok = false;
   try {
@@ -2028,8 +2135,7 @@ async function stopAutoTrade() {
       desc: '停掉 AI 做单，然后向券商发送平仓单：账户上所有持仓都会平掉，包括你自己手动开的那些。平完不可撤销。',
       cost: '会立刻平仓',
       okText: '关闭并平仓',
-    });
-  } catch (e) {
+    });  } catch (e) {
     atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
     return;
   }
