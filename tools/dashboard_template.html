@@ -509,6 +509,21 @@
   .at-int select { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
                    border-radius: 4px; padding: 2px 4px; font-size: 12px; cursor: pointer; }
 
+  /* 模型切换条：不重启、不改 .env。放在卡头下面单独一行，
+     因为这行要放输入框，塞进卡头会把「开始做单」挤走。 */
+  .at-llm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+            margin: 0 0 10px; padding: 8px 10px; border-radius: 6px;
+            background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.1); }
+  .at-llm select, .at-llm input {
+    background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 4px;
+    padding: 3px 6px; font-size: 12px; }
+  .at-llm select { cursor: pointer; }
+  .at-llm input:focus, .at-llm select:focus { outline: none; border-color: #4a9eff; }
+  .at-llm input.bad { border-color: #ff4d4f; }
+  .at-llm-now { margin-left: auto; font-size: 12px; color: var(--muted, #8b96a5); }
+  .at-llm-now b { color: #e8edf5; font-family: var(--mono); }
+
   /* 操作结果条：只由 start/stop 写，轮询不碰它 */
   .at-msg { margin: 0 0 10px; padding: 9px 12px; border-radius: 6px;
             font-size: 13px; line-height: 1.6; }
@@ -629,6 +644,20 @@
               title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
       <span class="mini" id="atNote"></span>
     </div>
+    <!-- 模型切换：改这里就够了，不用动 .env、不用重启。
+         key 输入框留空 = 沿用当前 key（只换模型时不用重填）。 -->
+    <div class="at-llm" id="atLlmBar">
+      <span class="mini">模型</span>
+      <select id="atLlmProvider" onchange="onLlmProviderChange()"
+              title="换供应商要填该家的 key；同一个 key 不能跨家通用"></select>
+      <input id="atLlmModel" list="atLlmModelList" class="mono" size="17" autocomplete="off"
+             placeholder="模型名" title="可以手输任意模型名，以平台控制台为准（免费档改名很勤）">
+      <datalist id="atLlmModelList"></datalist>
+      <input id="atLlmKey" type="password" size="26" autocomplete="off"
+             placeholder="API key（沿用当前就留空）">
+      <button class="btn-ghost" id="atLlmSave" onclick="switchLlm()">应用</button>
+      <span class="at-llm-now" id="atLlmNow">—</span>
+    </div>
     <!-- 操作结果单独一块：atNote 归轮询用（每 15 秒被 renderAutoTrade 覆写），
          把「启动失败」写在那里等于写了个寂寞——下一秒就被清空，
          用户看到的就是「点了没反应」。 -->
@@ -641,16 +670,23 @@
       <div class="kpi"><div class="k">累计盈亏</div><div class="v mono" id="atPnl">—</div><div class="s" id="atPnlSub">—</div></div>
     </div>
     <div class="mini" style="margin:10px 0 6px">
-      规则：XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b> · 不挂 SL/TP（退出靠它主动下市价单）
+      规则：XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b>
       · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
+      <br><b>出场有三个程序闸门（不问模型）</b>：浮亏 <b>−3.00 USD 硬止损</b> ·
+      持仓满 <b>60 分钟无条件平</b> · 浮盈不到 <b>3.25 USD 不许平</b>（继续持有）。
+      只有浮盈 ≥ 3.25 时才会问模型要不要落袋。参数是用当天真实 M1 K 线回放 191 笔入场扫出来的，
+      不是拍的——见 <code>tools/replay_exit.py</code>。
       <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
-      <br><b>无视点差成本</b>（不由模型负责）· <b>最短持仓 60 秒</b>（浮亏超 0.5 USD 可提前平）。
+      <br><b>无视点差成本</b>（不由模型负责）· 止损是程序按浮亏主动市价平，<b>不给订单挂 SL/TP</b>（账本里仍是手动平仓）。
       <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」，等这几根才看得出平得早还是平得对。等待期间照常分析行情做下一笔。
       置灰的行是「跳过」——不花钱、没下单。
       <span id="atDecline"></span>
+      <span id="atFail"></span>
+      <span id="atSl"></span>
       <span id="atDir"></span>
       <span id="atPending"></span>
       <span id="atCache"></span>
+      <span id="atModel"></span>
     </div>
     <table><thead><tr><th>时间</th><th>动作</th><th>方向</th><th>p_up</th><th>盈亏</th><th>来源</th><th>开仓理由</th><th>平仓理由</th></tr></thead><tbody id="rowsAuto"></tbody></table>
   </div>
@@ -1562,6 +1598,25 @@ function renderAutoTrade(a) {
   $('atDecline').textContent = a.model_declines
     ? `　·　模型主动放弃 ${a.model_declines} 次` : '';
 
+  // 调用失败（429/超时/key 错）和"它主动不做"是两回事：
+  // 前者是 API 挂了，这时候一笔不做是故障，不是稳健。
+  $('atFail').textContent = a.model_failures
+    ? `　·　⚠ 模型调用失败 ${a.model_failures} 次（免费额度/限速？）` : '';
+  $('atFail').style.color = a.model_failures ? 'var(--bad)' : '';
+
+  // 程序止损笔数：这个数和"模型平仓"要分开看。止损多说明入场方向差，
+  // 模型平得差是另一回事——两者的处理方式完全不同，混在一起看不出问题。
+  const slN = Number(a.sl_closes || 0);
+  if (slN) {
+    const tpTxt = (a.tp_min_usd == null) ? '' : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`;
+    $('atSl').textContent = `　·　程序止损 ${slN} 笔`
+      + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
+      + (a.tp_min_usd ? ` · 未达止盈门槛不平${tpTxt}` : '');
+    $('atSl').style.color = 'var(--warn)';
+  } else {
+    $('atSl').textContent = '';
+  }
+
   // 最近 10 笔多空分布：只看盈亏发现不了"只会做多"这种偏置，必须单独显示。
   const dr = a.dir_recent || {};
   if (dr.n) {
@@ -1589,6 +1644,10 @@ function renderAutoTrade(a) {
   const ck = a.cache || {};
   $('atCache').textContent = ck.hit_rate == null ? ''
     : `　·　缓存命中 ${fmt(ck.hit_rate * 100, 1)}%（命中 ${ck.hit_tokens} / 未命中 ${ck.miss_tokens} tokens）`;
+
+  // 用的是哪个模型。换供应商（DeepSeek → 智谱免费档）后必须看得见，
+  // 否则 401/404 的时候分不清是 key 没换还是模型名写错。
+  $('atModel').textContent = a.model ? `　·　模型 ${a.model}` : '';
 
   // 幕布上的状态跟着刷新：它每 1 秒拿到的就是这份数据，不用另开请求
   lastAutoData = a;
@@ -1787,6 +1846,127 @@ async function resetAutoTrade() {
   } finally {
     $('atReset').disabled = false;
     loadAutoTrade();
+  }
+}
+
+/* ==================== 模型切换 ====================
+   为什么放到面板上：换模型是常用动作（免费额度用完、想对比判断质量），
+   以前要改 .env 再重启面板——三步，还可能忘第三步，然后对着「模型没换」
+   的界面怀疑代码。现在一步，且后端会真调一次模型验证、失败自动回滚
+   文件和进程内存，所以这个按钮不会把人留在坏配置上。
+
+   key 留空 = 沿用当前 key：同一个 key 不能跨供应商用，所以换家时必须填。 */
+let llmCfg = null;
+
+function renderLlmState(j) {
+  const tail = j.key_set ? `key …${esc(j.key_tail)}` : '<span style="color:#ff9b9d">⚠ 没有 key</span>';
+  $('atLlmNow').innerHTML = `当前 <b>${esc(j.model)}</b> · ${esc(j.provider_name || '未知')} · ${tail}`;
+}
+
+async function loadLlm() {
+  try {
+    const r = await fetch('/api/llm', { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.ok) { $('atLlmNow').textContent = '读取失败：' + (j.error || '未知错误'); return; }
+    llmCfg = j;
+    const sel = $('atLlmProvider');
+    sel.innerHTML = (j.providers || []).map(p =>
+      `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    if (j.provider) {
+      sel.value = j.provider;
+    } else {
+      // base_url 不在已知列表里（手动改过 .env）：给一个不可选的占位，
+      // 别假装它是三家之一。
+      const o = document.createElement('option');
+      o.value = ''; o.textContent = '当前：' + (j.provider_name || '自定义');
+      o.disabled = true; o.selected = true;
+      sel.insertBefore(o, sel.firstChild);
+    }
+    renderLlmState(j);
+    fillLlmModels(j.provider || '', false);
+    $('atLlmModel').value = j.model || '';
+  } catch (e) {
+    $('atLlmNow').textContent = '读取失败：' + String(e);
+  }
+}
+
+// 换供应商时模型名的可选列表跟着换；不静默时顺手把模型名填成该家默认值，
+// 免得把 glm-4-flash 发给 DeepSeek（那会 400 模型不存在）。
+function fillLlmModels(pid, resetModel) {
+  if (!llmCfg) return;
+  const p = (llmCfg.providers || []).find(x => x.id === pid);
+  const list = $('atLlmModelList');
+  if (!p) { list.innerHTML = ''; return; }
+  list.innerHTML = (p.models || []).map(m => `<option value="${esc(m)}"></option>`).join('');
+  $('atLlmModel').placeholder = p.default_model;
+  $('atLlmKey').placeholder = (llmCfg.provider === pid)
+    ? 'API key（沿用当前就留空）'
+    : `必须填 ${p.name} 的 key`;
+  if (resetModel) $('atLlmModel').value = p.default_model;
+}
+
+function onLlmProviderChange() {
+  fillLlmModels($('atLlmProvider').value, true);
+}
+
+async function switchLlm() {
+  if (!llmCfg) { atSay('<b>配置还没读出来</b>，稍等一下再点。', 'err'); return; }
+  const pid = $('atLlmProvider').value;
+  const p = (llmCfg.providers || []).find(x => x.id === pid);
+  if (!p) { atSay('<b>先选一个供应商。</b>', 'err'); return; }
+  const model = ($('atLlmModel').value || '').trim() || p.default_model;
+  const key = ($('atLlmKey').value || '').trim();
+  const sameProvider = (llmCfg.provider === pid);
+
+  if (!key && !sameProvider) {
+    atSay(`<b>换供应商要填 key</b>：当前这把 key 只对 ${esc(llmCfg.provider_name || '原供应商')} 有效。`, 'err');
+    $('atLlmKey').classList.add('bad');
+    $('atLlmKey').focus();
+    return;
+  }
+
+  let go = false;
+  try {
+    go = await confirmApiCall({
+      title: `切换到 ${model}？`,
+      desc: '会先真调一次模型验证连通，成功才写进 .env；失败自动回滚，'
+        + '不会把你留在坏配置上。切换后不用重启面板，下一次决策就用新模型。',
+      cost: '一次调用（十几个 token，失败不计费）',
+      okText: '切换',
+    });
+  } catch (e) {
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!go) return;
+
+  $('atLlmSave').disabled = true;
+  atSay('正在验证（真调一次模型，约 2 秒）…');
+  try {
+    const r = await fetch('/api/llm/switch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, provider: pid, model, key: key || undefined }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const secs = (typeof j.elapsed === 'number') ? j.elapsed.toFixed(2) + 's' : '—';
+      atSay(`<b>已切到 ${esc(j.model)}</b> · 验证 ${secs} 回「${esc(j.reply || '')}」· `
+        + '已生效，不用重启面板。', 'ok');
+      $('atLlmKey').value = '';
+      $('atLlmKey').classList.remove('bad');
+      await loadLlm();
+      loadAutoTrade();
+    } else if (j.need_key) {
+      atSay('<b>要填 key：</b>' + esc(j.error || ''), 'err');
+      $('atLlmKey').classList.add('bad');
+      $('atLlmKey').focus();
+    } else {
+      atSay('<b>切换失败，已回滚：</b>' + esc(j.error || '未知错误'), 'err');
+    }
+  } catch (e) {
+    atSay('<b>切换请求失败：</b>' + esc(String(e)), 'err');
+  } finally {
+    $('atLlmSave').disabled = false;
   }
 }
 
@@ -2701,6 +2881,7 @@ function pollVisible() {
 
 refreshLive();
 loadAutoTrade();
+loadLlm();
 updateModeHint();
 
 setInterval(() => {

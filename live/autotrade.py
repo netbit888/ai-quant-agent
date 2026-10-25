@@ -69,9 +69,47 @@ class Cfg:
     # 不这么做的话，模型会一直说"点差240吃掉微利，不做"，结果一笔都不开。
     ignore_spread: bool = True
     # 最短持仓秒数：刚开仓就平等于白送点差。60 秒内除浮亏超过豁免线，一律不平。
+    # 2026-10-23 起这条只在 tp_min_usd=0 时才起作用（见下面的止盈门槛）。
     min_hold_sec: int = 60
     # 浮亏超过这个额度才允许提前平仓（保护，别真扛爆）
     min_hold_exempt_usd: float = 0.5
+    # ---------------------------------------------------------------
+    # 出场规则（2026-10-23 第 3 场复盘后加，专治「1:1 盈亏比 + 24 点差」的必输结构）
+    #
+    # 那一场的账：191 笔，胜率 35.6%，avgW 1.011 / avgL 1.026 → 盈亏比 0.99，
+    # 要打平需要胜率 50.4%。点差 0.24/笔 × 191 = 45.84，占总亏损 80%；
+    # 扣点差后判断失误只有 -11.59。也就是说**问题不在判断准不准，在每笔抓得太少**：
+    # 平均只抓 1.02 USD 的波动，光过路费就吃掉 23.5%，做的越多亏得越快。
+    #
+    # 参数不是拍的，是用 `tools/replay_exit.py` 拿那 191 个真实入场点
+    # × 当天真实 M1 K 线扫出来的（36 组组合）。结论：
+    #   实际（60 秒就跑）        -57.43   期望 -0.301   胜率 35.6%
+    #   止损 1.0 / 止盈 2.0      -29.00   期望 -0.152   胜率 28.3%
+    #   止损 3.0 / 止盈 3.25     -16.75   期望 -0.088   胜率 46.6%  ← 拐点
+    #   止损 4.0 / 止盈 4.5      -87.11   期望 -0.456   胜率 41.4%  （再宽就崩）
+    # 全部 36 组都是负期望。所以这两个参数**把亏损砍掉 71%，但救不活**——
+    # 最好的一组仍需 48.0% 胜率，实际只有 46.6%，差 1.4 个百分点。
+    # 剩下那 1.4pp 只能靠改入场方向（p_up 有一半是饱和的 0.0，见下）。
+    #
+    # 起作用的是什么，跟直觉相反：不是"让利润跑"，而是**给够空间**。
+    # 胜率从 35.6% 涨到 46.6%，是因为短期噪音不再把方向正确的单子打成亏损；
+    # 而 3.25/3.0 的盈亏比只有 1.08，几乎对称。真正压低点差占比的是
+    # 平均波动从 1.02 变成 3.1（点差占比 23.5% → 7.7%）。
+    #
+    # 硬止损：浮亏到这个额度**由程序直接市价平**，不问模型。
+    # 为什么不信模型：前四大亏（-6.08/-3.51/-2.70/-2.49）全是 p_up=0.0 的单子，
+    # 它最自信的时候亏得最多，指望它自己认错不现实。
+    # 注意这不是给订单挂 SL——账本里仍然是「手动平仓」，只是触发者是代码。
+    # 这样复盘口径、K 线判定都不用改。
+    sl_usd: float = 3.0
+    # 止盈门槛：浮盈没到这个数，模型说平也不平，继续持有（也不调模型，省 token）。
+    # 设 0 关掉，回到「60 秒一到就随便平」的老行为。
+    tp_min_usd: float = 3.25
+    # 持仓上限。拉长持仓必须有上限，否则震荡行情里会变成无限扛单：
+    # 回放里 3.0/3.25 这组的中位持仓已经 480 秒、最长 4560 秒（76 分钟），
+    # 再不封顶就成隔夜了——1 分钟周期的策略持有到隔夜已经不是同一个策略。
+    # 到点无条件市价平，盈亏都平。
+    max_hold_sec: int = 3600
     # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
@@ -110,10 +148,15 @@ def _empty_state() -> dict:
         "trades": 0,       # 已开仓笔数
         "closed": 0,       # 已平仓笔数
         "wins": 0,
+        # 其中有多少笔是程序硬止损平的（source="sl"）。与「模型主动平」分开数，
+        # 否则命中率会被止损单污染。
+        "sl_closes": 0,
         "pnl": 0.0,
         "position": None,
         "stop_reason": None,
         "last_decision": None,
+        # 出场端连续模型调用失败次数：≥3 次自动停（仓位没人管比少做一笔危险）
+        "model_errors": 0,
         # 已平仓、但还没到复盘时机的单子。平仓后要等 7 根 K 线走完才复盘，
         # 这段时间里系统照常做下一笔——复盘不能挡住交易。
         "pending_reviews": [],
@@ -211,6 +254,20 @@ def _norm_prob(val) -> float | None:
     return num
 
 
+P_UP_FLOOR, P_UP_CEIL = 0.20, 0.80
+
+
+def clamp_p_up(p: float) -> float:
+    """把 p_up 压回 [0.20, 0.80]。
+
+    实测 46% 的 p_up 精确等于 0.0（标定崩坏），|p_up-0.5|≥min_edge 的闸门
+    对它们形同虚设。0/1 是伪精确，不是概率估计；截断后摆烂值和中等置信
+    都落在有效区间里，min_edge 才有意义。system 已同步要求模型只在这个
+    区间输出，这里是代码层兜底——模型守不守规矩不该靠它自觉。
+    """
+    return max(P_UP_FLOOR, min(P_UP_CEIL, float(p)))
+
+
 def _norm_bool(raw) -> bool | None:
     """把模型写的 act 归一成布尔。认不出来就返回 None（交给下游按旧逻辑处理）。"""
     if isinstance(raw, bool):
@@ -252,7 +309,11 @@ def parse_p_up(text: str) -> dict | None:
         if p_up is not None:
             reason = str(data.get("reason") or data.get("why") or "").strip()
             act = _norm_bool(data.get("act", data.get("trade", data.get("action"))))
-            return {"p_up": p_up, "reason": reason[:200], "act": act}
+            # agree：模型自己声明是否同意程序的位置判定。
+            # None = 没答（老格式/解析失败），下游不强行推断。
+            agree = _norm_bool(data.get("agree"))
+            return {"p_up": clamp_p_up(p_up), "reason": reason[:200],
+                    "act": act, "agree": agree}
 
     # JSON 烂了，退一步直接抓数字
     mm = _PUP_RE.search(text)
@@ -307,47 +368,10 @@ def parse_exit(text: str) -> dict | None:
 # 这样事后统计命中率时可以把兜底的那部分单独挑出来，不污染对模型的评价。
 
 
-def fallback_p_up(rows: list[dict], look: int = 10) -> dict:
-    """短周期动量：近 look 根收盘相对区间的位置，映射成概率。"""
-    if not rows or len(rows) < look + 1:
-        return {"p_up": 0.5, "reason": "K 线不足，取中性", "source": "fallback"}
-
-    recent = rows[-look:]
-    first = float(recent[0].get("open") or recent[0].get("close") or 0.0)
-    last = float(recent[-1].get("close") or 0.0)
-    highs = [float(r.get("high") or 0.0) for r in recent]
-    lows = [float(r.get("low") or 0.0) for r in recent]
-    span = max(highs) - min(lows)
-
-    if span <= 0 or first <= 0:
-        return {"p_up": 0.5, "reason": "区间无波动，取中性", "source": "fallback"}
-
-    ratio = (last - first) / span            # 大致落在 [-1, 1]
-    ratio = max(-1.0, min(1.0, ratio))
-    p_up = round(0.5 + 0.35 * ratio, 4)      # 最多偏向 0.85 / 0.15
-    return {
-        "p_up": p_up,
-        "reason": f"规则兜底：近 {look} 根动量 {ratio:+.2f}",
-        "source": "fallback",
-    }
-
-
-def fallback_exit(position: dict, bid: float, ask: float, held_sec: int) -> dict:
-    """规则兜底：浮亏超过 1.5 个点差就平，或者持仓超过 10 分钟就平。"""
-    direction = int(position.get("direction") or 1)
-    entry = float(position.get("price_open") or 0.0)
-    # 平仓价和开仓价方向相反：多头开在 ask、平在 bid；空头开在 bid、平在 ask。
-    # 写反了每笔会虚增一个点差，纸面成绩会好看得离谱。
-    cur = bid if direction > 0 else ask
-    if not cur or not entry:
-        return {"close": False, "reason": "报价缺失，保持", "source": "fallback"}
-
-    move = (cur - entry) * direction
-    if move < 0:
-        return {"close": True, "reason": f"规则兜底：浮亏 {move:+.3f}，止损离场", "source": "fallback"}
-    if held_sec >= 600:
-        return {"close": True, "reason": f"规则兜底：持仓 {held_sec // 60} 分钟，到期离场", "source": "fallback"}
-    return {"close": False, "reason": f"规则兜底：浮盈 {move:+.3f}，继续持有", "source": "fallback"}
+# 这里原来有 fallback_p_up / fallback_exit 两个「规则兜底」：模型调不通时用
+# 最近 10 根动量猜个概率、或按浮亏直接平仓，照样能真下单。
+# 已删除（2026-10-23）：免费 API 的限速 429 会让它频繁触发，等于一条三行的
+# 动量规则在替我下真单。现在模型答不上来就这一轮不做，见 _entry_skip / _exit_hold。
 
 
 # ------------------------------------------------------------------ tick 级数据
@@ -541,14 +565,19 @@ tick 不得单独构成开仓理由；K 线与 tick 冲突时，以 K 线为准�
 
 【多空对称，这条不许违反】
 - **贴下沿 ≠ 买点，贴上沿 ≠ 卖点。** 下跌趋势里贴下沿是弱势延续，不是超卖，
-  不许接多；上涨趋势里贴上沿是强势延续，不是超买，不许追多。
+  程序倾向不接多；上涨趋势里贴上沿是强势延续，不是超买，程序倾向不追多。
 - 多空都要有确认：做多要看到止跌（收阳，或收盘回到区间上半），
   做空要看到滞涨（收阴，或收盘回落到区间下半）。没有确认就等。
 - **两个方向的机会是对等的。** 不要因为"最近做空老是亏"就只做多——
-  那是样本偏差，不是规则。数据里的「位置判定」已经写明这个位置该往哪边做，
-  按它走；它说"不许接多"的时候，唯一合法的方向就是做空或不做。
+  那是样本偏差，不是规则。
 tick 的辅证作用：tick 数骤增 + 相邻跳动变大 = 真的有资金在推，此时的突破更可信；
 tick 稀疏而安静 = 突破多半是假的。
+
+【程序建议 vs 你的判断】
+数据里的「位置判定」是程序按规则算出的**建议**，不是命令。你可以不同意——
+但不同意时，reason 里必须说清你看到的证据（K 线形态、tick 辅证）和程序的
+判定差在哪。同意时直接按建议做。你的 p_up 就是你的判断本身，别拿它复读
+程序的建议：程序给的是方向，你对时机的把握和置信度才是你真正的贡献。
 
 【输入格式（顺序固定）】
 用户消息按这个顺序给，内容只有数据，规则全在本段：
@@ -563,10 +592,14 @@ tick 稀疏而安静 = 突破多半是假的。
 
 【输出】
 只输出一个 JSON 对象，不要解释、不要 markdown 代码块、不要前后缀：
-{"act": true, "p_up": 0.00, "reason": ""}
+{"act": true, "p_up": 0.00, "agree": true, "reason": ""}
 act —— 这笔到底做不做。false 就是"不做"，这是允许的、也是常见的选择。
 p_up —— 未来 1~3 分钟内价格上涨的概率，0 到 1 之间的小数。
         即使 act=false 也要给，用来记录你当时的方向倾向。
+        **只在 0.20 ~ 0.80 之间取值**：0/1 是伪精确（没人能百分百确定 1 分钟后
+        的方向），写 0.20 就代表你最强的看空，0.80 代表最强的看多。
+agree —— 你的方向判断是否与数据里「位置判定」的程序倾向一致。
+        一致 true，不一致 false（此时 reason 必须给出你反对的依据）。
 reason —— 不超过 40 字的中文依据，必须引用输入里的具体数字。
 
 注意 act 和 reason 必须一致：写了"不追""等确认"，act 就是 false。
@@ -598,7 +631,8 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 时间 {clock} UTC"""
 
 EXIT_SYSTEM = """你是 XAUUSD 超短线交易员的持仓管理模块，只决定「继续持有」还是「立刻平仓」。
-超短线的钱来自快速周转，不是扛单等回本。
+这套打法的钱来自「方向对的时候拿够一段」，不是靠秒级周转——实测 60 秒就跑的
+时候平均只抓 1 美元，光点差就吃掉四分之一，做的越多亏得越快。
 
 【信息边界】
 你只能看到当前 1 根 K 线和之前 13 根，共 14 根，以及这 14 分钟内的逐笔 tick。
@@ -623,14 +657,21 @@ EXIT_SYSTEM = """你是 XAUUSD 超短线交易员的持仓管理模块，只决�
 close —— true 表示立刻市价平仓，false 表示继续持有。
 reason —— 不超过 40 字的中文依据，必须引用具体数字。
 
+【系统的自动规则（不用你判断，也不要跟它较劲）】
+- 浮亏达到 3.0 USD：系统直接市价平，不会问你；
+- 持仓满 60 分钟：系统无条件平掉，不管盈亏；
+- 浮盈不到 3.25 USD：系统也不问你要不要平，直接继续持有。
+所以**你被问到，就说明这笔单已经浮盈 ≥ 3.25 USD**，而且还没到 60 分钟。
+
 【判断原则】
 - 主看 K 线结构，tick 只做辅证；两者冲突时以 K 线为准。
-- **开仓后 60 秒内系统一般不允许平仓**（除非浮亏超过 0.5 USD）。
-  这段时间你的任务是确认"有没有朝预期方向走"，不是找理由跑。
+- 止损和超时已经由系统兜住了，你不用考虑「万一反手怎么办」。
+- 你唯一的任务是判断**这波行情还有没有余量**：
+  · 结构没走完（仍贴趋势方向、ER 在走高、连续阴/阳没被打断）→ 继续持有；
+  · 结构已经走完（贴到反向沿、连续形态被打断、ER 掉回震荡区）→ 落袋。
 - 成本不由你负责：点差由系统承担，不要用"点差吃掉利润"当平仓理由。
 - 必须二选一，不存在"再等等看情况"。
-- 这张单没有止损也没有止盈，亏多少完全取决于你这个判断。不要因为"还没回本"
-  就死拿，也不要因为"有一点浮盈"就急着落袋。"""
+- 别因为"已经赚了 3 块多"就急着落袋，也别死拿等它翻倍——看结构，不看金额。"""
 
 EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 13 根）
 【主】K线（序号 / 时间 UTC / 开 / 高 / 低 / 收）
@@ -743,6 +784,12 @@ def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
     完全不看趋势方向。价格从 4030 一路跌到 4021 的十几分钟里，14 根窗口
     永远处于区间下部 → 永远显示"可考虑做多"；同一时刻想做空又被
     「追破位」铁律按住。结果 18 笔里最近 4 笔全做多，而且全是在跌势里买跌。
+
+    2026-10-25 话术降级：从「不许/唯一合法方向」改成「程序建议」。
+    旧话术把模型逼成二选一（顺从→p_up 钉死 0.0/1.0，反抗→也是极端值，
+    实测 46% 的 p_up 精确等于 0.0，30% 的单方向与理由矛盾）。
+    现在给方向倾向但明确告知可以不同意——中间概率才有机制上的存在空间。
+    判定本身（ER+drift 的组合）不变，变的是语气和权限。
     """
     edge = max(0.0, min(0.49, float(edge)))
     lo, hi = edge, 1 - edge
@@ -750,19 +797,46 @@ def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
     uptrend = er > ER_TREND_MIN and drift > 0
     if pos <= lo:
         if downtrend:
-            return ("贴下沿＋下跌趋势（弱势延续，不是超卖）→ 不许接多；"
-                    "等反抽到上沿附近再顺势做空")
+            return ("贴下沿＋下跌趋势（程序倾向：弱势延续，不是超卖，倾向等反抽到上沿做空）——"
+                    "你可以不同意，但理由里必须说清为什么")
         if uptrend:
-            return "贴下沿＋上涨趋势（回踩到位）→ 可考虑做多（需止跌确认）"
-        return f"贴下沿（可考虑做多，阈值 {edge:.0%}）"
+            return "贴下沿＋上涨趋势（程序倾向：回踩到位，倾向做多，需止跌确认）"
+        return f"贴下沿（程序倾向：可考虑做多，阈值 {edge:.0%}）"
     if pos >= hi:
         if uptrend:
-            return ("贴上沿＋上涨趋势（强势延续，不是超买）→ 不许追多；"
-                    "等回踩到下沿附近再低吸")
+            return ("贴上沿＋上涨趋势（程序倾向：强势延续，不是超买，倾向等回踩到下沿低吸）——"
+                    "你可以不同意，但理由里必须说清为什么")
         if downtrend:
-            return "贴上沿＋下跌趋势（反抽到位）→ 可考虑做空（需滞涨确认）"
-        return f"贴上沿（可考虑做空，阈值 {1 - edge:.0%}）"
-    return f"中间地带（{edge:.0%}~{1 - edge:.0%}，不动手）"
+            return "贴上沿＋下跌趋势（程序倾向：反抽到位，倾向做空，需滞涨确认）"
+        return f"贴上沿（程序倾向：可考虑做空，阈值 {1 - edge:.0%}）"
+    return f"中间地带（{edge:.0%}~{1 - edge:.0%}，程序倾向不动手）"
+
+
+def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
+    """程序的位置判定折算成方向建议：+1 多 / -1 空 / 0 不动手。
+
+    与 _zone_text 用同一套数（_structure + zone_edge），保证「模型看到的建议」
+    和「落盘的 prog_dir」永远一致——各算各的必然漂移。
+    返回 0（中间地带）时模型任何方向都算"分歧"，这是设计使然：程序没建议，
+    模型自己选的方向就是纯模型判断，记账时单独看这一格的期望。
+    """
+    s = _structure(rows)
+    if not s.get("ok"):
+        return 0
+    edge = max(0.0, min(0.49, float(zone_edge)))
+    pos = s["pos"]
+    if pos > edge and pos < 1 - edge:
+        return 0
+    downtrend = s["er"] > ER_TREND_MIN and s["drift"] < 0
+    uptrend = s["er"] > ER_TREND_MIN and s["drift"] > 0
+    if pos <= edge:
+        if downtrend:
+            return -1          # 跌势贴下沿：倾向等反抽做空
+        return 1               # 震荡或涨势贴下沿：倾向做多
+    # pos >= 1-edge
+    if uptrend:
+        return 1               # 涨势贴上沿：倾向等回踩低吸
+    return -1                  # 震荡或跌势贴上沿：倾向做空
 
 
 def _structure_text(rows: list[dict], zone_edge: float = 0.35) -> str:
@@ -1315,7 +1389,7 @@ def _log_call(ok: bool, usage: dict | None, error: str | None = None,
 def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
               stats: dict | None = None, login: int | str | None = None,
               ticks_text: str = "") -> dict:
-    """让模型给上涨概率。失败退回规则兜底，绝不让整条链路挂掉。"""
+    """让模型给上涨概率。**模型没答上来就不做**，不拿规则替它下单。"""
     prompt = build_entry_prompt(rows, bid, ask, cfg.symbol, cfg.tf,
                                 _point(cfg.symbol), stats,
                                 lots=cfg.lots,
@@ -1328,18 +1402,25 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
         text, usage = _chat(prompt, ENTRY_SYSTEM)
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login)
-        fb = fallback_p_up(rows)
-        fb["error"] = f"{type(exc).__name__}: {exc}"
-        return fb
+        return _entry_skip(f"模型调用失败（{type(exc).__name__}: {exc}）")
 
     _log_call(True, usage, login=login)
     parsed = parse_p_up(text)
     if parsed is None:
-        fb = fallback_p_up(rows)
-        fb["error"] = f"模型输出无法解析: {text[:120]}"
-        return fb
+        return _entry_skip(f"模型输出无法解析: {text[:120]}")
     parsed["source"] = "llm"
     return parsed
+
+
+def _entry_skip(why: str) -> dict:
+    """进场端拿不到模型结论时的统一答复：不做。
+
+    以前这里退回 `fallback_p_up`（最近 10 根动量算个概率），它照样能过闸门、
+    真开单——等于模型没参与也在下单。换成免费 API 之后，限速 429 会频繁触发，
+    让一条三行的动量规则替我下真单，风险远大于少做一笔。
+    """
+    return {"act": False, "p_up": 0.5, "source": "error",
+            "reason": f"{why}，本轮不做", "error": why}
 
 
 def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
@@ -1356,18 +1437,24 @@ def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
         text, usage = _chat(prompt, EXIT_SYSTEM)
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login)
-        fb = fallback_exit(position, bid, ask, held)
-        fb["error"] = f"{type(exc).__name__}: {exc}"
-        return fb
+        return _exit_hold(f"模型调用失败（{type(exc).__name__}: {exc}）")
 
     _log_call(True, usage, login=login)
     parsed = parse_exit(text)
     if parsed is None:
-        fb = fallback_exit(position, bid, ask, held)
-        fb["error"] = f"模型输出无法解析: {text[:120]}"
-        return fb
+        return _exit_hold(f"模型输出无法解析: {text[:120]}")
     parsed["source"] = "llm"
     return parsed
+
+
+def _exit_hold(why: str) -> dict:
+    """出场端拿不到模型结论时：继续持有。
+
+    出场端不兜底平仓——"不知道"就乱平会把点差白送出去；但连续失败要停线程，
+    否则仓位会一直挂着没人管（见 tick 里的 model_errors 计数）。
+    """
+    return {"close": False, "source": "error",
+            "reason": f"{why}，本轮继续持有", "error": why}
 
 
 # ------------------------------------------------------------------ 开仓闸门
@@ -1659,43 +1746,62 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         save_state(state, login)
         return {**row, "detected": True}
 
-    # --- 有仓：问模型该不该平 ----------------------------------------------
+    # --- 有仓：先过程序闸门，再问模型该不该平 --------------------------------
     if pos:
         contract = _symbol_contract(cfg.symbol)
-
-        # 最短持仓保护：刚开仓就平，等于把点差白送出去（实测平均只持 10 秒，
-        # 平均盈利 0.32 而点差 0.24）。这里直接不调模型——既省 token，
-        # 也断了"每轮都问一次要不要跑"的痒手。只有浮亏超过豁免线才放行。
         held_sec = now - int(pos.get("opened_at") or now)
-        guard = abs(cfg.min_hold_exempt_usd)
         float_pnl = _realized_pnl(cfg, pos, bid, ask)
-        if (cfg.min_hold_sec > 0 and held_sec < cfg.min_hold_sec
-                and float_pnl > -guard):
-            row = {"ts": now, "kind": "hold",
-                   "reason": (f"最短持仓中：已 {held_sec}s / 需 {cfg.min_hold_sec}s，"
-                              f"浮盈亏 {float_pnl:+.2f} USD（未触及 -{guard:.2f} 豁免线），"
-                              f"本轮不调模型"),
-                   "source": "min_hold", "held_sec": held_sec}
+
+        gate = _exit_gate(cfg, held_sec, float_pnl)
+
+        # 闸门说不平：直接记 hold，不调模型（省 token，也断了"每轮问一次要不要跑"）
+        if gate is not None and not gate.get("close"):
+            row = {"ts": now, "kind": "hold", "reason": gate["reason"],
+                   "source": gate["source"], "held_sec": held_sec,
+                   "float_pnl": round(float_pnl, 2)}
+            state["last_decision"] = {
+                "ts": now, "kind": "exit", "close": False,
+                "reason": gate["reason"], "source": gate["source"],
+            }
             state["last_tick_ts"] = now
             append_log(row, login)
             save_state(state, login)
             return row
 
-        decision = ask_exit(bars, pos, bid, ask, cfg, contract, login,
-                            ticks_text=_ticks_text(cfg, bars))
-        state["last_decision"] = {
-            "ts": now, "kind": "exit", "close": decision.get("close"),
-            "reason": decision.get("reason"), "source": decision.get("source"),
-        }
-        if not decision.get("close"):
-            row = {"ts": now, "kind": "hold", "reason": decision.get("reason"),
-                   "source": decision.get("source")}
-            if decision.get("error"):
-                row["error"] = decision["error"]
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+        if gate is not None:
+            # 止损：程序直接平，不问模型，也不占用 model_errors 计数
+            decision = gate
+            state["last_decision"] = {
+                "ts": now, "kind": "exit", "close": True,
+                "reason": gate["reason"], "source": gate["source"],
+            }
+        else:
+            decision = ask_exit(bars, pos, bid, ask, cfg, contract, login,
+                                ticks_text=_ticks_text(cfg, bars))
+            # 模型失败要计数：进场失败只是少做一笔，出场失败意味着仓位没人管，
+            # 连错 3 次必须停下来让人接手，不能让它一直挂在那儿。
+            if decision.get("source") == "error":
+                state["model_errors"] = int(state.get("model_errors") or 0) + 1
+            else:
+                state["model_errors"] = 0
+            state["last_decision"] = {
+                "ts": now, "kind": "exit", "close": decision.get("close"),
+                "reason": decision.get("reason"), "source": decision.get("source"),
+            }
+            if not decision.get("close"):
+                row = {"ts": now, "kind": "hold", "reason": decision.get("reason"),
+                       "source": decision.get("source")}
+                if decision.get("error"):
+                    row["error"] = decision["error"]
+                state["last_tick_ts"] = now
+                append_log(row, login)
+                save_state(state, login)
+                if int(state.get("model_errors") or 0) >= 3:
+                    return _stop(state,
+                                 f"模型连续 {state['model_errors']} 次调用失败，"
+                                 "持仓无人管理，已自动停止（请回终端手动处理）",
+                                 now, login)
+                return row
 
         # 纸面模式没有真实的平仓单可发，直接本地结算。
         # 不去调 send_close：券商那边根本没这个 ticket，只会得到「持仓不存在」，
@@ -1725,11 +1831,15 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
             "direction": pos.get("direction"), "pnl": round(pnl, 2),
             "p_up": pos.get("p_up"), "hit": pnl > 0,
-            "held_sec": now - int(pos.get("opened_at") or now),
+            "held_sec": held_sec,
             "entry_reason": pos.get("entry_reason"),
             "reason": decision.get("reason"), "source": decision.get("source"),
             "dry_run": cfg.dry_run,
         }
+        # 止损是程序发的，不是模型判断。必须能单独数出来，
+        # 否则「模型平仓命中率」会被一堆止损单污染。
+        if decision.get("source") == "sl":
+            state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
         if decision.get("error"):
             row["error"] = decision["error"]
         append_log(row, login)
@@ -1749,22 +1859,32 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         save_state(state, login)
         return row
 
+    # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
+    # 落盘后才能事后对账「程序对 vs 模型对」。
+    prog_dir = _prog_direction(bars, cfg.zone_edge)
     decision = ask_entry(bars, bid, ask, cfg, state, login,
                          ticks_text=_ticks_text(cfg, bars))
     p_up = float(decision.get("p_up") if decision.get("p_up") is not None else 0.5)
     act = decision.get("act")
     direction = 1 if p_up > 0.5 else -1
+    agree = decision.get("agree")
     state["last_decision"] = {
         "ts": now, "kind": "entry", "p_up": p_up, "direction": direction,
-        "act": act,
+        "act": act, "prog_dir": prog_dir, "agree": agree,
         "reason": decision.get("reason"), "source": decision.get("source"),
     }
 
     # 模型明确说不做，就别做。以前只能靠 p_up≈0.5 暗示，结果常常
     # "理由写不追、数值 0.38 照开"——现在听它自己的。
     if act is False:
+        failed = decision.get("source") == "error"
         row = {"ts": now, "kind": "skip", "p_up": p_up, "act": False,
-               "reason": f"模型判定不做：{decision.get('reason') or '未给理由'}"}
+               "reason": (decision.get("reason") if failed else
+                          f"模型判定不做：{decision.get('reason') or '未给理由'}")}
+        if failed:
+            # 调用失败不等于"它主动放弃"，两者混在一起看会把故障当成保守
+            row["source"] = "error"
+            row["error"] = decision.get("error")
         state["last_tick_ts"] = now
         append_log(row, login)
         save_state(state, login)
@@ -1805,6 +1925,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "ticket": ticket, "direction": direction, "lots": cfg.lots,
         "price_open": price, "opened_at": now, "p_up": p_up,
         "entry_reason": decision.get("reason"), "dry_run": cfg.dry_run,
+        # 分歧记账：程序建议方向 + 模型是否自称同意。
+        # 事后按 (prog_dir, direction) 分格算期望，谁该拥有判断权让数据判。
+        "prog_dir": prog_dir, "agree": agree,
     }
     state["trades"] = int(state.get("trades") or 0) + 1
     state["last_open_ts"] = now
@@ -1814,6 +1937,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "ts": now, "kind": "open", "ticket": ticket, "direction": direction,
         "lots": cfg.lots, "price": price, "p_up": p_up,
         "confidence": round(max(p_up, 1 - p_up), 4),
+        "prog_dir": prog_dir, "agree": agree,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "dry_run": cfg.dry_run,
     }
@@ -1822,6 +1946,50 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     append_log(row, login)
     save_state(state, login)
     return row
+
+
+def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float) -> dict | None:
+    """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
+
+    这个函数只有三行逻辑，但顺序是致命的：**止损必须排在止盈门槛之前**。
+    反过来写的话，一笔浮亏 -5 USD 的单子会因为「浮盈没到 2.50」被判成继续持有，
+    止损永远不触发——参数越保守亏得越多。所以单独抽出来 + 单测钉住顺序。
+
+    三条规则的来源（2026-10-23 第 3 场 191 笔的账）：
+      · 60 秒中位持仓 = min_hold 从下限变成了目标，150 笔 ≤90 秒平仓吃掉 90% 的亏损；
+      · avgW 1.011 / avgL 1.026 → 盈亏比 0.99，扣掉每笔 0.24 点差和 35.6% 胜率，必亏；
+      · 最大单笔 -6.08 是平均亏损的 5.9 倍，且它的 p_up=0.0（它最自信时亏最多）。
+    """
+    if cfg.sl_usd > 0 and float_pnl <= -abs(cfg.sl_usd):
+        return {"close": True, "source": "sl",
+                "reason": (f"硬止损：浮亏 {float_pnl:+.2f} 触及 -{abs(cfg.sl_usd):.2f}")
+                }
+
+    # 持仓上限排在止盈门槛之前：否则一笔卡在 +2.0（没到门槛 3.25）的单子
+    # 可以一直挂到天荒地老，把「超短线」拖成隔夜单。
+    if cfg.max_hold_sec > 0 and held_sec >= cfg.max_hold_sec:
+        return {"close": True, "source": "timeout",
+                "reason": (f"持仓超上限：已 {held_sec}s / 上限 {cfg.max_hold_sec}s，"
+                           f"浮盈亏 {float_pnl:+.2f}，无条件市价平")
+                }
+
+    if cfg.tp_min_usd > 0:
+        if float_pnl < cfg.tp_min_usd:
+            return {"close": False, "source": "tp_wait",
+                    "reason": (f"浮盈 {float_pnl:+.2f} 未达止盈门槛 "
+                               f"{cfg.tp_min_usd:.2f}，继续持有（本轮不调模型）")
+                    }
+        return None   # 到门槛了，让模型决定平还是继续跑
+
+    # tp_min_usd=0：回退到旧的最短持仓保护
+    guard = abs(cfg.min_hold_exempt_usd)
+    if cfg.min_hold_sec > 0 and held_sec < cfg.min_hold_sec and float_pnl > -guard:
+        return {"close": False, "source": "min_hold",
+                "reason": (f"最短持仓中：已 {held_sec}s / 需 {cfg.min_hold_sec}s，"
+                           f"浮盈亏 {float_pnl:+.2f} USD（未触及 -{guard:.2f} 豁免线），"
+                           f"本轮不调模型")
+                }
+    return None
 
 
 def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
@@ -1896,6 +2064,19 @@ def validate_cfg(cfg: Cfg) -> list[str]:
     if cfg.cooldown_sec >= 60:
         issues.append(
             f"冷却 {cfg.cooldown_sec} 秒做不到「平仓后 1 分钟内重新开仓」，必须小于 60 秒"
+        )
+    # 止损/止盈这对参数是配套的，单独调一个只会换一种亏法：
+    #   止盈门槛 ≤ 止损 → 盈亏比还在 1 附近甚至更差，白加止损；
+    #   止损太接近点差 → 直接被点差打掉，等于每开一单就主动交一次过路费。
+    if cfg.sl_usd > 0 and cfg.sl_usd < 0.5:
+        issues.append(
+            f"止损 {cfg.sl_usd:.2f} 太小：单笔点差就 0.24，"
+            "止损不到 0.5 等于一开仓就被点差打掉"
+        )
+    if cfg.tp_min_usd > 0 and cfg.sl_usd > 0 and cfg.tp_min_usd <= cfg.sl_usd:
+        issues.append(
+            f"止盈门槛 {cfg.tp_min_usd:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
+            "盈亏比仍 ≤ 1，这套参数没解决必亏问题"
         )
     return issues
 
@@ -2246,6 +2427,8 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 模型主动说"不做"的次数。和"被闸门挡掉"分开算：
     # 前者是它的判断，后者是我们替它挡的。只看一个数会误判它胆量。
     declines = sum(1 for r in rows if r.get("kind") == "skip" and r.get("act") is False)
+    # 调用失败必须单独计数：混进 declines 会把"API 挂了"读成"模型变保守了"
+    failures = sum(1 for r in rows if r.get("source") == "error")
 
     # 面板线程已经不在了（面板重启过），state 里那条 running=True 就是废话。
     # 不纠正的话，界面会一直显示「运行中」，但实际上没有任何东西在做单。
@@ -2254,6 +2437,18 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     saved_cfg = state.get("cfg") or {}
     dry_run = bool(saved_cfg.get("dry_run")) if "dry_run" in saved_cfg else True
     pending = state.get("pending_reviews") or []
+    # 旧 state 里没有新加的字段，缺的时候要回退到当前默认值
+    _defaults = Cfg()
+
+    # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
+    # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。
+    try:
+        from agent.llm import _load_dotenv, DEFAULT_MODEL
+
+        _load_dotenv()
+        model_name = os.getenv("LLM_MODEL") or DEFAULT_MODEL
+    except Exception:  # noqa: BLE001
+        model_name = "未知"
 
     return {
         "ok": True,
@@ -2275,6 +2470,16 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "llm_decisions": len(llm_decisions),
         "llm_closes": len(llm_closes),
         "llm_hit_rate": round(llm_wins / len(llm_closes), 4) if llm_closes else None,
+        # 程序硬止损平的笔数。单独的指标：止损多说明入场方向差，
+        # 而不是"模型平得不好"，两者的处理方式完全不同。
+        "sl_closes": sum(1 for r in rows
+                         if r.get("kind") == "close" and r.get("source") == "sl"),
+        # 新出场规则的阈值，面板上要能看见，否则用户不知道规则已经变了。
+        # 旧 state 里的 cfg 没有这两个字段（那会儿还不存在），
+        # 所以缺了就回退到 Cfg 的当前默认值，而不是显示 None。
+        "sl_usd": saved_cfg.get("sl_usd", _defaults.sl_usd),
+        "tp_min_usd": saved_cfg.get("tp_min_usd", _defaults.tp_min_usd),
+        "max_hold_sec": saved_cfg.get("max_hold_sec", _defaults.max_hold_sec),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 已平仓但还没到复盘时机的单子：面板据此显示「还要等几根」，
@@ -2285,7 +2490,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "dir_recent": {"n": len(last_n), "long": longs, "short": shorts,
                        "skew": skew},
         "model_declines": declines,
+        "model_failures": failures,
         "cache": cache_stats(login),
+        "model": model_name,
         "recent": rows[-recent:],
     }
 

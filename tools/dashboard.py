@@ -14,6 +14,11 @@
     /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
     /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
     /api/autotrade/reset   清空教训与战绩（旧流水归档，不删除；会停掉 AI）
+    /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
+
+只读接口里要留意的两个：
+    /api/autotrade         AI 做单状态 + 战绩
+    /api/llm               当前模型配置（key 只返回尾 4 位）
 
 除上面几个和备注类接口外全是只读：GET 一律不产生费用、不下单。
 """
@@ -207,6 +212,37 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/llm":
+            # 当前模型配置：只读。key 只给尾 4 位，整串永不出服务端。
+            try:
+                from agent.llm import current_config
+                from tools.switch_llm import PROVIDERS, provider_of
+
+                cfg = current_config()
+                pid = provider_of(cfg["base_url"])
+                payload = {
+                    "ok": True,
+                    "provider": pid,
+                    "provider_name": PROVIDERS[pid]["name"] if pid else "自定义 / 未知",
+                    **cfg,
+                    "providers": [
+                        {
+                            "id": k,
+                            "name": v["name"],
+                            "base_url": v["base_url"],
+                            "default_model": v["model"],
+                            "models": v.get("models") or [v["model"]],
+                            "note": v.get("note", ""),
+                        }
+                        for k, v in PROVIDERS.items()
+                    ],
+                }
+            except Exception as exc:  # noqa: BLE001
+                payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                       "application/json; charset=utf-8")
+            return
+
         if parsed.path == "/api/strategies":
             items = []
             for path in sorted(CODE_ROOT.glob("*.py")):
@@ -321,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/autotrade/start": self._post_autotrade_start,
             "/api/autotrade/stop": self._post_autotrade_stop,
             "/api/autotrade/reset": self._post_autotrade_reset,
+            "/api/llm/switch": self._post_llm_switch,
         }
         handler = routes.get(parsed.path)
         if handler is None:
@@ -456,6 +493,50 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = autotrade.reset_history(login=login)
             result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_llm_switch(self, body: dict) -> None:
+        """换模型供应商：写 .env + 真调一次验证 + 进程内即时生效。
+
+        为什么要 confirm：这会真花一次调用，而且换错了模型/供应商，
+        下一轮决策就会失败（表现为「模型调用失败」，不会误下单，但白等一轮）。
+        key 可以留空 = 沿用当前 key（只换模型时不必重填）。
+        """
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝切换"})
+            return
+        try:
+            from agent.llm import current_config
+            from tools.switch_llm import PROVIDERS, switch
+
+            provider = str(body.get("provider") or "").strip()
+            if provider not in PROVIDERS:
+                self._json(400, {"ok": False,
+                                 "error": f"不认识的供应商：{provider or '（空）'}"})
+                return
+            key = str(body.get("key") or "").strip()
+            model = str(body.get("model") or "").strip()
+            # 换供应商却没给 key = 拿老供应商的 key 去调新家，必然 401。
+            # 这里先拦住，免得白花一次调用（还会把 .env 写脏再回滚）。
+            if not key:
+                cur = current_config()
+                same = (cur["base_url"].rstrip("/")
+                        == PROVIDERS[provider]["base_url"].rstrip("/"))
+                if not same or not cur["key_set"]:
+                    self._json(200, {
+                        "ok": False,
+                        "error": "换供应商必须填 key（当前 key 只对原来的供应商有效）",
+                        "need_key": True,
+                    })
+                    return
+
+            result = switch(provider, key or None, model or None)
+            if result.get("ok"):
+                result["current"] = current_config()
+                result["note"] = ("已生效，下一次决策就用它。"
+                                  if result.get("verified") else "已写入，未验证。")
             self._json(200, result)
         except Exception as exc:  # noqa: BLE001
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})

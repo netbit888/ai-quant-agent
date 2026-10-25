@@ -32,6 +32,7 @@ const made = {};
 function makeEl(id) {
   const el = {
     id, textContent: '', innerHTML: '', className: '', disabled: false, title: '',
+    value: '', placeholder: '',
     dataset: {}, children: [],
     // style 必须有：renderLive 会写 syncEl.style.display，缺这个字段整块渲染直接抛错
     style: {},
@@ -43,6 +44,8 @@ function makeEl(id) {
     },
     querySelectorAll() { return []; },
     setAttribute() {}, appendChild(c) { this.children.push(c); return c; },
+    insertBefore(c) { this.children.unshift(c); return c; },
+    focus() {}, blur() {},
     addEventListener() {},
   };
   made[id] = el;
@@ -52,17 +55,30 @@ global.document = {
   getElementById: id => made[id] || makeEl(id),
   querySelectorAll: () => [],
   createElementNS: () => makeEl('svg' + Math.random()),
+  createElement: tag => makeEl('created_' + tag + '_' + Math.random()),
   hidden: false,
   addEventListener() {},
 };
-global.fetch = async () => ({ json: async () => liveJson });
+// 记下每次 fetch，用来断言「该拦的请求真的没发出去」
+const fetchCalls = [];
+let llmJson = null;
+global.fetch = async (url, opts) => {
+  const u = String(url);
+  fetchCalls.push({ url: u, opts });
+  if (u.includes('/api/llm/switch')) {
+    return { json: async () => ({ ok: true, model: 'deepseek-chat', reply: '可用', elapsed: 1.5 }) };
+  }
+  if (u.includes('/api/llm')) return { json: async () => llmJson || { ok: false } };
+  return { json: async () => liveJson };
+};
 global.setInterval = () => 0;
 global.URLSearchParams = class { constructor() {} set() {} toString() { return ''; } };
 
 let failed = false;
+(async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, closeModal, reasonCn, mins, money, fmt, ts2str};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -156,6 +172,7 @@ try {
     last_decision: { ts: 1790000000, kind: 'entry', p_up: 0.62, direction: 1, act: false },
     trades: 2, closed: 1, wins: 1, pnl: 0.88,
     llm_closes: 1, llm_hit_rate: 1.0,
+    sl_closes: 2, sl_usd: 3.0, tp_min_usd: 3.25,
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
@@ -198,6 +215,12 @@ try {
   const dirTxt = String(made.atDir.textContent || '');
   console.log(`  多空偏斜提示 ${dirTxt.includes('偏斜') ? '✓' : '✗'} (${dirTxt.trim() || '空'})`);
   if (!dirTxt.includes('偏斜')) failed = true;
+
+  // 程序止损笔数必须显示：止损多 = 入场方向差，和"模型平得差"不是一回事
+  const slTxt = String(made.atSl.textContent || '');
+  const slOk = slTxt.includes('程序止损 2 笔') && slTxt.includes('3.00') && slTxt.includes('3.25');
+  console.log(`  程序止损提示 ${slOk ? '✓' : '✗'} (${slTxt.trim() || '空'})`);
+  if (!slOk) failed = true;
 
   // 全屏提醒幕布：按钮点了要能盖上、要显示当前持仓，Esc/退出全屏要能收掉
   api.enterTradingFullscreen();
@@ -252,6 +275,53 @@ try {
   if (!wired) failed = true;
   console.log(`  弹窗可用 ${typeof api.closeModal === 'function' ? '✓' : '✗'}`);
   if (typeof api.closeModal !== 'function') failed = true;
+
+  // ---- 模型切换条 ----
+  // 这块最容易出「看着切了、其实没生效」：界面显示新模型，实际还在调老的。
+  // 所以钉三件：显示当前模型、换供应商自动换默认模型名、缺 key 必须拦住不发请求。
+  llmJson = {
+    ok: true, provider: 'zhipu', provider_name: '智谱 GLM（免费档，国内直连）',
+    base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+    key_set: true, key_tail: '716f', key_source: 'LLM_API_KEY',
+    providers: [
+      { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4',
+        default_model: 'glm-4-flash', models: ['glm-4-flash', 'glm-4-air'], note: '' },
+      { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com',
+        default_model: 'deepseek-chat', models: ['deepseek-chat', 'deepseek-reasoner'], note: '' },
+    ],
+  };
+  await api.loadLlm();
+  const nowTxt = String(made.atLlmNow.innerHTML || '');
+  const showsModel = nowTxt.includes('glm-4-flash') && nowTxt.includes('716f');
+  console.log(`\n模型切换条显示当前模型 ${showsModel ? '✓' : '✗'} (${nowTxt || '空'})`);
+  if (!showsModel) failed = true;
+
+  const filled = String(made.atLlmModel.value || '') === 'glm-4-flash';
+  console.log(`  输入框回填当前模型 ${filled ? '✓' : '✗'} (${made.atLlmModel.value || '空'})`);
+  if (!filled) failed = true;
+
+  // 换供应商必须换默认模型名，否则会把 glm-4-flash 发给 DeepSeek（400 模型不存在）
+  made.atLlmKey.value = '';
+  made.atLlmProvider.value = 'deepseek';
+  api.onLlmProviderChange();
+  const modelSwitched = String(made.atLlmModel.value || '') === 'deepseek-chat';
+  console.log(`  换供应商自动切默认模型名 ${modelSwitched ? '✓' : '✗'} (${made.atLlmModel.value || '空'})`);
+  if (!modelSwitched) failed = true;
+
+  const callsBefore = fetchCalls.length;
+  made.atMsg.innerHTML = '';
+  await api.switchLlm();
+  const blocked = String(made.atMsg.innerHTML || '').includes('换供应商要填 key')
+    && fetchCalls.length === callsBefore;
+  console.log(`  换供应商不给 key 被拦下、且没发请求 ${blocked ? '✓' : '✗'}`);
+  if (!blocked) failed = true;
+
+  const llmWired = src.includes('onclick="switchLlm()"')
+    && typeof api.switchLlm === 'function'
+    && typeof api.loadLlm === 'function'
+    && typeof api.onLlmProviderChange === 'function';
+  console.log(`  模型切换按钮已接 handler ${llmWired ? '✓' : '✗'}`);
+  if (!llmWired) failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);
@@ -259,3 +329,4 @@ try {
 }
 console.log(failed ? '\n结果：失败' : '\n结果：全部通过');
 process.exit(failed ? 1 : 0);
+})();

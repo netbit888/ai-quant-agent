@@ -7,9 +7,18 @@
     1. 项目根目录 .env 文件（推荐，参考 .env.example）
     2. 系统环境变量
 
-    DEEPSEEK_API_KEY  必填，sk- 开头
-    LLM_MODEL         可选，默认 deepseek-chat；推理模型可设 deepseek-reasoner
+    LLM_API_KEY       通用 key（换供应商时填这个，优先级高于 DEEPSEEK_API_KEY）
+    DEEPSEEK_API_KEY  老名字，仍兼容
+    LLM_MODEL         可选，默认 deepseek-chat
     LLM_BASE_URL      可选，默认 https://api.deepseek.com
+
+换供应商只改这三行，代码不用动（都是 OpenAI 兼容接口）。示例：
+    智谱 GLM-4-Flash（免费档）
+        LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+        LLM_MODEL=glm-4-flash
+    硅基流动
+        LLM_BASE_URL=https://api.siliconflow.cn/v1
+        LLM_MODEL=Qwen/Qwen3-8B
 """
 
 from __future__ import annotations
@@ -24,8 +33,20 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 
 
+_DOTENV_LOADED = False
+
+
 def _load_dotenv() -> None:
-    """极简 .env 加载器，避免引入额外依赖。不覆盖已存在的环境变量。"""
+    """极简 .env 加载器，避免引入额外依赖。不覆盖已存在的环境变量。
+
+    只读一次（幂等），且**必须先于任何 os.getenv 调用**——否则进程启动后
+    第一次读到的 LLM_MODEL 是 None、退回 DEFAULT_MODEL，表现成「base_url
+    换了、模型名没换」的 400（智谱会回 1211 模型不存在）。
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
     env_file = Path(__file__).resolve().parent.parent / ".env"
     if not env_file.exists():
         return
@@ -37,18 +58,72 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def _env(name: str, default: str) -> str:
+    """读配置项：先从 .env 补环境变量，再取值。"""
+    _load_dotenv()
+    return os.getenv(name) or default
+
+
+def _active_key() -> tuple[str, str]:
+    """返回 (key, 来源变量名)。来源名用于面板显示「这把 key 是从哪读的」。"""
+    if os.getenv("LLM_API_KEY"):
+        return os.environ["LLM_API_KEY"], "LLM_API_KEY"
+    if os.getenv("DEEPSEEK_API_KEY"):
+        return os.environ["DEEPSEEK_API_KEY"], "DEEPSEEK_API_KEY"
+    return "", ""
+
+
+def current_config() -> dict:
+    """当前生效的配置，给面板显示用。key 只给尾 4 位，绝不整串返回。"""
+    _load_dotenv()
+    key, source = _active_key()
+    return {
+        "base_url": os.getenv("LLM_BASE_URL") or DEFAULT_BASE_URL,
+        "model": os.getenv("LLM_MODEL") or DEFAULT_MODEL,
+        "key_set": bool(key),
+        "key_tail": key[-4:] if len(key) >= 4 else "",
+        "key_source": source,
+    }
+
+
+def apply_config(
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    """运行时改配置，**下一次调用立刻生效**。
+
+    为什么不能只改 .env：`_load_dotenv()` 用的是 `setdefault`，进程里已经存在的
+    环境变量不会被文件里的新值覆盖。所以切模型必须显式写 os.environ，
+    否则面板上点了「切换」、界面上显示新模型，实际还在调老模型——
+    这比报错更糟，因为看不出问题。
+    """
+    global _DOTENV_LOADED
+    if api_key:
+        os.environ["LLM_API_KEY"] = api_key.strip()
+    if base_url:
+        os.environ["LLM_BASE_URL"] = base_url.strip()
+    if model:
+        os.environ["LLM_MODEL"] = model.strip()
+    _DOTENV_LOADED = True
+    return current_config()
+
+
 def _client() -> OpenAI:
     _load_dotenv()
-    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("LLM_API_KEY")
+    # LLM_API_KEY 优先：换供应商时只需加这一行，不用动原来的 DeepSeek key，
+    # 想切回去删掉即可。两个都填了却用错 key，会得到 401 而不是答案。
+    api_key = _env("LLM_API_KEY", "") or _env("DEEPSEEK_API_KEY", "")
     if not api_key:
         raise RuntimeError(
             "缺少 API key。请在项目根目录创建 .env 文件并写入：\n"
-            "    DEEPSEEK_API_KEY=sk-xxxxxxxx\n"
+            "    LLM_API_KEY=你的key\n"
+            "或老写法 DEEPSEEK_API_KEY=sk-xxxxxxxx\n"
             "（模板见 .env.example）"
         )
     return OpenAI(
         api_key=api_key,
-        base_url=os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL),
+        base_url=_env("LLM_BASE_URL", DEFAULT_BASE_URL),
         timeout=60.0,
         max_retries=2,
     )
@@ -80,7 +155,7 @@ def chat_ex(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    used_model = model or os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    used_model = model or _env("LLM_MODEL", DEFAULT_MODEL)
     kwargs: dict = {"model": used_model, "messages": messages}
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}

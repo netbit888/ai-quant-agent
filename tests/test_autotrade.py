@@ -96,28 +96,96 @@ class TestParseExit(unittest.TestCase):
         self.assertIsNone(autotrade.parse_exit("再观察一下"))
 
 
-# ------------------------------------------------------------------ 兜底
+# ------------------------------------------------------------------ 模型失败不兜底
+#
+# 以前模型调不通会退回「最近 10 根动量」猜概率，照样能过闸门真开单。
+# 换成免费 API 之后 429 会很常见，让规则替我下单比少做一笔危险得多。
 
 
-class TestFallback(unittest.TestCase):
-    def test_uptrend_leans_long(self):
-        got = autotrade.fallback_p_up(bars_up())
-        self.assertGreater(got["p_up"], 0.5)
-        self.assertEqual(got["source"], "fallback")
+class TestNoRuleFallback(unittest.TestCase):
+    def setUp(self):
+        autotrade._JSON_MODE_OK = True
 
-    def test_downtrend_leans_short(self):
-        got = autotrade.fallback_p_up(bars_down())
-        self.assertLess(got["p_up"], 0.5)
+    def tearDown(self):
+        autotrade._JSON_MODE_OK = True
 
-    def test_no_bars_is_neutral(self):
-        self.assertAlmostEqual(autotrade.fallback_p_up([])["p_up"], 0.5)
+    def test_entry_api_failure_means_no_trade(self):
+        def boom(*a, **k):
+            raise RuntimeError("429 Too Many Requests")
 
-    def test_probability_never_leaves_range(self):
-        # 极端单边也不能给出 0 或 1 —— 那是确定性，不是概率
-        for rows in (bars_up(), bars_down()):
-            p = autotrade.fallback_p_up(rows)["p_up"]
-            self.assertGreater(p, 0.0)
-            self.assertLess(p, 1.0)
+        with mock.patch("agent.llm.chat_ex", boom):
+            got = autotrade.ask_entry(bars_up(20), 4040.0, 4040.24, autotrade.Cfg())
+
+        self.assertFalse(got["act"])
+        self.assertEqual(got["source"], "error")
+        self.assertIn("429", got["reason"])
+
+    def test_entry_garbage_means_no_trade(self):
+        with mock.patch("agent.llm.chat_ex", lambda *a, **k: ("看不懂", {})):
+            got = autotrade.ask_entry(bars_up(20), 4040.0, 4040.24, autotrade.Cfg())
+
+        self.assertFalse(got["act"])
+        self.assertEqual(got["source"], "error")
+        self.assertIn("无法解析", got["reason"])
+
+    def test_exit_api_failure_holds(self):
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0,
+               "opened_at": NOW - 60}
+
+        def boom(*a, **k):
+            raise RuntimeError("timeout")
+
+        with mock.patch("agent.llm.chat_ex", boom):
+            got = autotrade.ask_exit(bars_up(20), pos, 4040.0, 4040.24,
+                                     autotrade.Cfg())
+
+        self.assertFalse(got["close"])       # 不知道就继续持有，不瞎平
+        self.assertEqual(got["source"], "error")
+
+
+class TestModelFailureStops(TempLedger):
+    def setUp(self):
+        super().setUp()
+        autotrade._JSON_MODE_OK = True
+
+    def tearDown(self):
+        autotrade._JSON_MODE_OK = True
+        super().tearDown()
+
+    def test_entry_failure_skips_instead_of_opening(self):
+        with mock.patch("agent.llm.chat_ex", side_effect=RuntimeError("429")), \
+             mock.patch.object(autotrade, "send_open") as m_open:
+            row = autotrade.tick(autotrade.Cfg(interval_sec=60), now=NOW,
+                                 quote=(4000.0, 4000.24), rows=bars_up(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "skip")
+        # 必须和"模型主动放弃"分开：故障不能被算成它变保守了
+        self.assertEqual(row.get("source"), "error")
+        m_open.assert_not_called()
+
+    def test_three_exit_failures_stop_the_worker(self):
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": 77, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 600,
+                             "p_up": 0.6, "entry_reason": "突破"}
+        autotrade.save_state(state)
+
+        err = {"close": False, "source": "error",
+               "reason": "模型调用失败（429）", "error": "429"}
+        # tp_min_usd=0 是为了让出场决策真的走到「问模型」这一步——
+        # 默认门槛 3.25 下浮盈 0 会被闸门拦住，永远不调模型，也测不到失败计数。
+        cfg = autotrade.Cfg(interval_sec=60, tp_min_usd=0, max_hold_sec=0)
+        with mock.patch.object(autotrade, "ask_exit", return_value=err):
+            rows = [autotrade.tick(cfg, now=NOW + i,
+                                   quote=(4000.0, 4000.24), rows=bars_up(),
+                                   positions=[{"ticket": 77, "symbol": "XAUUSDm"}])
+                    for i in (0, 60, 120)]
+
+        self.assertEqual(rows[0]["kind"], "hold")
+        self.assertEqual(rows[1]["kind"], "hold")
+        # 第三次必须停：仓位还在手上、模型又调不通，不能让它一直挂着没人管
+        self.assertEqual(rows[2]["kind"], "stop")
+        self.assertIn("连续", rows[2]["reason"])
 
 
 # ------------------------------------------------------------------ 1 分钟内重开
@@ -1057,9 +1125,11 @@ class TestStructure(unittest.TestCase):
         self.assertIn("位置判定", autotrade._structure_text(rows, zone_edge=9.9))
 
     # ---- 多空对称：位置判定必须带趋势方向（实测「只做多」的根因）----
+    # 2026-10-25 话术降级：「不许接多」→「程序倾向」。判定逻辑不变，
+    # 变的是语气——模型可不同意，但要给出理由（拆掉逼出 p_up=0.0 的框）。
 
     def test_downtrend_lower_edge_forbids_long(self):
-        """下跌趋势里贴下沿是弱势延续，不是超卖——不许接多。
+        """下跌趋势里贴下沿是弱势延续，不是超卖——程序倾向不接多。
 
         漏了这一条时，14 根窗口在跌势里永远处于区间下部，位置判定永远显示
         「可考虑做多」；同时想空又被「追破位」铁律按住，结果只会做多。
@@ -1067,17 +1137,19 @@ class TestStructure(unittest.TestCase):
         rows = bars_from_closes([4000 - i for i in range(14)])
         text = autotrade._structure_text(rows)
         self.assertIn("下跌趋势", text)
-        self.assertIn("不许接多", text)
-        self.assertIn("做空", text)
+        self.assertIn("倾向等反抽到上沿做空", text)
+        self.assertIn("你可以不同意", text)
 
     def test_uptrend_upper_edge_forbids_chasing(self):
         rows = bars_from_closes([4000 + i for i in range(14)])
-        self.assertIn("不许追多", autotrade._structure_text(rows))
+        text = autotrade._structure_text(rows)
+        self.assertIn("倾向等回踩到下沿低吸", text)
+        self.assertIn("你可以不同意", text)
 
     def test_range_keeps_symmetric_edges(self):
         """震荡里贴下沿仍然是买点，别把趋势线规则误用到震荡。"""
         rows = bars_from_closes([4002, 4000] * 7)     # 收在区间最低
-        self.assertIn("贴下沿（可考虑做多", autotrade._structure_text(rows))
+        self.assertIn("贴下沿（程序倾向：可考虑做多", autotrade._structure_text(rows))
 
     def test_structure_line_shows_direction(self):
         """净移动必须带符号：只给绝对值，模型分不清在涨还是在跌。"""
@@ -1087,19 +1159,59 @@ class TestStructure(unittest.TestCase):
 
     def test_zone_text_direct(self):
         """直接钉 pos/er/drift 的组合，绕开构造 K 线的麻烦。"""
-        # 跌势贴下沿 → 禁止接多
-        self.assertIn("不许接多", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
-        # 涨势贴下沿 → 回踩到位可做多
-        self.assertIn("可考虑做多", autotrade._zone_text(0.10, 0.70, 5.0, 0.35))
-        # 涨势贴上沿 → 不许追多
-        self.assertIn("不许追多", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
-        # 跌势贴上沿 → 反抽到位可做空
-        self.assertIn("可考虑做空", autotrade._zone_text(0.90, 0.70, -5.0, 0.35))
+        # 跌势贴下沿 → 程序倾向等反抽做空
+        self.assertIn("倾向等反抽到上沿做空", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
+        # 涨势贴下沿 → 回踩到位倾向做多
+        self.assertIn("倾向做多", autotrade._zone_text(0.10, 0.70, 5.0, 0.35))
+        # 涨势贴上沿 → 程序倾向不追多
+        self.assertIn("倾向等回踩到下沿低吸", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
+        # 跌势贴上沿 → 反抽到位倾向做空
+        self.assertIn("倾向做空", autotrade._zone_text(0.90, 0.70, -5.0, 0.35))
         # 震荡两边都对称
         self.assertIn("可考虑做多", autotrade._zone_text(0.10, 0.10, -5.0, 0.35))
         self.assertIn("可考虑做空", autotrade._zone_text(0.90, 0.10, 5.0, 0.35))
         # 中间地带不动手
         self.assertIn("不动手", autotrade._zone_text(0.50, 0.70, -5.0, 0.35))
+
+    def test_prog_direction_matches_zone_text(self):
+        """_prog_direction 必须和 _zone_text 的建议同向——各算各的必然漂移。"""
+        # 跌势贴下沿 → 倾向空（等反抽）
+        self.assertEqual(autotrade._prog_direction(
+            bars_from_closes([4000 - i for i in range(14)]), 0.35), -1)
+        # 涨势贴下沿 → 倾向多（回踩到位）
+        self.assertEqual(autotrade._prog_direction(
+            bars_from_closes([4000 + i for i in range(14)]), 0.35), 1)
+        # 震荡收在区间最低 → 倾向多
+        self.assertEqual(autotrade._prog_direction(
+            bars_from_closes([4002, 4000] * 7), 0.35), 1)
+        # 中间地带 → 无建议（bars_from_closes 每根带 ±1 影线，
+        # 收盘要真落在区间 35%~65% 里，得用比影线更高的振幅）
+        mid_rows = [{"time": NOW + i * 60, "open": 4000 + (2 if i % 2 else 0),
+                     "high": 4000 + (2 if i % 2 else 0) + 3,
+                     "low": 4000 + (2 if i % 2 else 0) - 3,
+                     "close": 4000 + (2 if i % 2 else 0)} for i in range(14)]
+        self.assertEqual(autotrade._prog_direction(mid_rows, 0.35), 0)
+
+    def test_system_suggests_not_commands(self):
+        """提示词必须把位置判定定位成建议而非命令（p_up 两极分化的根因）。"""
+        self.assertIn("建议", autotrade.ENTRY_SYSTEM)
+        self.assertNotIn("唯一合法的方向", autotrade.ENTRY_SYSTEM)
+        self.assertIn("可以不同意", autotrade.ENTRY_SYSTEM)
+        self.assertIn("0.20 ~ 0.80", autotrade.ENTRY_SYSTEM)
+
+    def test_parse_p_up_is_clamped(self):
+        """0/1 是伪精确，代码层兜底截断到 [0.20, 0.80]。"""
+        got = autotrade.parse_p_up('{"act": true, "p_up": 0.0, "reason": "x"}')
+        self.assertAlmostEqual(got["p_up"], 0.20)
+        got = autotrade.parse_p_up('{"act": true, "p_up": 1.0, "reason": "x"}')
+        self.assertAlmostEqual(got["p_up"], 0.80)
+        got = autotrade.parse_p_up('{"act": true, "p_up": 0.62, "reason": "x"}')
+        self.assertAlmostEqual(got["p_up"], 0.62)
+        # agree 字段解析：认得出的归布尔，没给的保持 None
+        self.assertIs(autotrade.parse_p_up(
+            '{"act": true, "p_up": 0.6, "agree": true, "reason": "x"}')["agree"], True)
+        self.assertIsNone(autotrade.parse_p_up(
+            '{"act": true, "p_up": 0.6, "reason": "x"}')["agree"])
 
     def test_system_forbids_one_side_locking(self):
         """提示词必须明说"机会对等"，否则教训里的偏空描述会锁死方向。"""
@@ -1243,7 +1355,10 @@ class TestActFlag(TempLedger):
 
 
 class TestMinHold(TempLedger):
-    """刚开仓就平等于白送点差。实测平均持仓 10 秒、平均盈利 0.32、点差 0.24。"""
+    """最短持仓保护。2026-10-23 起它只在 tp_min_usd=0（关掉止盈门槛）时才生效，
+    默认路径改由「浮盈不到 3.25 就不平」管——那个门槛比 60 秒严格得多，
+    刚开仓的单子不可能有 3.25 的浮盈，所以最短持仓天然满足。
+    这里传 tp_min_usd=0 是在测**回退路径**，别以为默认行为是这样。"""
 
     def _open_position(self, opened_at, price_open=4000.0, direction=1):
         state = autotrade._empty_state()
@@ -1254,7 +1369,8 @@ class TestMinHold(TempLedger):
 
     def test_early_close_is_blocked_without_calling_model(self):
         self._open_position(NOW - 20)          # 才持仓 20 秒
-        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60, min_hold_exempt_usd=0.5)
+        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60,
+                            min_hold_exempt_usd=0.5, tp_min_usd=0)
         with mock.patch.object(autotrade, "ask_exit") as m_exit:
             row = autotrade.tick(cfg, now=NOW, quote=(4000.5, 4000.74),
                                  rows=bars_up(), positions=[])
@@ -1264,21 +1380,26 @@ class TestMinHold(TempLedger):
         m_exit.assert_not_called()             # 不调模型，省一次 token
         self.assertIsNotNone(autotrade.load_state()["position"])
 
-    def test_big_loss_is_exempted(self):
-        """浮亏超过豁免线就放行——保护，不是硬扛。"""
-        self._open_position(NOW - 20)
-        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60, min_hold_exempt_usd=0.5)
-        with mock.patch.object(autotrade, "ask_exit",
-                              return_value={"close": True, "reason": "急跌",
-                                            "source": "llm"}) as m_exit:
+    def test_big_loss_is_cut_by_stop_loss_not_the_model(self):
+        """浮亏超过止损线：程序直接平，连模型都不问。
+
+        旧行为是「浮亏超豁免线就放行交给模型判断」——第 3 场的账证明这条路
+        走不通：前四大亏全是 p_up=0.0 的单子，它最自信时亏最多，不会认错。
+        """
+        self._open_position(NOW - 20)          # 远不到 60 秒
+        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60,
+                            min_hold_exempt_usd=0.5, sl_usd=3.0, tp_min_usd=3.25)
+        with mock.patch.object(autotrade, "ask_exit") as m_exit:
             row = autotrade.tick(cfg, now=NOW, quote=(3995.0, 3995.24),
                                  rows=bars_down(), positions=[])
-        m_exit.assert_called_once()            # 该问还得问
+        m_exit.assert_not_called()             # 止损不用问模型
         self.assertEqual(row["kind"], "close")
+        self.assertEqual(row["source"], "sl")
 
     def test_after_min_hold_model_decides(self):
         self._open_position(NOW - 90)          # 已过 60 秒
-        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60, min_hold_exempt_usd=0.5)
+        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=60,
+                            min_hold_exempt_usd=0.5, tp_min_usd=0)
         with mock.patch.object(autotrade, "ask_exit",
                               return_value={"close": True, "reason": "动能衰竭",
                                             "source": "llm"}):
@@ -1288,7 +1409,7 @@ class TestMinHold(TempLedger):
 
     def test_zero_disables_the_guard(self):
         self._open_position(NOW - 5)
-        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=0)
+        cfg = autotrade.Cfg(dry_run=True, min_hold_sec=0, tp_min_usd=0)
         with mock.patch.object(autotrade, "ask_exit",
                               return_value={"close": True, "reason": "走",
                                             "source": "llm"}) as m_exit:
@@ -1296,8 +1417,12 @@ class TestMinHold(TempLedger):
                            rows=bars_up(), positions=[])
         m_exit.assert_called_once()
 
-    def test_exit_system_mentions_min_hold(self):
-        self.assertIn("60 秒内系统一般不允许平仓", autotrade.EXIT_SYSTEM)
+    def test_exit_system_states_the_real_gate(self):
+        """提示词必须和真实闸门一致，否则模型会以为还能自己扛单。"""
+        self.assertIn("浮盈不到 3.25 USD", autotrade.EXIT_SYSTEM)
+        self.assertIn("系统直接市价平", autotrade.EXIT_SYSTEM)
+        # 旧文案说"没有止损也没有止盈"，现在程序层有止损，不能再这么写
+        self.assertNotIn("没有止损也没有止盈", autotrade.EXIT_SYSTEM)
 
 
 class TestIgnoreSpread(unittest.TestCase):
@@ -1467,7 +1592,7 @@ class TestReviewQueue(TempLedger):
         with mock.patch.object(autotrade, "ask_exit",
                                return_value={"close": True, "reason": "动能衰竭",
                                              "source": "llm"}):
-            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+            row = autotrade.tick(autotrade.Cfg(dry_run=True, tp_min_usd=0), now=NOW,
                                  quote=(4000.0, 4000.24), rows=bars_up())
         self.assertEqual(row["kind"], "close")
         state = autotrade.load_state()
@@ -1481,7 +1606,7 @@ class TestReviewQueue(TempLedger):
         with mock.patch.object(autotrade, "ask_exit",
                                return_value={"close": True, "reason": "动能衰竭",
                                              "source": "llm"}):
-            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+            autotrade.tick(autotrade.Cfg(dry_run=True, tp_min_usd=0), now=NOW,
                            quote=(4000.0, 4000.24), rows=bars_up())
 
         cfg = autotrade.Cfg(dry_run=True)
