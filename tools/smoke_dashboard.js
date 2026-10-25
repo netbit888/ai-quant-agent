@@ -78,7 +78,7 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -218,6 +218,59 @@ try {
   const dirTxt = String(made.atDir.textContent || '');
   console.log(`  多空偏斜提示 ${dirTxt.includes('偏斜') ? '✓' : '✗'} (${dirTxt.trim() || '空'})`);
   if (!dirTxt.includes('偏斜')) failed = true;
+
+  // ---- 单笔交易溯源弹窗：程序建议 vs 模型判断必须两列都显示 ----
+  // 这两份数据钉住两个分支：(1) 完整档案（终端在线、重建出结构）
+  // (2) 降级档案（终端离线，原料不可得）——降级时绝不能显示假数据，
+  //     必须出现"原始行情没存盘"的说明。
+  const tradeFull = {
+    ok: true, ticket: 12345,
+    open: { ts: 1790000000, kind: 'open', ticket: 12345, direction: -1, lots: 0.01,
+            price: 4027.413, p_up: 0.2, reason: '贴上沿，窄幅震荡，考虑做空', source: 'llm' },
+    close: { ts: 1790000060, kind: 'close', ticket: 12345, pnl: 0.68, hit: true,
+             held_sec: 60, reason: '连续 1 根阴线', source: 'llm' },
+    review: { lesson: '等反抽再空', regime: 'range' },
+    result: { pnl: 0.68, hit: true, held_sec: 60, exit_source: 'llm' },
+    recon: { bars: 'T-13  10-23 11:33  4022.8  4023.8  4021.8  4022.8',
+             structure: '结构 ER=0.08（净移动 -0.412（下行）/ 总行程 5.100）｜位置判定：贴上沿（程序倾向：可考虑做空）',
+             prog_dir: -1, ticks: 'tick 合计 1800 笔', note: null },
+    judgement: { prog_dir: -1, model_dir: -1, agree_field: true, p_up: 0.2,
+                 model_reason: '贴上沿，窄幅震荡，考虑做空', verdict: '一致' },
+  };
+  const htmlFull = api.renderTradeDetail(tradeFull);
+  const fullChecks = [
+    ['方向/手数', htmlFull.includes('空 0.01 手')],
+    ['开仓价', htmlFull.includes('4027.413')],   // 字段名写错会退化成「@ —」
+    ['盈亏金额', htmlFull.includes('0.68')],
+    ['平仓方式', htmlFull.includes('模型判断平仓')],
+    ['程序建议', htmlFull.includes('做空')],
+    ['模型 p_up', htmlFull.includes('20%')],
+    ['裁决', htmlFull.includes('一致')],
+    ['结构行', htmlFull.includes('ER=0.08')],
+    ['K 线原料', htmlFull.includes('T-13')],
+    ['复盘教训', htmlFull.includes('等反抽再空')],
+  ];
+  for (const [name, ok] of fullChecks) {
+    console.log(`  溯源·${name} ${ok ? '✓' : '✗'}`);
+    if (!ok) failed = true;
+  }
+  if (htmlFull.includes('undefined') || htmlFull.includes('NaN')) {
+    console.log('  ✗ 溯源弹窗出现 undefined / NaN');
+    failed = true;
+  }
+
+  const tradeDegraded = JSON.parse(JSON.stringify(tradeFull));
+  tradeDegraded.recon = { bars: null, structure: null, prog_dir: null, ticks: null,
+                          note: '终端未连接，历史行情无法重建' };
+  tradeDegraded.judgement = { prog_dir: null, model_dir: -1, agree_field: null,
+                              p_up: 0.2, model_reason: '贴上沿', verdict: null };
+  const htmlDeg = api.renderTradeDetail(tradeDegraded);
+  console.log(`  溯源·降级说明 ${htmlDeg.includes('原始行情没存盘') ? '✓' : '✗'}`);
+  if (!htmlDeg.includes('原始行情没存盘')) failed = true;
+  console.log(`  溯源·降级不说假话 ${!htmlDeg.includes('ER=') && !htmlDeg.includes('T-13') ? '✓' : '✗'}`);
+  if (htmlDeg.includes('ER=') || htmlDeg.includes('T-13')) failed = true;
+  console.log(`  溯源·旧数据无建议时标注 ${htmlDeg.includes('旧数据未记录') ? '✓' : '✗'}`);
+  if (!htmlDeg.includes('旧数据未记录')) failed = true;
 
   // 程序止损笔数必须显示：止损多 = 入场方向差，和"模型平得差"不是一回事
   const slTxt = String(made.atSl.textContent || '');

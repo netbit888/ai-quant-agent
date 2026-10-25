@@ -2082,10 +2082,13 @@ function renderTradeDetail(d) {
   const o = d.open || {}, c = d.close || {}, res = d.result || {},
         j = d.judgement || {}, rc = d.recon || {}, rv = d.review;
   const dirText = o.direction > 0 ? '多' : '空';
+  // 日志里 open 行的价格字段叫 price；state.position 里才叫 price_open。
+  // 只认一个会显示成「@ —」（真实账本踩过，别再用合成数据掩盖）。
+  const openPx = o.price_open != null ? o.price_open : o.price;
 
   // 1. 执行结果
   let html = `<div class="td-sec"><b>执行结果</b><div class="td-grid">`
-    + tradeRow('方向 / 手数', `${dirText} ${o.lots} 手 @ ${fmt(o.price_open, 3)}`)
+    + tradeRow('方向 / 手数', `${dirText} ${o.lots} 手 @ ${fmt(openPx, 3)}`)
     + tradeRow('盈亏', money(res.pnl), res.pnl > 0 ? 'pos' : (res.pnl < 0 ? 'neg' : ''))
     + tradeRow('持仓时长', res.held_sec != null ? `${res.held_sec} 秒` : '—')
     + tradeRow('平仓方式', res.exit_source === 'llm' ? '模型判断平仓'
