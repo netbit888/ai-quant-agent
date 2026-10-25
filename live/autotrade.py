@@ -2497,6 +2497,108 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     }
 
 
+def trade_detail(ticket: int, login: int | str | None = None,
+                 live: bool = False) -> dict:
+    """一笔交易的完整档案：原料 → 结构 → 程序判断 → 模型判断 → 执行 → 结果。
+
+    面板的交易溯源接口背后是这个。设计约束：
+    - **只读日志，不调模型，不连终端**（除非 live=True 且要补 tick）。
+      查历史不能产生 API 费用，也不能因为 MT5 没开就查不了。
+    - K 线是**现拉的**（decision 时刻的原始行情没存盘——存了也就 14 行，
+      但每笔都存会让日志膨胀 40 倍，不值得）。live=True 时从终端补拉
+      开仓时刻附近的数据重算结构；拿不到就如实说"行情已过，无法重建"，
+      绝不用现在的行情冒充当时的。
+    - 复盘窗口可以事后重建（K 线历史还在），所以教训部分总是完整的。
+    """
+    rows = read_log(login, limit=20000)
+    open_row = next((r for r in rows
+                     if r.get("kind") == "open" and int(r.get("ticket") or 0) == int(ticket)), None)
+    if open_row is None:
+        return {"ok": False, "error": f"日志里找不到 ticket={ticket} 的开仓记录"}
+
+    close_row = next((r for r in rows
+                      if r.get("kind") == "close" and int(r.get("ticket") or 0) == int(ticket)), None)
+    review_row = next((r for r in rows
+                       if r.get("kind") == "review" and int(r.get("ticket") or 0) == int(ticket)), None)
+
+    opened_at = int(open_row.get("ts") or 0)
+    cfg = cfg_from_state(login) or Cfg()
+
+    # --- 原料与结构：能重建就重建，不能就明说 --------------------------------
+    bars = structure = ticks_block = None
+    structure_note = None
+    try:
+        import MetaTrader5 as _mt5  # noqa: F401  探测终端是否可用
+        hist = _bars(cfg.symbol, cfg.tf, cfg.bars + 120)
+        if hist:
+            # 用「不晚于开仓时刻的最后一根」当开仓时的当前 K 线，
+            # 截出与决策时一致的 14 根窗口。
+            eligible = [b for b in hist if int(b.get("time") or 0) <= opened_at]
+            if len(eligible) >= VISIBLE_BARS:
+                window = eligible[-VISIBLE_BARS:]
+                bars = _fmt_bar_lines(window)
+                structure = _structure_text(window, cfg.zone_edge)
+                prog_dir = _prog_direction(window, cfg.zone_edge)
+                try:
+                    ticks_block = _ticks_text(cfg, window)
+                except Exception:  # noqa: BLE001
+                    ticks_block = None
+            else:
+                structure_note = (f"终端历史只覆盖到 {len(eligible)} 根，"
+                                  "开仓时刻的完整 14 根窗口已不可得")
+        else:
+            structure_note = "终端历史不可用（未连接或品种无数据）"
+    except Exception:
+        structure_note = "终端未连接，历史行情无法重建"
+
+    # --- 程序 vs 模型：分歧记账的两列 ----------------------------------------
+    prog_dir = open_row.get("prog_dir")
+    model_dir = open_row.get("direction")
+    agree_field = open_row.get("agree")
+    if prog_dir is None and structure:
+        # 旧日志没有 prog_dir 字段（2026-10-25 之前），从重建的结构补算
+        try:
+            prog_dir = _prog_direction(
+                _bars(cfg.symbol, cfg.tf, cfg.bars + 120)[-VISIBLE_BARS:],
+                cfg.zone_edge)
+        except Exception:  # noqa: BLE001
+            pass
+    if prog_dir is not None and model_dir is not None:
+        verdict = ("一致" if int(prog_dir) == int(model_dir)
+                   else "分歧" if int(prog_dir) != 0 else "程序无建议，模型自选")
+    else:
+        verdict = None
+
+    return {
+        "ok": True,
+        "ticket": int(ticket),
+        "open": open_row,
+        "close": close_row,
+        "review": review_row,
+        "result": {
+            "pnl": (close_row or {}).get("pnl"),
+            "hit": (close_row or {}).get("hit"),
+            "held_sec": (close_row or {}).get("held_sec"),
+            "exit_source": (close_row or {}).get("source"),
+        },
+        "recon": {
+            "bars": bars,
+            "structure": structure,
+            "prog_dir": prog_dir,
+            "ticks": ticks_block,
+            "note": structure_note,
+        },
+        "judgement": {
+            "prog_dir": prog_dir,
+            "model_dir": model_dir,
+            "agree_field": agree_field,
+            "p_up": open_row.get("p_up"),
+            "model_reason": open_row.get("reason"),
+            "verdict": verdict,
+        },
+    }
+
+
 # ------------------------------------------------------------------ CLI
 
 

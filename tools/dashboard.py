@@ -212,6 +212,26 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/trade":
+            # 单笔交易溯源：原料（K线/tick）→ 结构（ER/位置判定）→
+            # 程序建议 vs 模型判断 → 执行结果 → 复盘。只读日志，
+            # 终端在线时补拉历史行情重建当时的 14 根窗口，不调模型、不花钱。
+            qs = parse_qs(parsed.query)
+            want = (qs.get("account") or [""])[0].strip()
+            ticket = (qs.get("ticket") or [""])[0].strip()
+            if not ticket.isdigit():
+                self._json(400, {"ok": False, "error": "缺 ticket 参数"})
+                return
+            try:
+                from live import autotrade
+
+                payload = autotrade.trade_detail(int(ticket), want or None)
+            except Exception as exc:  # noqa: BLE001
+                payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                       "application/json; charset=utf-8")
+            return
+
         if parsed.path == "/api/llm":
             # 当前模型配置：只读。key 只给尾 4 位，整串永不出服务端。
             try:
