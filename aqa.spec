@@ -1,20 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""AI Quant Agent 绿色版（onedir）打包配置。
+"""AI Quant Agent 安装版打包配置。
 
 构建：
     .venv\\Scripts\\pyinstaller.exe --noconfirm aqa.spec
+    （或 tools\\build_installer.bat 一条龙：打包 + 生成安装包）
 
 产物：
-    dist/AIQuant/AIQuant.exe        ← 双击启动
+    dist/AIQuant/AIQuant.exe        ← 双击启动，原生窗口
     dist/AIQuant/_internal/         ← 只读资源与依赖，别动
     dist/AIQuant/data/              ← 运行时生成：账本、日志（可写）
 
 一条原则：能写的东西一律在 exe 同级，不能写进 _internal。
 """
 
+import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH)
 
@@ -31,12 +33,21 @@ def _subs(*names):
     return out
 
 
+# ---- pywebview 的原生资源 ------------------------------------------------
+# lib/ 下是 WebView2 的托管程序集 + runtimes/（含 WebView2Loader.dll），
+# 压缩进 PYZ 就读不到，必须原样落到 _internal/webview/lib/。
+try:
+    wv_datas = collect_data_files("webview", subdir="lib")
+except Exception:  # noqa: BLE001
+    wv_datas = []
+
 # ---- 只读资源：必须是真磁盘文件 ------------------------------------------
 datas = [
     # 面板模板。每次请求都从磁盘重读，缺失就直接 500 "template missing"。
     (str(ROOT / "tools" / "dashboard_template.html"), "tools"),
     # 策略源码：/api/strategies 靠 glob + exec_module 动态加载，压缩进 PYZ 读不到。
     (str(ROOT / "strategies"), "strategies"),
+    *wv_datas,
 ]
 
 # ---- 静态分析看不见的模块 ------------------------------------------------
@@ -48,13 +59,18 @@ hiddenimports = [
     "live.sessions", "live.autotrade", "live.positions",
     "live.scoring", "live.quality", "live.cost", "live.profile",
     "agent.llm",
-    "tools.lesson_stats", "tools.switch_llm",
+    "tools.lesson_stats", "tools.switch_llm", "tools.desktop",
     "execution.live",
     # 策略源码在运行时被 exec_module 加载，它内部的 import 静态扫不到
     "backtest.structure", "backtest.models", "backtest.indicators", "backtest.symbols",
     *_subs("backtest"),
     # openai 3.x 用的是新包名 httpx2 / httpcore2，PyInstaller 自带 hook 只认旧名
     *_subs("httpx2", "httpcore2"),
+    # pywebview：平台后端是按字符串动态 import 的
+    "webview", "webview.platforms.edgechromium", "webview.platforms.win32",
+    "webview.util", "webview.window", "webview.event", "webview.js",
+    # pythonnet：edgechromium 靠它加载 WinForms 与 WebView2 程序集
+    "clr", "clr_loader", "pythonnet",
 ]
 
 excludes = [
@@ -66,11 +82,21 @@ excludes = [
     "tools.replay_exit", "tools.migrate_accounts", "tools.profile",
     "tools.check_structure",
     "mt5.backtest", "mt5.report",
+    # ---- pywebview 的其它后端：不排会让体积翻倍，还会在缺库时报错 ----
+    "webview.platforms.gtk", "webview.platforms.qt",
+    "webview.platforms.cef", "webview.platforms.android",
+    "webview.platforms.cocoa",
+    "PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy",
     # ---- 体积 ----
     "tkinter", "_tkinter", "turtle", "turtledemo",
     "unittest", "pydoc", "doctest", "test",
     "pytest", "setuptools", "pip", "wheel",
 ]
+
+# 默认无控制台（原生窗口旁边再挂个黑窗，安装版就白做了）。
+# 调试时可以 set AQA_CONSOLE=1 再打包，把日志看回来。
+_WANT_CONSOLE = os.environ.get("AQA_CONSOLE") == "1"
+_ICON = ROOT / "assets" / "aqa.ico"
 
 a = Analysis(
     ["aqa_launcher.py"],
@@ -96,12 +122,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,                    # UPX 会引发 Defender 误报，对 .pyd 也没有收益
-    console=True,                 # v1 保留黑窗：崩溃可见、能 Ctrl+C 看日志
+    console=_WANT_CONSOLE,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_ICON) if _ICON.is_file() else None,
 )
 
 coll = COLLECT(

@@ -1353,6 +1353,28 @@
 </section>
 
 <script>
+/* ==================== 原生窗口桥（pywebview）====================
+   打包版会把页面装进一个原生窗口，由 Python 侧通过 js_api 暴露几个方法。
+   浏览器模式 / Node 假 DOM（tools/smoke_dashboard.js）里 window.pywebview
+   不存在，下面每个函数都必须退化成 no-op，而且**绝不抛**——
+   这一段在冒烟测试里是被真执行的，抛一下整条冒烟就红了。
+
+   另外不能在解析期判断桥是否就绪：pywebview 的注入晚于本脚本执行。 */
+function isNative() {
+  try {
+    return !!(typeof window !== 'undefined' && window.pywebview && window.pywebview.api);
+  } catch (e) { return false; }
+}
+
+/* 调桥。没桥 / 方法不存在 / 序列化失败 → 一律返回 null，调用方据此降级。 */
+function nativeApi(name) {
+  try {
+    if (!isNative() || typeof window.pywebview.api[name] !== 'function') return null;
+    return window.pywebview.api[name].apply(
+      window.pywebview.api, Array.prototype.slice.call(arguments, 1));
+  } catch (e) { return null; }
+}
+
 const $ = id => document.getElementById(id);
 const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
 const signClass = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
@@ -2757,10 +2779,18 @@ async function saveSetup() {
 }
 
 /* ==================== 退出程序 ====================
- * 这是唯一可控的退出路径。关控制台窗口只有约 5 秒处理时限，
- * 弹窗来不及，只能尽力平仓——所以主路径必须放在页面上。
+ * 这是唯一可控的退出路径。
+ *   浏览器模式：关标签页 ≠ 退出（服务端还在跑），所以只能靠这个按钮。
+ *   原生窗口：点窗口 X 会由 Python 侧调 onCloseRequested() 走同一条路，
+ *            所以确认逻辑只有这一份，不会分叉。
  */
 async function quitApp() {
+  // 第二个窗口（主程序在别人那里）：这里的按钮会打到对方进程，
+  // 一点就把正在跑的那份关掉 —— 必须拦住。
+  if (typeof window !== 'undefined' && window.__AQA_ATTACH__) {
+    alert('这份面板是第二个窗口，主程序在另一个窗口里运行。\n要退出请回到那个窗口。');
+    return;
+  }
   let p = null;
   try {
     p = await (await fetch('/api/app/quit-preview', { cache: 'no-store' })).json();
@@ -2768,6 +2798,10 @@ async function quitApp() {
     p = { ok: false, count: 0, error: String(e) };
   }
   if (!p.count) {
+    // 原生窗口：没仓就不必再问一遍，直接退（点 X 的语义就是"我要关"）。
+    // 但读不到持仓（p.ok=false）时仍要确认 —— 那可能是 MT5 断开，
+    // 不能因为 count 默认是 0 就静默退出。
+    if (isNative() && p.ok) { postQuit(false); return; }
     const go = await confirmApiCall({
       title: '退出程序？',
       desc: p.mt5
@@ -2790,11 +2824,19 @@ async function quitApp() {
   $('quitMask').classList.remove('hidden');
 }
 
-function quitMaskClose() { $('quitMask').classList.add('hidden'); }
+function quitMaskClose() {
+  $('quitMask').classList.add('hidden');
+  nativeApi('quit_dismissed');   // 窗口模式下告诉 Python：这次没退，别关窗
+}
 
 async function postQuit(flatten) {
   $('quitForce').disabled = true;
   $('quitFlatten').disabled = true;
+  if (isNative()) {
+    // 窗口马上就要消失了，别再写"可以关闭这个页面了"这种浏览器时代的话
+    $('quitDesc').textContent = flatten ? '正在平掉所有仓位并退出…' : '正在退出…';
+    $('quitCost').textContent = '';
+  }
   let failed = 0;
   try {
     const r = await fetch('/api/app/quit', {
@@ -2806,6 +2848,9 @@ async function postQuit(flatten) {
   } catch (e) {
     /* 进程死了会让 fetch 抛错——这恰恰说明退出成功 */
   }
+  // 窗口模式：关窗由 Python 侧做（先 destroy 再清进程），
+  // 这里改 body 只会闪一下，反而像崩溃。
+  if (isNative()) return;
   document.body.innerHTML =
     '<div style="padding:56px;font:15px/1.8 system-ui,-apple-system,sans-serif;color:#e8eef6">'
     + '<h3 style="margin:0 0 8px">程序已退出</h3>'
@@ -2813,6 +2858,16 @@ async function postQuit(flatten) {
         ? `<p style="color:#ff8b8d">有 ${failed} 笔平仓失败，请去 MT5 终端确认。</p>`
         : '<p>可以关闭这个页面了。</p>')
     + '</div>';
+}
+
+/* 窗口 X 被点时由 Python 侧调用。复用 quitApp，不另写一套。
+   连点 X 会重复进来，但 quitApp 的 preview 是只读的、mask 重复显示无害。 */
+function onNativeCloseRequested() {
+  quitApp();
+}
+
+if (typeof window !== 'undefined') {
+  window.aqaNative = { onCloseRequested: onNativeCloseRequested };
 }
 
 /* ==================== 全屏提醒幕布 ====================
@@ -2824,6 +2879,14 @@ async function postQuit(flatten) {
 function enterTradingFullscreen() {
   const el = $('atCurtain');
   if (el) el.classList.remove('hidden');
+  // 原生窗口：让宿主窗口真全屏（铺满显示器、盖住任务栏）。
+  // DOM 的 requestFullscreen 在 WebView2 里只铺满控件边界，标题栏还在。
+  // 注意 pywebview 的 api 调用返回 Promise —— 不要拿返回值做真假判断。
+  if (isNative()) {
+    nativeApi('set_fullscreen', true);
+    updateCurtain(lastAutoData);
+    return;
+  }
   const root = (typeof document !== 'undefined' && document.documentElement)
     || (typeof document !== 'undefined' && document.body) || null;
   const req = root && (root.requestFullscreen || root.webkitRequestFullscreen);
@@ -2839,6 +2902,7 @@ function enterTradingFullscreen() {
 function exitTradingFullscreen() {
   const el = $('atCurtain');
   if (el) el.classList.add('hidden');
+  if (isNative()) { nativeApi('set_fullscreen', false); return; }
   if (typeof document === 'undefined') return;
   const d = document;
   if (d.fullscreenElement && d.exitFullscreen) {
@@ -3128,7 +3192,10 @@ function loadDrafts(login) {
 
 function persistDrafts() {
   if (!draftStoreKey) return;
-  try { localStorage.setItem(draftStoreKey, JSON.stringify(noteDrafts)); } catch (e) { /* 忽略 */ }
+  try { localStorage.setItem(draftStoreKey, JSON.stringify(noteDrafts)); }
+  // 不静默：localStorage 写不进去（隐私模式 / 配额满 / profile 被清）时
+  // 用户只会觉得"我写的东西怎么没了"，留一行痕迹至少能查。
+  catch (e) { if (typeof console !== 'undefined' && console.warn) console.warn('[drafts] 落盘失败：', e && e.message); }
 }
 
 function setDraft(sid, value, tags) {

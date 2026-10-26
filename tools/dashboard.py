@@ -447,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {
                 "app": "aqa-dashboard",
                 "frozen": appdirs.is_frozen(),
+                "shell": _SHELL,
+                "native_window": _WINDOW is not None,
                 "pid": os.getpid(),
                 "port": self.server.server_address[1],
                 "data_root": str(appdirs.app_root()),
@@ -733,10 +735,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         _QUITTING.set()
         res = _shutdown(bool(body.get("flatten", True)))
-        self._json(200, {**res, "exiting": True})
-        # 响应必须先把 JSON 写出去，再让进程死；0.4s 留给浏览器读完
-        threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)),
-                         name="quit", daemon=True).start()
+        self._json(200, {**res, "exiting": True, "shell": _SHELL})
+        if _SHELL == "native":
+            # 窗口模式：让窗口优雅消失，而不是把进程连窗口一起砍掉
+            # （那样用户看到的和"崩溃"没法区分）。
+            _schedule_window_quit(0.35)
+        else:
+            # 浏览器模式：原样保留。响应必须先把 JSON 写出去再让进程死，
+            # 0.4s 留给浏览器读完。
+            threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)),
+                             name="quit", daemon=True).start()
 
     def _post_setup(self, body: dict) -> None:
         """首启配置向导。写 .env + 真调一次验证 + 进程内生效。
@@ -939,6 +947,163 @@ def setup_needed() -> bool:
 
 _QUITTING = threading.Event()
 
+# 窗口模式的状态。`_SHELL` 是唯一区分「原生窗口 / 浏览器」的开关，
+# 所有新分支都挂在它上面，保证 --web 的代码路径与加窗口之前逐字节一致。
+_SHELL = "browser"                  # "browser" | "native"
+_WINDOW = None                      # pywebview.Window，仅 native
+_exit_allowed = threading.Event()   # 置位 = 这次关闭是程序自己发起的，放行
+_last_close_ask = 0.0               # 防连点 X 弹两次
+_fullscreen = False
+_over_top = False
+
+
+class _Bridge:
+    """暴露给页面 JS 的接口（pywebview 的 js_api）。
+
+    三条规矩：
+      · 参数和返回值都必须是 JSON 能表达的；
+      · 全部 try/except 包住——桥里抛异常在页面上只是一句看不懂的
+        Promise rejection，比没有还难查；
+      · 这些方法跑在 pywebview 的工作线程里，不要在这里做超过几百毫秒的事。
+    """
+
+    def ping(self):
+        return {"ok": True, "native": True, "shell": _SHELL}
+
+    def quit_dismissed(self):
+        """用户在退出弹窗上点了「取消」。目前只需让他点得通。"""
+        return {"ok": True}
+
+    def quit_now(self, flatten=True):
+        """兜底：HTTP 服务已经死掉、页面还活着时还能退。
+
+        正常路径一律走 `POST /api/app/quit`——**只有一份退出实现**，
+        别让两条路分叉。
+        """
+        if _QUITTING.is_set():
+            return {"ok": True, "exiting": True}
+        _QUITTING.set()
+        threading.Thread(
+            target=lambda: (_shutdown(bool(flatten)), _schedule_window_quit(0.1)),
+            name="bridge-quit", daemon=True).start()
+        return {"ok": True, "exiting": True}
+
+    def set_fullscreen(self, on):
+        """真全屏：让宿主窗口铺满显示器并盖住任务栏。
+
+        DOM 的 requestFullscreen 在 WebView2 里只铺满控件边界，标题栏还在，
+        所以窗口模式下改走这里；拿不到窗口对象就返回 False 让前端降级。
+        """
+        global _fullscreen
+        on = bool(on)
+        if _WINDOW is None:
+            return {"ok": False}
+        if on == _fullscreen:
+            return {"ok": True, "fullscreen": _fullscreen}
+        try:
+            _WINDOW.toggle_fullscreen()
+            _fullscreen = on
+            return {"ok": True, "fullscreen": on}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def set_on_top(self, on):
+        global _over_top
+        if _WINDOW is None:
+            return {"ok": False}
+        try:
+            _WINDOW.on_top = bool(on)
+            _over_top = bool(on)
+            return {"ok": True, "on_top": _over_top}
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "on_top": _over_top}
+
+    def state(self):
+        return {"native": _WINDOW is not None, "shell": _SHELL,
+                "fullscreen": _fullscreen, "on_top": _over_top}
+
+
+def _register_window(win) -> None:
+    global _WINDOW
+    _WINDOW = win
+
+
+def _on_window_closing() -> bool:
+    """窗口 X 被点时调用，**在 GUI 线程里**。
+
+    这里绝不允许阻塞——阻塞就等于窗口卡死。所以绝不等用户选完再返回：
+    先拦下（False），起个线程让页面去弹自己的确认框，选完走
+    `POST /api/app/quit`。那条路会置 `_exit_allowed` 再 destroy，
+    于是 closing 第二次触发时直接放行。
+
+    好处是「用户点取消」时 Python 侧没有任何等待中的对象要清理，
+    连点 X 也只是重来一次，没有死锁的可能。
+    """
+    if _exit_allowed.is_set():
+        return True                       # 自己发起的 destroy，放行
+    if _QUITTING.is_set():
+        return False                      # 退出流程已在跑，等它 destroy
+    global _last_close_ask
+    now = time.time()
+    if now - _last_close_ask < 2.0:       # 连点 X：弹窗已经开着，忽略
+        return False
+    _last_close_ask = now
+    threading.Thread(target=_ask_close, name="close-ask", daemon=True).start()
+    return False                          # 先拦住，问完再说
+
+
+def _ask_close() -> None:
+    try:
+        if _WINDOW is not None:
+            _WINDOW.evaluate_js(
+                "window.aqaNative && window.aqaNative.onCloseRequested()")
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    _native_fallback_quit()               # 页面挂了也得有出口
+
+
+def _native_fallback_quit() -> None:
+    """JS 完全失联时的最后一条路：Win32 对话框，不依赖任何前端代码。"""
+    from tools import desktop
+
+    p = _quit_preview()
+    n = int(p.get("count") or 0)
+    if not n:
+        _shutdown(flatten=False)
+        _schedule_window_quit(0.1)
+        return
+    f = float(p.get("float_pnl") or 0)
+    yes = desktop.message_box(
+        f"账户上还有 {n} 笔持仓，浮动盈亏 {f:+.2f} USD。\n\n"
+        "「是」= 先市价平掉所有仓位再退出\n"
+        "「否」= 强制退出，仓位会留在券商那边（本策略不挂止盈止损）",
+        style=desktop.MB_YESNO | desktop.MB_ICONWARNING,
+    )
+    _shutdown(flatten=bool(yes))
+    _schedule_window_quit(0.1)
+
+
+def _schedule_window_quit(delay: float = 0.35) -> None:
+    """先让 JSON 读完、页面画出「正在退出」，再关窗。
+
+    destroy() 会再触发一次 closing —— 那时 `_exit_allowed` 已置位，直接放行。
+    万一 destroy 不生效（WinForms 的 Close 不是严格线程安全），5 秒后硬退：
+    此时仓位已经处理过，硬退是安全的。
+    """
+    def run() -> None:
+        time.sleep(delay)
+        _exit_allowed.set()
+        try:
+            if _WINDOW is not None:
+                _WINDOW.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(5.0)
+        os._exit(0)
+
+    threading.Thread(target=run, name="window-quit", daemon=True).start()
+
 
 def _quit_preview() -> dict:
     """退出前体检：**只读**，不下单、不启动终端。
@@ -1081,64 +1246,200 @@ def _live_recorder(interval_s: int = 300, allow_launch: bool = True) -> None:
     t.start()
 
 
-def main() -> None:
+def _parse_args(argv=None):
     import argparse
 
-    parser = argparse.ArgumentParser(description="AI Quant Agent 状态面板")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--no-open", action="store_true")
-    parser.add_argument("--no-live", action="store_true", help="不启动实盘后台同步线程")
-    parser.add_argument("--no-launch", action="store_true", help="MT5 没开时不要尝试自动启动它")
-    parser.add_argument("--live-interval", type=int, default=300, help="实盘同步间隔（秒）")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description="AI Quant Agent 状态面板")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--no-open", action="store_true",
+                   help="不起任何界面（只跑服务，给脚本/测试用）")
+    p.add_argument("--web", action="store_true",
+                   help="用浏览器打开（调试 / 多屏看板），不创建原生窗口")
+    p.add_argument("--native", action="store_true",
+                   help="强制开原生窗口（源码态调试窗口用；打包版默认就是窗口）")
+    p.add_argument("--no-live", action="store_true", help="不启动实盘后台同步线程")
+    p.add_argument("--no-launch", action="store_true", help="MT5 没开时不要尝试自动启动它")
+    p.add_argument("--live-interval", type=int, default=300, help="实盘同步间隔（秒）")
+    return p.parse_args(argv)
 
-    # 可写目录先建好。放到 Program Files 这类只读位置时这里就报错，
-    # 而不是等用户第一次点「开始做单」才 500——那时候根本看不出是权限问题。
-    appdirs.ensure_writable_dirs()
 
-    server, port, existing = _start_server(args.host, args.port)
-    url = f"http://{args.host}:{port}"
-
-    if existing:
-        # 同一个账户只能跑一个面板：两份进程会互相覆盖 autotrade_state.json、
-        # 重复下单。所以这里只打开浏览器，不再起一个服务。
-        print(f"已经有一份在跑（pid={existing.get('pid')}）：{url}")
-        print("同一个账户只允许一个面板实例——两份会互相覆盖状态、重复下单。")
-        if not args.no_open:
-            webbrowser.open(url)
-        return
-
+def _print_banner(url: str, args, port: int) -> None:
     print(f"面板地址: {url}")
     if port != args.port:
         print(f"注意：{args.port} 被别的程序占用，已自动改用 {port}")
-    print(f"状态文件: {STATE_FILE}  ({'存在' if STATE_FILE.exists() else '尚未生成，跑一次 agent.core 后出现'})")
+    print(f"状态文件: {STATE_FILE}  "
+          f"({'存在' if STATE_FILE.exists() else '尚未生成，跑一次 agent.core 后出现'})")
     print(f"数据目录: {appdirs.app_root()}")
 
-    if not args.no_live:
-        _live_recorder(args.live_interval, allow_launch=not args.no_launch)
-        auto = "关" if args.no_launch else "开"
-        print(f"实盘记录: 每 {args.live_interval}s 同步一次 -> data/live/  (自动启动 MT5: {auto})")
 
-    print("Ctrl+C 停止")
-    if appdirs.is_frozen():
-        # 纯 ASCII：Windows 控制台默认 GBK，`⚠` 这类符号编不出来会直接
-        # UnicodeEncodeError 把整个进程带走（打包后实测踩过，源码态不触发）。
-        print("[!] 退出请用面板右上角「退出程序」：会先平仓再关。"
-              "直接关这个黑窗口只能尽力在 4 秒内平仓，来不及确认。")
+def _start_background_work(args) -> None:
+    """实盘同步线程。
 
+    只在「本进程拥有服务端」时启动——attach 到别人那台的第二个窗口
+    绝不能起，否则两份同时写账本。
+    """
+    if args.no_live:
+        return
+    _live_recorder(args.live_interval, allow_launch=not args.no_launch)
+    auto = "关" if args.no_launch else "开"
+    print(f"实盘记录: 每 {args.live_interval}s 同步一次 -> data/live/  (自动启动 MT5: {auto})")
+
+
+def _run_headless(server, url: str, args) -> int:
+    """加原生窗口之前的**全部**行为，一行没改。
+
+    `--web` / `--no-open` / 源码态直跑都走这里。这是调试入口，
+    也是 WebView2 出问题时的退路，所以它必须永远和今天一致。
+    """
     _install_console_guard()
-
+    print("Ctrl+C 停止")
+    if appdirs.is_frozen() and not args.web:
+        print("[!] 这是无界面模式（--no-open）。要开窗口请直接双击程序。")
     if not args.no_open:
         webbrowser.open(url)
-
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止")
     finally:
         server.server_close()
+    return 0
+
+
+def _run_windowed(server, url: str, args) -> int:
+    """原生窗口：HTTP 进子线程，窗口占主线程。
+
+    `webview.start()` 必须占主线程（WinForms 消息循环），所以顺序和
+    无界面模式是反的：窗口关掉之后才轮到 server 收尾。
+    """
+    from tools import desktop
+
+    if not desktop.webview2_version():
+        # 缺运行时：给下载页，或者退回浏览器模式。完全不弹框会让用户
+        # 以为程序坏了；直接崩更糟。
+        return desktop.prompt_missing_webview2(
+            lambda: _run_headless(server, url, args))
+
+    global _SHELL
+    _SHELL = "native"
+
+    http = threading.Thread(target=server.serve_forever,
+                            kwargs={"poll_interval": 0.25},
+                            name="http", daemon=True)
+    http.start()
+    try:
+        desktop.run_window(
+            url=url,
+            title="AI Quant Agent — 实盘账本",
+            js_api=_Bridge(),
+            on_window=_register_window,
+            on_closing=_on_window_closing,
+            storage_path=appdirs.data_dir() / "webview",
+        )
+    except Exception as exc:  # noqa: BLE001
+        desktop.message_box(
+            f"窗口启动失败：{type(exc).__name__}: {exc}\n\n"
+            "可以先用浏览器模式打开：\n"
+            f"  {url}\n"
+            "或给程序加 --web 参数。")
+        return 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        http.join(2)
+    return 0
+
+
+def _run_attach(args, url: str, existing: dict) -> int:
+    """已经有一份在跑。本进程**不拥有服务端**：不起服务、不起 live 线程、
+    关窗不碰对方的进程。"""
+    print(f"已经有一份在跑（pid={existing.get('pid')}）：{url}")
+    print("同一个账户只允许一个面板实例——两份会互相覆盖状态、重复下单。")
+    if args.no_open:
+        return 0
+    if args.web:
+        webbrowser.open(url)          # --web：行为与加窗口之前一致
+        return 0
+
+    from tools import desktop
+
+    if not desktop.webview2_version():
+        webbrowser.open(url)          # 没有运行时：退回浏览器，别拿错误糊人
+        return 0
+    try:
+        desktop.run_window(
+            url=url,
+            title="AI Quant Agent — 实盘账本（已有一份在运行）",
+            js_api=None,              # attach 窗口不能有任何写入口
+            on_window=_register_window_attach,
+            on_closing=lambda: True,  # 点 X 直接关，不影响主进程
+            storage_path=None,
+            attach=True,
+        )
+        return 0
+    except Exception:  # noqa: BLE001
+        webbrowser.open(url)
+        return 0
+
+
+def _register_window_attach(win) -> None:
+    """attach 窗口不接管全局 _WINDOW / _SHELL —— 它只是对方进程上的一个看板。
+
+    但要在页面里打个标记，好让「退出程序」按钮知道自己是老二，
+    免得它 POST 到对方进程把真正在跑的那份关掉。
+    """
+    def mark() -> None:
+        time.sleep(0.8)
+        try:
+            win.evaluate_js("window.__AQA_ATTACH__ = true")
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=mark, name="attach-mark", daemon=True).start()
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+
+    # 可写目录先建好。放到 Program Files 这类只读位置时这里就报错，
+    # 而不是等用户第一次点「开始做单」才 500——那时候根本看不出是权限问题。
+    appdirs.ensure_writable_dirs()
+
+    try:
+        server, port, existing = _start_server(args.host, args.port)
+    except SystemExit as exc:
+        # 端口全被占满。窗口模式没有控制台可看，必须弹出来。
+        if args.web or not appdirs.is_frozen():
+            raise
+        from tools import desktop
+
+        desktop.message_box(str(exc), style=desktop.MB_ICONERROR)
+        return 1
+
+    url = f"http://{args.host}:{port}"
+
+    if existing:
+        return _run_attach(args, url, existing)
+
+    _print_banner(url, args, port)
+
+    # 窗口模式的判据：打包版默认开窗；源码态默认浏览器（方便刷新和 DevTools），
+    # 想调试窗口就加 --native。
+    want_window = (args.native or appdirs.is_frozen()) and not (args.web or args.no_open)
+
+    if not want_window:
+        _start_background_work(args)
+        return _run_headless(server, url, args)
+
+    _start_background_work(args)
+    if appdirs.is_frozen():
+        print("[!] 窗口会在启动后打开。退出请用窗口里的「退出程序」，"
+              "或直接点窗口右上角 X（有持仓会先问你）。")
+    return _run_windowed(server, url, args)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    sys.exit(main())

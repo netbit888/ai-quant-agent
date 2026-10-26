@@ -33,3 +33,11 @@ build/
 dist/
 # 绿色版的配置目录（含 API key，绝不能提交）
 config/
+
+# 安装包产物
+dist/installer/
+installer/*.isl
+
+# 安装包产物
+dist/installer/
+installer/*.isl
