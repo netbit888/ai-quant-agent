@@ -187,12 +187,15 @@ try {
     position: { direction: 1, lots: 0.01, price_open: 4000.5, p_up: 0.62, peak_pnl: 2.2 },
     float_pnl: 1.23,
     last_decision: { ts: 1790000000, kind: 'entry', p_up: 0.62, direction: 1, act: false },
-    trades: 2, closed: 1, wins: 1, pnl: 0.88,
-    // 今日口径：4 笔里 1 笔硬止损，真实 3 胜 1 负。命中率是 100%（分母剔了止损），
-    // 这两个数放在一起就是为了断言「界面不许只显示那个 100%」。
+    // closed/wins 刻意配成「1 赚 1 止损」：hit_rate=50%，而剔掉硬止损的
+    // llm_hit_rate=100%。两个数差这么远就是为了钉住「卡片必须显示前者」。
+    trades: 3, closed: 2, wins: 1, hit_rate: 0.5, pnl: -2.54,
+    // 今日口径：4 笔里 1 笔硬止损，真实 3 胜 1 负。
     closed_today: 4, wins_today: 3, losses_today: 1, pnl_today: 7.86,
     llm_closes: 1, llm_hit_rate: 1.0,
-    sl_closes: 2, sl_usd: 3.0, tp_min_usd: 3.25,
+    // sl_closes 必须和 closed 同源自洽：2 笔平仓里 1 笔是止损，
+    // 写成 2 就会出现「1 胜 1 负，硬止损 2 笔」这种自相矛盾的副标题。
+    sl_closes: 1, sl_usd: 3.0, tp_min_usd: 3.25,
     max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60 },
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
@@ -205,23 +208,26 @@ try {
       { ts: 1790000120, kind: 'skip', reason: '平仓后冷却中，还需 20 秒' },
       { ts: 1790000180, kind: 'review', direction: 1, pnl: 0.88,
         lesson: '第一根大阳线后追多容易吃回撤' },
+      { ts: 1790000240, kind: 'close', ticket: 1002, direction: -1, pnl: -3.42,
+        peak_pnl: 0.0, entry_reason: '跌破前低', source: 'sl',
+        reason: '硬止损：浮亏 -3.42 触及 -3.00' },
     ],
   };
   api.renderAutoTrade(atSample);
-  // 默认过滤掉「跳过 / 继续持有」：样例 4 行里有 1 行 skip，所以只该剩 3 行。
-  // 这条钉住的是「一小时的流水里 90% 是 ski p行、会把平仓行冲掉」这个教训。
+  // 默认过滤掉「跳过 / 继续持有」：样例 5 行里有 1 行 skip，所以只该剩 4 行。
+  // 这条钉住的是「一小时的流水里 90% 是 skip 行、会把平仓行冲掉」这个教训。
   const atRows = (made.rowsAuto.innerHTML.match(/<tr/g) || []).length;
-  console.log(`\nAI 做单表默认 ${atRows} 行 ${atRows === 3 ? '✓' : '✗'}（跳过被过滤）`);
-  if (atRows !== 3) failed = true;
+  console.log(`\nAI 做单表默认 ${atRows} 行 ${atRows === 4 ? '✓' : '✗'}（跳过被过滤）`);
+  if (atRows !== 4) failed = true;
   const hintTxt = String(made.atRowsHint.textContent || '');
-  console.log(`  计数提示 ${hintTxt.includes('共 4 条') && hintTxt.includes('显示 3 条') ? '✓' : '✗'} (${hintTxt})`);
-  if (!(hintTxt.includes('共 4 条') && hintTxt.includes('显示 3 条'))) failed = true;
+  console.log(`  计数提示 ${hintTxt.includes('共 5 条') && hintTxt.includes('显示 4 条') ? '✓' : '✗'} (${hintTxt})`);
+  if (!(hintTxt.includes('共 5 条') && hintTxt.includes('显示 4 条'))) failed = true;
   // 勾上开关必须能看到全量
   made.atShowSkip.checked = true;
   api.renderAutoTrade(atSample);
   const atRowsAll = (made.rowsAuto.innerHTML.match(/<tr/g) || []).length;
-  console.log(`  勾选后显示全量 ${atRowsAll} 行 ${atRowsAll === 4 ? '✓' : '✗'}`);
-  if (atRowsAll !== 4) failed = true;
+  console.log(`  勾选后显示全量 ${atRowsAll} 行 ${atRowsAll === 5 ? '✓' : '✗'}`);
+  if (atRowsAll !== 5) failed = true;
   made.atShowSkip.checked = false;
   api.renderAutoTrade(atSample);
   const atCols = (made.rowsAuto.innerHTML.match(/<td/g) || []).length / Math.max(atRows, 1);
@@ -255,6 +261,15 @@ try {
   const lessonShown = made.rowsAuto.innerHTML.includes('第一根大阳线后追多容易吃回撤');
   console.log(`  复盘行显示结论 ${lessonShown ? '✓' : '✗'}`);
   if (!lessonShown) failed = true;
+  // 胜率必须是「全部已平仓单」口径。样例 hit_rate=50%（1 胜 1 止损），
+  // 而 llm_hit_rate=100%——显示成 100% 就说明口径又退回自我安慰了。
+  // 这条是 10-26 用户直接提的："硬止损为什么不算"。
+  const hitTxt = String(made.atHit.textContent || '');
+  const hitSub = String(made.atHitSub.textContent || '');
+  console.log(`\n  胜率含硬止损 ${hitTxt.includes('50.0%') ? '✓' : '✗'} (${hitTxt.trim()})`);
+  if (!hitTxt.includes('50.0%')) failed = true;
+  console.log(`  胜率副标注明止损笔数 ${hitSub.includes('硬止损') ? '✓' : '✗'} (${hitSub.trim()})`);
+  if (!hitSub.includes('硬止损')) failed = true;
   const cacheTxt = String(made.atCache.textContent || '');
   console.log(`  缓存命中率显示 ${cacheTxt.includes('45.0%') ? '✓' : '✗'} (${cacheTxt.trim() || '空'})`);
   if (!cacheTxt.includes('45.0%')) failed = true;
@@ -336,7 +351,7 @@ try {
 
   // 程序止损笔数必须显示：止损多 = 入场方向差，和"模型平得差"不是一回事
   const slTxt = String(made.atSl.textContent || '');
-  const slOk = slTxt.includes('程序止损 2 笔') && slTxt.includes('3.00') && slTxt.includes('3.25');
+  const slOk = slTxt.includes('程序止损 1 笔') && slTxt.includes('3.00') && slTxt.includes('3.25');
   console.log(`  程序止损提示 ${slOk ? '✓' : '✗'} (${slTxt.trim() || '空'})`);
   if (!slOk) failed = true;
 

@@ -2958,17 +2958,21 @@ class TestSummaryTodayScope(TempLedger):
         self.assertEqual(s["wins_today"], 2)
 
     def test_hit_rate_excludes_stop_losses(self):
-        """命中率的分母不含硬止损——这正是它天生接近 100% 的原因。
+        """两个口径并存，含义完全不同，别混用。
 
-        界面必须把这条写出来（幕布干脆不显示命中率，改写胜/负）。
+        `llm_hit_rate` 的分母只算模型主动平的，硬止损不进——所以它天生接近
+        100%，**不能当胜率用**。
+        `hit_rate` 的分母是全部平仓单，止损照样算——面板卡片显示的是这个
+        （用户 10-26 直接问"硬止损为什么不算"，这就是答案：以前真没算）。
         """
         now = int(autotrade.time.time())
         self._close(now, 3.0)
         self._close(now + 1, -3.42, source="sl")
         s = autotrade.summary()
         self.assertEqual(s["llm_closes"], 1)
-        self.assertEqual(s["llm_hit_rate"], 1.0)   # 100%，但真实胜率是 50%
-        self.assertEqual(s["hit_rate"], 0.5)
+        self.assertEqual(s["llm_hit_rate"], 1.0)   # 单看模型平仓是 100%
+        self.assertEqual(s["hit_rate"], 0.5)       # 真实胜率 50%，这才是给人看的
+        self.assertEqual(s["sl_closes"], 1)
 
 
 class TestExitVerdict(unittest.TestCase):

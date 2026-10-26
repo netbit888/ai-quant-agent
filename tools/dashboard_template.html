@@ -1013,7 +1013,7 @@
       <div class="kpi"><div class="k">当前持仓</div><div class="v" id="atPos">—</div><div class="s" id="atPosSub">—</div></div>
       <div class="kpi"><div class="k">最近一次判断</div><div class="v mono" id="atCall">—</div><div class="s" id="atCallSub">—</div></div>
       <div class="kpi"><div class="k">已平仓</div><div class="v mono" id="atClosed">—</div><div class="s" id="atClosedSub">—</div></div>
-      <div class="kpi"><div class="k">方向命中率</div><div class="v mono" id="atHit">—</div><div class="s" id="atHitSub">只算模型自己决定的</div></div>
+      <div class="kpi"><div class="k">胜率</div><div class="v mono" id="atHit">—</div><div class="s" id="atHitSub">全部平仓单，含硬止损</div></div>
       <div class="kpi"><div class="k">累计盈亏</div><div class="v mono" id="atPnl">—</div><div class="s" id="atPnlSub">—</div></div>
     </div>
     <!-- 出场闸门：做成常驻胶囊，数字由 renderAutoTrade 按实际 cfg 填。
@@ -2050,16 +2050,21 @@ function renderAutoTrade(a) {
   $('atClosed').textContent = a.closed + ' 笔';
   $('atClosedSub').textContent = '共开仓 ' + a.trades + ' 笔';
 
-  // 命中率：样本少时不给数字，避免「1 胜 0 负 = 100%」这种假精确
-  if (a.llm_hit_rate == null) {
+  // 胜率：分母是**全部已平仓单**，硬止损也算在内。
+  // 原来这里显示的是 llm_hit_rate（只算模型自己平的），理由是想给"判断能力"
+  // 单独打分。但那是个自我安慰指标：硬止损的根因恰恰是模型入场判断错，
+  // 把亏损单剔出分母等于把最难看的证据删掉。实测 10-26 那天剔完是 100%，
+  // 真实是 4 胜 2 负 66.7%。现在直接给真数字。
+  if (a.hit_rate == null) {
     $('atHit').textContent = '—';
-    $('atHitSub').textContent = a.llm_closes ? '样本不足' : '只算模型自己决定的';
+    $('atHitSub').textContent = '还没平过仓';
   } else {
-    $('atHit').textContent = fmt(a.llm_hit_rate * 100, 1) + '%';
-    // 分母必须写清楚：硬止损平的笔不进这个率，否则 100% 会被当成"全对"
+    $('atHit').textContent = fmt(a.hit_rate * 100, 1) + '%';
+    const wN = Number(a.wins || 0), cN = Number(a.closed || 0);
     const slN = Number(a.sl_closes || 0);
-    $('atHitSub').textContent = a.llm_closes + ' 笔模型平仓'
-      + (slN ? `（${slN} 笔硬止损不计）` : '');
+    // 硬止损单独点名：止损笔数多 = 入场方向差，这是最该被看见的那一格
+    $('atHitSub').textContent = `${wN} 胜 / ${cN - wN} 负`
+      + (slN ? `（硬止损 ${slN} 笔）` : '');
   }
 
   $('atPnl').textContent = money(a.pnl || 0);
