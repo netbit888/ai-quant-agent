@@ -131,6 +131,20 @@ class Cfg:
     # 5 秒的依据：一次 tick 读取的成本可以忽略；模型单次调用实测 2.6 秒，但这个
     # 循环不碰模型，所以不受它限制。
     guard_sec: float = 5.0
+    # 近门槛快查步长（秒）。快查循环的步长不是均匀的：浮盈离止盈门槛远时按
+    # guard_sec 粗看，一旦 fp >= tp_min_usd - tp_wake_band（默认 2.25 起）就切到
+    # 这一档细看。理由（第一性原理）：采样密度该花在决策边界附近——fp 在 0 附近
+    # 时用 2 秒盯是浪费，fp 逼近 3.25 时 5 秒反而可能错过穿越。2 秒下限的依据与
+    # guard_sec 相同：再快 MT5 tick 读取的抖动比价格变化还大。
+    guard_near_sec: float = 2.0
+    # 近门槛带宽（USD）：浮盈进入 [tp_min - band, ∞) 就切近档。0 = 关闭近档，
+    # 整轮都按 guard_sec 粗看（纯记录模式）。
+    tp_wake_band: float = 1.0
+    # tp 穿越是否提前唤醒。True 时快查里发现 fp >= tp_min_usd 就提前结束等待，
+    # 下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
+    # **参数没变，变的只是延迟**：模型从「最坏 60 秒后才被问到」变成「≤2 秒」。
+    # False = 快查只记录峰值和止损，出场节奏完全回到老行为。
+    tp_wake: bool = True
     # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
@@ -185,6 +199,7 @@ def _empty_state() -> dict:
         "last_tick_ts": None,
         "last_open_ts": None,
         "last_close_ts": None,
+        "last_close_pnl": None,
         "trades": 0,       # 已开仓笔数
         "closed": 0,       # 已平仓笔数
         "wins": 0,
@@ -921,7 +936,7 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
 战绩 样本={n_closed} 笔  命中率={hit}
-{lessons}
+{recent_close}{lessons}
 报价 bid={bid}  ask={ask}  点差={spread_pts} 点
 时间 {clock} UTC"""
 
@@ -1532,7 +1547,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
                        point: float = 0.001, stats: dict | None = None,
                        lots: float = 0.01, lessons: str = "",
                        ticks_text: str = "", zone_edge: float = 0.35,
-                       mtf_text: str = "") -> str:
+                       mtf_text: str = "",
+                       recent_close: dict | None = None) -> str:
     w = visible_bars(rows)
     r1, r5, r13, span = _returns(w)
     st = stats or {}
@@ -1548,6 +1564,20 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
     # MA28 用**未截断的 rows**（至少 28 根）。拿不到就整块不出现，
     # 不能让模板里留一行空的【背景】让模型猜。
     ma_text = ma_line(rows, dg)
+    # 刚平仓上下文：只在前 5 分钟（报复单定义窗口）注入，之后不提——
+    # 每一轮都提「你平仓很久了」是噪音。300 秒 = 复盘体系里报复单的判定窗口。
+    rc_text = ""
+    rc = recent_close or {}
+    seconds_ago = int(rc.get("seconds_ago") or 0)
+    if 0 < seconds_ago < 300:
+        pnl = rc.get("pnl")
+        pnl_text = f"（盈亏 {float(pnl):+.2f} USD）" if pnl is not None else ""
+        rc_text = (
+            f"【刚平仓提醒】{seconds_ago} 秒前你刚平掉一笔{pnl_text}。\n"
+            "刚平仓后的几分钟是「报复单」高发窗口——你自己的教训库标着"
+            "「亏损后快速再入场」是坏行为。除非眼前的结构确实满足上面的打法，"
+            "否则宁可 act=false 等下一轮。\n"
+        )
     return ENTRY_PROMPT.format(
         symbol=symbol, clock=clock, bid=_px(symbol, bid), ask=_px(symbol, ask),
         spread_pts=spread_pts,
@@ -1556,6 +1586,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         r1=r1, r5=r5, r13=r13, span=_px(symbol, span),
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
+        recent_close=rc_text,
         mtf=mtf_text or "",
         ma=(ma_text + "\n") if ma_text else "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
@@ -2417,7 +2448,8 @@ def _log_call(ok: bool, usage: dict | None, error: str | None = None,
 
 def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
               stats: dict | None = None, login: int | str | None = None,
-              ticks_text: str = "", mtf_text: str = "") -> dict:
+              ticks_text: str = "", mtf_text: str = "",
+              recent_close: dict | None = None) -> dict:
     """让模型给上涨概率。**模型没答上来就不做**，不拿规则替它下单。"""
     prompt = build_entry_prompt(rows, bid, ask, cfg.symbol, cfg.tf,
                                 _point(cfg.symbol), stats,
@@ -2427,7 +2459,8 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                     regime=regime_of(rows), scope="entry"),
                                 zone_edge=cfg.zone_edge,
                                 ticks_text=ticks_text,
-                                mtf_text=mtf_text)
+                                mtf_text=mtf_text,
+                                recent_close=recent_close)
     try:
         text, usage = _chat(prompt, system_for(ENTRY_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
@@ -2496,8 +2529,8 @@ def _exit_hold(why: str) -> dict:
 
 
 # 同一次 tick 里重复开仓的兜底间隔。**不是**交易节奏——
-# "平仓后 1 分钟内必须重新开仓"这条要求下，用 interval_sec(60) 当守卫
-# 会把重开直接顶到 60 秒开外，自己把自己锁死。真正的间隔由 cooldown_sec 管。
+# 真正的开仓间隔由 cooldown_sec（平仓冷却）和 interval_sec（决策周期）管，
+# 这里只防同一个 tick 里连环开仓（状态写入和仓位读取之间的竞态窗口）。
 MIN_OPEN_GAP_SEC = 3
 
 # 允许上真单的品种。不直接用 SYMBOLS.keys()：那张表是回测用的全量清单，
@@ -2820,6 +2853,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             state["wins"] = int(state.get("wins") or 0) + 1
         state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
         state["last_close_ts"] = now
+        state["last_close_pnl"] = round(float(pnl), 2)
         state["position"] = None
         row = {
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -2848,16 +2882,10 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
 
         # 峰值浮盈：这一笔从开仓到现在，浮盈最高摸到过多少（USD）。
         #
-        # 存在的唯一目的是**用实测数据回答「3.25 到底几次能到」**。现在所有
-        # 「MFE 分布 / 3.25 可达率 59%」都只能靠 tools/replay_exit.py 反事实
-        # 回放 K 线，被问起来只能说「这是外推」。有了这个字段，下个交易日直接
-        # 数 close 行里 peak_pnl ≥ 3.25 的比例就是实测。
-        #
-        # 注意别写成 `pos.get("peak_pnl") or float_pnl`：peak_pnl 恰好是 0.0
-        # 时 `or` 会退回 float_pnl，把已经摸到的正峰值抹掉。
-        prev_peak = pos.get("peak_pnl")
-        peak = max(float(prev_peak if prev_peak is not None else float_pnl), float_pnl)
-        pos["peak_pnl"] = round(peak, 2)
+        # 存在的唯一目的是**用实测数据回答「3.25 到底几次能到」**。决策轮的
+        # 粒度是 60 秒，漏掉的冲高回落由快查循环（_wait_next）按 2~5 秒补上；
+        # 两处共用 _track_peak，峰值逻辑同源。
+        _track_peak(pos, float_pnl, now)
 
         gate = _exit_gate(cfg, held_sec, float_pnl)
 
@@ -2865,7 +2893,8 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         if gate is not None and not gate.get("close"):
             row = {"ts": now, "kind": "hold", "reason": gate["reason"],
                    "source": gate["source"], "held_sec": held_sec,
-                   "float_pnl": round(float_pnl, 2), "peak_pnl": pos["peak_pnl"]}
+                   "float_pnl": round(float_pnl, 2), "peak_pnl": pos["peak_pnl"],
+                   "peak_ts": pos.get("peak_ts")}
             state["last_decision"] = {
                 "ts": now, "kind": "exit", "close": False,
                 "reason": gate["reason"], "source": gate["source"],
@@ -2935,6 +2964,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             state["wins"] = int(state.get("wins") or 0) + 1
         state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
         state["last_close_ts"] = now
+        state["last_close_pnl"] = round(float(pnl), 2)
         state["position"] = None
         row = {
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -2942,6 +2972,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             "p_up": pos.get("p_up"), "hit": pnl > 0,
             "held_sec": held_sec,
             "peak_pnl": pos.get("peak_pnl"),
+            "peak_ts": pos.get("peak_ts"),
             "entry_reason": pos.get("entry_reason"),
             "reason": decision.get("reason"), "source": decision.get("source"),
             "dry_run": cfg.dry_run,
@@ -2974,9 +3005,21 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     prog_dir = _prog_direction(bars, cfg.zone_edge)
     # M5 背景只查一次：text 进 prompt，info 进特征快照。
     mtf = _mtf_bundle(cfg.symbol, cfg.zone_edge, _digits(cfg.symbol))
+    # 刚平仓上下文：只在前 5 分钟（报复单窗口）传。让模型知道自己在
+    # 「亏损后快速再入场」的高发期，教训库的报复单教训才能对症起效。
+    recent_close = None
+    last_close = state.get("last_close_ts")
+    if last_close:
+        seconds_ago = int(now) - int(last_close)
+        if 0 < seconds_ago < 300:
+            recent_close = {
+                "seconds_ago": seconds_ago,
+                "pnl": state.get("last_close_pnl"),
+            }
     decision = ask_entry(bars, bid, ask, cfg, state, login,
                          ticks_text=_ticks_text(cfg, bars),
-                         mtf_text=mtf["text"])
+                         mtf_text=mtf["text"],
+                         recent_close=recent_close)
     # 特征快照：决策当下就走一次，后面所有分支（skip / open / failed）都带上。
     # 不存它的话，事后想问「ER 高的单更容易赢吗」只能靠重建，而重建必然失败。
     feat = feature_snapshot(bars, cfg, mtf=mtf["info"])
@@ -3188,10 +3231,9 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         )
     if cfg.lots <= 0:
         issues.append("手数必须大于 0")
-    if cfg.cooldown_sec >= 60:
-        issues.append(
-            f"冷却 {cfg.cooldown_sec} 秒做不到「平仓后 1 分钟内重新开仓」，必须小于 60 秒"
-        )
+    # 冷却不再有「必须 <60 秒」的上限——「平仓后 1 分钟内必须重新开仓」的硬需求
+    # 已删除（它和复盘体系的报复单标记直接矛盾，且是输出量要求不是质量要求）。
+    # 冷却只是防连环单的下限，用户想配 2 分钟冷却应该允许。
     # 止损/止盈这对参数是配套的，单独调一个只会换一种亏法：
     #   止盈门槛 ≤ 止损 → 盈亏比还在 1 附近甚至更差，白加止损；
     #   止损太接近点差 → 直接被点差打掉，等于每开一单就主动交一次过路费。
@@ -3214,24 +3256,59 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         issues.append(
             f"止损快查间隔 {cfg.guard_sec:.1f} 秒太短（tick 读取抖动比价差还大），最小 2 秒"
         )
+    # 近门槛档位同样只有下限有意义，且不可能比远档还粗——粗的那档就该叫远档。
+    if getattr(cfg, "guard_near_sec", 0.0) and cfg.guard_near_sec > 0 and cfg.guard_near_sec < 2:
+        issues.append(
+            f"近门槛快查间隔 {cfg.guard_near_sec:.1f} 秒太短（同 guard_sec 口径），最小 2 秒"
+        )
+    if getattr(cfg, "guard_sec", 0.0) and getattr(cfg, "guard_near_sec", 0.0) \
+            and cfg.guard_near_sec > cfg.guard_sec:
+        issues.append(
+            f"近门槛快查间隔 {cfg.guard_near_sec:.1f} 秒不能比远档 {cfg.guard_sec:.1f} 秒还粗"
+        )
     return issues
 
 
 def next_wait_sec(row: dict, cfg: Cfg) -> float:
     """这一轮跑完，下一次决策该等多久。
 
-    平仓后**不能等满一个周期**。需求是「一单做完，1 分钟内必须重新开仓」，
-    而平仓后还要先过 `cooldown_sec`（默认 30 秒）才允许开：
-    照旧等 60 秒的话，重新开仓直接落在 60 秒开外，条件当场违反。
-    所以平仓后按「冷却 + 1 秒」唤醒——30 秒冷却满足，重新开仓约 31 秒，
-    离 1 分钟还有一半余量，留够模型响应和下单的抖动空间。
+    平仓后**在冷却结束点提前唤醒一次**（cooldown+1 秒，默认约 31 秒）：
+    给模型一次决策机会——刚平仓时的市场状态往往紧接着就有结构变化，
+    早看一眼不亏。但**开不开是模型的事**：教训库的「报复单」教训和
+    提示词里的【刚平仓提醒】会约束它，act=false 是正常输出。
+
+    以前这里的理由是「1 分钟内必须重新开仓」——那条硬需求已删
+    （和复盘体系的报复单标记直接矛盾）。唤醒保留，语义从「必须快开」
+    变成「给一次机会」。
     """
     if row.get("kind") == "close":
         return max(1.0, min(float(cfg.cooldown_sec + 1), float(cfg.interval_sec)))
     return float(cfg.interval_sec)
 
 
-def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float) -> str:
+def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
+    """更新峰值浮盈。返回 True = 峰值被抬高（调用方据此决定是否写盘）。
+
+    peak_pnl 的唯一用途：**用实测数据回答「3.25 到底几次能到」**。除了值还记
+    `peak_ts`（峰值出现的时刻）——「MFE 通常在持仓第几秒」对 max_hold_sec 的
+    分析和 peak_pnl 本身一样值钱，而且顺手就能记，零成本。
+
+    快查循环（_wait_next）和决策轮（tick）都调这一个函数，**峰值逻辑同源**，
+    不存在两份实现各记各的。
+
+    注意别写成 `pos.get("peak_pnl") or float_pnl`：peak_pnl 恰好是 0.0 时
+    `or` 会退回 float_pnl，把已经摸到的正峰值抹掉——所以必须判 None。
+    """
+    prev = pos.get("peak_pnl")
+    if prev is not None and float_pnl <= float(prev):
+        return False
+    pos["peak_pnl"] = round(float_pnl, 2)
+    pos["peak_ts"] = int(ts)
+    return True
+
+
+def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
+               fp: float | None = None) -> str:
     """持仓期间的硬止损快查。返回 '' = 没触发。
 
     **只看 sl_usd 一条**，故意不看止盈门槛、也不看持仓上限：
@@ -3239,10 +3316,13 @@ def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float) -> str:
       · 持仓上限是分钟级的粗规则，拿 5 秒的节拍去看它是浪费。
 
     这里是纯读，不下单、不写流水、不调模型。开销就是一次 symbol_info_tick。
+    `fp` 允许调用方传入已算好的浮盈（快查循环里峰值更新和止损判定共用一次
+    _realized_pnl，不重复算）；不传就自己算。
     """
     if cfg.sl_usd <= 0:
         return ""
-    fp = _realized_pnl(cfg, pos, bid, ask)
+    if fp is None:
+        fp = _realized_pnl(cfg, pos, bid, ask)
     if fp <= -abs(cfg.sl_usd):
         return f"浮亏 {fp:+.2f} 触及 -{abs(cfg.sl_usd):.2f}"
     return ""
@@ -3259,19 +3339,35 @@ def _nap(sec: float, stop_wait=None, sleeper=None) -> bool:
 
 def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
                stop_wait=None, sleeper=None, quote_fn=None) -> bool:
-    """等下一轮决策。有仓时把长睡切成 guard_sec 一格，硬止损过线就提前返回。
+    """等下一轮决策。有仓时把长睡切成快查一格，过线就提前返回。
+
+    快查每格做三件事（一次报价、一次浮盈，全部复用）：
+      1. **峰值更新**（_track_peak）：只在峰值被抬高时写一次 state——峰值只增
+         不减，一笔持仓真正抬高的次数有限，无条件每格写盘不可接受。
+      2. **止损判定**（_guard_hit）：浮亏过线提前返回。
+      3. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ tp_min_usd 也提前返回。
+         下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
+         参数没变，变的只是模型被问到的延迟（最坏 60 秒 → ≤2 秒）。
+
+    步长是**自适应**的：fp 离止盈门槛远时按 guard_sec 粗看，进入
+    [tp_min - tp_wake_band, ∞) 后切 guard_near_sec 细看。采样密度花在决策
+    边界附近——fp 在 0 附近时细看是浪费，逼近 3.25 时粗看会错过穿越。
 
     返回 True = 收到停止信号（只有面板线程会传 stop_wait，CLI 永远是 False）。
 
     为什么是「提前返回」而不是「在这里平仓」：平仓要走 tick() 里的
     _exit_gate → send_close → append_log → queue_review 整条链。在这里复制一份
     就等于给同一件事留两个实现，迟早对不上账。这里只负责**把最坏 60 秒的
-    无人看守缩到 guard_sec**，剩下的原样交给下一轮。
+    无人看守缩到一格**，剩下的原样交给下一轮。
     """
     deadline = started + next_wait_sec(row, cfg)
     # 夹一道：配得比决策间隔大就等于没开，不如直接退回旧行为，别让短周期
     # 配置（interval_sec=3）里一个默认的 5 秒快查把节奏搅乱。
     guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
+    near = min(float(getattr(cfg, "guard_near_sec", 0.0) or 0.0), guard)
+    band = float(getattr(cfg, "tp_wake_band", 0.0) or 0.0)
+    tp = float(getattr(cfg, "tp_min_usd", 0.0) or 0.0)
+    wake = bool(getattr(cfg, "tp_wake", False)) and tp > 0
 
     # 无仓 / 平仓轮 / 刚停：不需要快查，睡满一整轮（也省掉每格的报价读取）
     pos = load_state(login).get("position") if guard > 0 else None
@@ -3279,13 +3375,31 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
         return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
 
     quote_fn = quote_fn or _quote
+    fp_last: float | None = None
     while deadline - time.time() > 1.0:
-        step = min(guard, deadline - time.time())
+        # 近档判定用上一格的浮盈：这格还没读到报价，只能拿已知信息选步长。
+        # 第一次进循环 fp_last 是 None，必然远档——合理，刚开仓时离门槛最远。
+        tight = wake and band > 0 and fp_last is not None \
+            and fp_last >= tp - band
+        step = min(near if tight else guard, deadline - time.time())
         if _nap(step, stop_wait, sleeper):
             return True
         q = quote_fn(cfg.symbol)
-        if q and _guard_hit(cfg, pos, q[0], q[1]):
+        if not q:
+            continue
+        fp = _realized_pnl(cfg, pos, q[0], q[1])
+        if _track_peak(pos, fp, int(time.time())):
+            # 重读再写：state 里可能还有面板写的其他字段，别拿旧快照整体覆盖。
+            # 外部平仓竞态无害：pos 还是旧引用，峰值照记，下一轮 tick()
+            # 检测外部平仓时会整体覆盖处理。
+            fresh = load_state(login)
+            fresh["position"] = pos
+            save_state(fresh, login)
+        if _guard_hit(cfg, pos, q[0], q[1], fp=fp):
             return False       # 剩下的时间不要了，立刻进下一轮去平仓
+        if wake and fp >= tp:
+            return False       # tp 穿越唤醒：交模型决定，不等满一轮
+        fp_last = fp
     # 尾段不足 1 秒（或已经超时）：保底睡 1 秒，别空转
     return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
 
@@ -3302,7 +3416,7 @@ def run(cfg: Cfg, login=None) -> None:
 
     mode = "纸面（不发单）" if cfg.dry_run else "真实下单"
     print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策 | "
-          f"平仓后 {cfg.cooldown_sec} 秒冷却、1 分钟内重开 | 不挂 SL/TP | {mode}")
+          f"平仓后 {cfg.cooldown_sec} 秒冷却 | 不挂 SL/TP | {mode}")
     print("Ctrl-C 停止。状态与流水在账户目录下 autotrade_state.json / autotrade_log.jsonl")
 
     try:
@@ -3395,6 +3509,7 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
                 state["wins"] = int(state.get("wins") or 0) + 1
             state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
             state["last_close_ts"] = now
+            state["last_close_pnl"] = round(float(pnl), 2)
             state["position"] = None
             append_log({
                 "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -3753,6 +3868,11 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 止损快查间隔。0 = 关（每 interval_sec 才看一次止损）。面板要显示，
         # 否则用户没法判断「止损会不会超调」这件事现在到底有没有生效。
         "guard_sec": saved_cfg.get("guard_sec", _defaults.guard_sec),
+        # 自适应近档 + tp 穿越唤醒。同理：面板不显示，用户就不知道
+        # 「浮盈到 3.25 会被 2 秒内交模型」这件事开着还是关着。
+        "guard_near_sec": saved_cfg.get("guard_near_sec", _defaults.guard_near_sec),
+        "tp_wake_band": saved_cfg.get("tp_wake_band", _defaults.tp_wake_band),
+        "tp_wake": saved_cfg.get("tp_wake", _defaults.tp_wake),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：

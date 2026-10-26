@@ -15,7 +15,7 @@
 ;      账本是唯一副本（MT5 历史有保留期、换服务器就丢），删了不可恢复。
 
 #define MyAppName "AI Quant Agent"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExe "AIQuant.exe"
 #define MyAppPublisher "AI Quant Agent"
 ; 固定 GUID：升级和卸载靠它识别同一个产品，**永远不要改**

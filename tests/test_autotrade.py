@@ -192,7 +192,8 @@ class TestModelFailureStops(TempLedger):
 
 
 class TestNextWait(unittest.TestCase):
-    """平仓后必须尽快唤醒，否则「1 分钟内重新开仓」这条需求做不到。"""
+    """平仓后在冷却结束点提前唤醒一次——给模型一次决策机会，
+    开不开是它的事（教训库和【刚平仓提醒】管着）。"""
 
     def test_close_wakes_just_after_cooldown(self):
         cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=30)
@@ -203,16 +204,20 @@ class TestNextWait(unittest.TestCase):
         for kind in ("open", "hold", "skip", "open_failed"):
             self.assertEqual(autotrade.next_wait_sec({"kind": kind}, cfg), 60)
 
-    def test_close_wait_never_reaches_a_minute(self):
-        for cd in (0, 5, 10, 30, 45, 58):
+    def test_close_wait_bounded_by_interval(self):
+        """冷却再短也不提前于「冷却+1 秒」，再长也不超过一个周期。"""
+        for cd in (0, 5, 10, 30, 45, 58, 120):
             cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=cd)
-            self.assertLess(autotrade.next_wait_sec({"kind": "close"}, cfg), 60)
+            w = autotrade.next_wait_sec({"kind": "close"}, cfg)
+            self.assertGreaterEqual(w, 1.0)
+            self.assertLessEqual(w, 60)
 
-    def test_cooldown_over_a_minute_is_rejected(self):
-        """冷却 ≥60 秒时 1 分钟内重开数学上不可能，必须启动就拦。"""
+    def test_cooldown_over_a_minute_is_allowed(self):
+        """「1 分钟内必须重开」的硬需求已删：冷却只是防连环单的下限，
+        想配 2 分钟冷却应该允许，不再启动就拦。"""
         self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(cooldown_sec=30)), [])
-        issues = autotrade.validate_cfg(autotrade.Cfg(cooldown_sec=60))
-        self.assertTrue(any("1 分钟内" in x for x in issues))
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(cooldown_sec=120)), [])
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(cooldown_sec=60)), [])
 
     def test_validate_cfg_catches_bad_lots_and_interval(self):
         bad = autotrade.validate_cfg(autotrade.Cfg(lots=0, interval_sec=2))
@@ -232,6 +237,46 @@ class TestNextWait(unittest.TestCase):
         # 冷却配得比周期还长时，也不能让等待超过一个周期
         cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=120)
         self.assertEqual(autotrade.next_wait_sec({"kind": "close"}, cfg), 60)
+
+
+class TestRecentCloseContext(unittest.TestCase):
+    """刚平仓上下文：把「报复单」从事后复盘标记变成事前提示。
+
+    只在平仓后 5 分钟（300 秒，报复单判定窗口）内注入，之后不再提——
+    每一轮都念叨「你平仓很久了」是噪音。
+    """
+
+    ROWS = [{"ts": 1000 + i, "open": 4000, "high": 4001, "low": 3999,
+             "close": 4000.5} for i in range(14)]
+
+    def test_injected_within_window(self):
+        p = autotrade.build_entry_prompt(
+            self.ROWS, 4000.0, 4000.24,
+            recent_close={"seconds_ago": 45, "pnl": -0.5})
+        self.assertIn("刚平仓提醒", p)
+        self.assertIn("45 秒前", p)
+        self.assertIn("-0.50", p)
+        self.assertIn("报复单", p)
+
+    def test_not_injected_outside_window(self):
+        for seconds in (0, None, 400, 300):
+            rc = None if seconds is None else {"seconds_ago": seconds, "pnl": -0.5}
+            p = autotrade.build_entry_prompt(self.ROWS, 4000.0, 4000.24,
+                                             recent_close=rc)
+            self.assertNotIn("刚平仓提醒", p)
+
+    def test_not_injected_by_default(self):
+        """老调用方不传 recent_close：prompt 里不该出现空占位。"""
+        p = autotrade.build_entry_prompt(self.ROWS, 4000.0, 4000.24)
+        self.assertNotIn("刚平仓提醒", p)
+        self.assertNotIn("{recent_close}", p)
+
+    def test_pnl_missing_still_injects(self):
+        """last_close_pnl 缺省 None（老 state）：只说刚平仓，不编盈亏。"""
+        p = autotrade.build_entry_prompt(
+            self.ROWS, 4000.0, 4000.24, recent_close={"seconds_ago": 60})
+        self.assertIn("刚平仓提醒", p)
+        self.assertNotIn("盈亏", p)
 
 
 # ------------------------------------------------------------------ 止损快查
@@ -335,7 +380,8 @@ class TestGuardFastCheck(TempLedger):
         self.assertEqual(len(clock.sleeps), 1)
 
     def test_close_round_never_reads_quotes(self):
-        """平仓轮按 cooldown+1 唤醒，那时候手上已经没有仓了。"""
+        """平仓轮在冷却结束点唤醒，那时候手上已经没有仓了——
+        不需要读报价做止损快查，纯等。"""
         self._position()
         cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=30, guard_sec=5)
         clock = self._Clock()
@@ -375,6 +421,100 @@ class TestGuardFastCheck(TempLedger):
         # 配得比决策间隔大不算错：_wait_next 会夹到 interval_sec
         self.assertEqual(
             autotrade.validate_cfg(autotrade.Cfg(interval_sec=60, guard_sec=90)), [])
+        # 近档两条新规则：下限 2 秒、不能比远档粗（guard_sec=0 时快查整体关闭，不拦）
+        self.assertTrue(any("太短" in x for x in autotrade.validate_cfg(
+            autotrade.Cfg(guard_near_sec=1.5))))
+        self.assertTrue(any("还粗" in x for x in autotrade.validate_cfg(
+            autotrade.Cfg(guard_sec=5, guard_near_sec=10))))
+        self.assertEqual(
+            autotrade.validate_cfg(autotrade.Cfg(guard_sec=0, guard_near_sec=10)), [])
+
+    # --- 自适应步长 + tp 穿越唤醒 ----------------------------------------
+
+    def test_adaptive_step_tightens_near_threshold(self):
+        """采样密度该花在决策边界附近：fp 远时 5 秒一格，进 tp-band 后 2 秒一格。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            tp_min_usd=3.25, tp_wake_band=1.0)
+        # fp = bid - 4000：0.5 → 1.0 → 2.5（≥2.25 进近档）→ 停在 2.5
+        remaining = [4000.5, 4001.0, 4002.5]
+
+        def quote_fn(s):
+            bid = remaining.pop(0) if remaining else 4002.5
+            return (bid, bid + 0.24)
+
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=quote_fn)
+        # 前三格是远档 5 秒，之后全是近档 2 秒，且确实等到了近档
+        # （末尾那格是「不足 1 秒保底睡」，不算步长）
+        self.assertEqual(clock.sleeps[:3], [5.0, 5.0, 5.0])
+        self.assertTrue(all(s == 2.0 for s in clock.sleeps[3:-1]))
+        self.assertLess(clock.sleeps[-1], 2.0)
+        # 峰值被快查循环实测到并落盘
+        self.assertEqual(autotrade.load_state()["position"]["peak_pnl"], 2.5)
+
+    def test_tp_cross_wakes_up_before_the_round_ends(self):
+        """tp 穿越唤醒：fp ≥ 3.25 不等满 60 秒，下一轮交模型。参数没变只砍延迟。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0, tp_min_usd=3.25)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            woke = autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (4003.5, 4003.74))
+        self.assertFalse(woke)
+        self.assertLessEqual(clock.t - 1_000_000.0, 5)   # 第一格就发现
+
+    def test_tp_wake_disabled_keeps_old_rhythm(self):
+        """tp_wake=False = 快查只记录峰值和止损，出场节奏完全回到老行为。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            tp_min_usd=3.25, tp_wake=False)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (4003.5, 4003.74))
+        self.assertGreaterEqual(clock.t - 1_000_000.0, 60)
+        self.assertLessEqual(len(clock.sleeps), 14)
+        # 峰值照记：测量不随行为开关关闭
+        self.assertEqual(autotrade.load_state()["position"]["peak_pnl"], 3.5)
+
+    def test_band_zero_stays_far(self):
+        """tp_wake_band=0 关闭近档：整轮都按远档 5 秒粗看。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            tp_min_usd=3.25, tp_wake_band=0)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (4002.5, 4002.74))
+        self.assertTrue(all(s == 5.0 for s in clock.sleeps[:-1]))
+        self.assertLess(clock.sleeps[-1], 5.0)   # 尾段保底睡
+        self.assertGreaterEqual(clock.t - 1_000_000.0, 60)
+
+    # --- _track_peak 单元 ------------------------------------------------
+
+    def test_track_peak_unit(self):
+        """峰值只增不减；0.0 是合法峰值不能被 `or` 吞；peak_ts 只在抬高时更新。"""
+        pos: dict = {}
+        self.assertTrue(autotrade._track_peak(pos, 0.0, 100))      # 首次采样
+        self.assertEqual(pos["peak_pnl"], 0.0)
+        self.assertEqual(pos["peak_ts"], 100)
+        self.assertFalse(autotrade._track_peak(pos, 0.0, 200))     # 持平不抬高
+        self.assertEqual(pos["peak_ts"], 100)
+        self.assertTrue(autotrade._track_peak(pos, 0.5, 300))
+        self.assertEqual(pos["peak_ts"], 300)
+        self.assertFalse(autotrade._track_peak(pos, -0.5, 400))    # 回落不覆盖
+        self.assertEqual(pos["peak_pnl"], 0.5)
+        self.assertEqual(pos["peak_ts"], 300)
+        fresh: dict = {}
+        self.assertTrue(autotrade._track_peak(fresh, -0.5, 500))   # 负值首采也记
+        self.assertEqual(fresh["peak_pnl"], -0.5)
 
     # --- 峰值浮盈埋点 ---------------------------------------------------
 
@@ -463,10 +603,8 @@ class TestCanOpen(unittest.TestCase):
         self.assertIn("距上次开仓", why)
 
     def test_reopen_allowed_within_one_minute_after_close(self):
-        """核心需求：一单做完，1 分钟内必须能重新开仓。
-
-        冷却 30 秒 + 3 秒兜底守卫都不该挡住 31 秒后的重开。
-        """
+        """冷却结束后可以重开：冷却 30 秒 + 3 秒兜底守卫都不该挡住
+        31 秒后的重开。要不要开由模型定（教训库 + 刚平仓提醒管着）。"""
         state = autotrade._empty_state()
         state["last_close_ts"] = NOW - 31
         state["last_open_ts"] = NOW - 90   # 上一笔是 90 秒前开的

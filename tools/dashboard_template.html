@@ -1119,7 +1119,7 @@
     <details class="at-rules">
       <summary>完整规则与信息边界</summary>
       <div class="at-rules-body">
-        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b>
+        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 30 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
         · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
         <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 止盈门槛，顺序写死。
         只有浮盈 ≥ 止盈门槛时才会问模型要不要落袋。参数是用真实 M1 K 线回放 191 笔入场
@@ -2353,13 +2353,15 @@ function updateModeHint() {
   if (!el) return;
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
-  // 冷却 30 秒 ⇒ 每小时最多 120 笔往返；每笔点差按当前品种现算
+  // 点差成本估算：平仓后冷却 30 秒 ⇒ 最好情况下每小时 ~120 笔往返。
+  // 这是**上限**不是预期——模型可以 act=false 跳过，实际笔数通常远低于此；
+  // 经验库在的时候尤其如此。列上限是为了把"最坏要付多少点差"摆上台面。
   const trips = Math.min(calls, 120);
   const perTrip = atSpreadCostUsd();
   if (atLiveMode()) {
-    const total = perTrip == null ? '未知' : fmt(trips * perTrip, 2) + ' USD/小时';
+    const total = perTrip == null ? '未知' : fmt(trips * perTrip, 2) + ' USD/小时（上限）';
     el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
-      + `最多 ${trips} 笔往返 ≈ 点差 ${total}`;
+      + `往返上限 ${trips} 笔 ≈ 点差上限 ${total}`;
     el.className = 'mini red';
   } else {
     el.textContent = `纸面 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次模型调用/小时`;
@@ -2436,8 +2438,9 @@ async function startAutoTrade() {
                   : `纸面：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`,
       desc: live
         ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
-          + `每小时约 ${calls} 次模型调用；冷却 30 秒，最多 120 笔往返/小时，`
-          + `光点差就可能烧掉约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
+          + `每小时约 ${calls} 次模型调用；平仓后冷却 30 秒，往返上限 120 笔/小时`
+          + `（模型可跳过，实际通常更少），`
+          + `最坏点差约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
         : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
           + `每小时约 ${calls} 次模型调用。`,
       cost: live ? '真实下单 + 模型调用' : '仅模型调用',

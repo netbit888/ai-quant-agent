@@ -599,7 +599,8 @@ class Handler(BaseHTTPRequestHandler):
                 max_loss_usd=float(body.get("max_loss_usd") or 0.0),
                 max_minutes=int(body.get("max_minutes") or 0),
             )
-            # 间隔太短等于把点差当水喝；冷却太长则做不到「1 分钟内重新开仓」。
+            # 间隔太短等于把点差当水喝；冷却只是防连环单的下限，无上限——
+            # 「1 分钟内重开」的硬需求已删，教训库和刚平仓提醒管节奏。
             # 这些是逻辑约束，启动时就说清楚，别让它跑起来再悄悄违约。
             issues = autotrade.validate_cfg(cfg)
             if issues:
