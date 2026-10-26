@@ -770,15 +770,26 @@ ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的超短线交易员，看 M1 图。
 所以每一笔都必须干净利落，不要指望"大行情"来救你。
 
 【信息边界】
-你只能看到两样东西：
+你只能看到三样东西：
   1) 当前 1 根 M1 和之前 13 根，共 14 根（约 14 分钟），以及这段时间的逐笔 tick；
-  2) 一行 M5 背景摘要：14 根 M5（约 70 分钟）的结构结论，程序算好的，没有原始 K 线。
-除此之外没有别的数据，也不要假装有：不要引用均线、其它技术指标、新闻、
-成交量、市场情绪——那些你根本看不到，编出来就是幻觉。
+  2) 一行 M5 背景摘要：14 根 M5（约 70 分钟）的结构结论，程序算好的，没有原始 K 线；
+  3) 一个 MA28 数字：最近 28 根 M1 的收盘均价，以及当前收盘相对它的位置。
+     这同样是程序算好的一个数，**不是 28 根原始 K 线**，你看不到那 28 根长什么样。
+除此之外没有别的数据，也不要假装有：不要引用均线系统、其它技术指标、新闻、
+成交量、市场情绪——除了 MA28，别的均线你也看不到，编出来就是幻觉。
 
 M5 背景怎么用：它只回答"大方向偏哪一边"，**不参与 1~3 分钟的进出场判定**。
 M1 决定时机，M5 决定你更愿意站在哪一侧。两者打架时（M1 位置提示做多、
 M5 却是下跌趋势），不是禁止交易，但你需要更强的理由，p_up 也不该给到激进的一端。
+
+MA28 怎么用：它是 28 分钟的价格中枢，回答"中期偏向哪边"，和 M5 同级，
+**同样不参与 1~3 分钟的时机判定**。
+- 收盘在均线**上方** → 中期偏多：做多是顺风，做空要更强理由。
+- 收盘在均线**下方** → 中期偏空：做空是顺风，做多要更强理由。
+- 标了「贴着均线」→ 中性，别拿它当方向依据，回到 M1 结构和位置判定。
+- MA28 与 M1 短期方向打架（均线下方但刚连阳）＝ 逆势反弹：
+  要么不做，要么理由必须比平时硬，不能因为"看着要涨"就去接逆势多单。
+它不是入场信号。贴线反复穿越的时候均线最容易骗人，位置与确认仍然看 M1。
 
 【主次不能反】
 以上面 1 分钟蜡烛图为主：结构、连阳连阴、实体与影线、收盘在区间里的位置，
@@ -836,11 +847,12 @@ tick 稀疏而安静 = 突破多半是假的。
   2) 【主】14 根 M1 K 线：序号（T-13…T-1、当前）/ 时间 / 开 / 高 / 低 / 收
   3) 【主】结构指标：ER、振幅与 ATR 倍数、收盘位置、连阳连阴、行情判定
   4) 【背景】M5 结构摘要（一行；程序拿不到时这一行不出现）
-  5) 【辅】tick 数据：每根的笔数与买价区间，末行给全窗口点差与最大单步跳动
-  6) 短周期变化与振幅
-  7) 你的历史战绩与最近复盘
-  8) 当前报价与来回成本
-  9) 当前时间（最后一行）
+  5) 【背景】MA28 与当前收盘的相对位置（一行；算不出来时不出现）
+  6) 【辅】tick 数据：每根的笔数与买价区间，末行给全窗口点差与最大单步跳动
+  7) 短周期变化与振幅
+  8) 你的历史战绩与最近复盘
+  9) 当前报价与来回成本
+ 10) 当前时间（最后一行）
 
 关于「× ATR」这个数：结构行里的振幅会同时给一个「= N 倍单根均幅」的比值。
 单根均幅 = 这 14 根每根真实波幅（高-低，并与前收比较取大）的平均值。
@@ -894,7 +906,7 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 【主】K线（序号 / 时间 UTC / 开 / 高 / 低 / 收）
 {bars}
 【主】{structure}
-{mtf}
+{mtf}{ma}
 【辅】Tick 级数据（逐笔 bid/ask，时间段与上面 14 根完全相同；只用于确认突破真假与点差）
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
@@ -1071,6 +1083,77 @@ def _structure(rows: list[dict]) -> dict:
             "drift": closes[-1] - closes[0]}
 
 
+# MA 的周期。2026-10-26 用户要求：用 28 根 M1 收盘均线做多空偏向
+# （"当前 K 线在均线下方偏空，反之偏多"），他自己做单也看这条。
+#
+# 关键设计：28 根是可见窗口（14 根）的两倍，所以**必须额外取数**。
+# 但模型仍然只看 14 根原始 K 线——多出来的部分只落成一个均线数字，
+# 和 M5 摘要同一个原则：程序算好结论，不给原始数据。
+# 这不是"放宽信息边界"，是"补一个模型自己算不出来的参照系"。
+MA_PERIOD = 28
+
+
+def _ma_calc(rows: list[dict], period: int = MA_PERIOD) -> dict | None:
+    """MA 的数值部分。`ma_line` 和 `feature_snapshot` 共用同一套数，别各算各的。
+
+    算不出来（数据不够 / 有脏价格）返回 None——调用方据此决定"不写这一行"，
+    绝不编一个数出来。
+    """
+    if not rows or len(rows) < period:
+        return None
+    closes: list[float] = []
+    for r in rows[-period:]:
+        try:
+            c = float(r.get("close") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if c <= 0:
+            return None
+        closes.append(c)
+    ma = sum(closes) / len(closes)
+    last = closes[-1]
+    gap = last - ma
+    unit = float(_atr(rows).get("atr") or 0.0)
+    ratio = (abs(gap) / unit) if unit > 0 else 0.0
+    # side: +1 上方（偏多）/ -1 下方（偏空）/ 0 贴线或无法判断
+    if unit > 0 and ratio < 0.5:
+        side = 0
+    elif gap > 0:
+        side = 1
+    elif gap < 0:
+        side = -1
+    else:
+        side = 0
+    return {"ma": ma, "last": last, "gap": gap, "ratio": ratio,
+            "side": side, "unit": unit, "period": int(period)}
+
+
+def ma_line(rows: list[dict], digits: int = 3, period: int = MA_PERIOD) -> str:
+    """MA28 背景偏向，一行文字。数据不够返回空串，**不编数**。
+
+    只用收盘价算术均值——用户自己看的就是这条，不加 EMA、不加带宽之类的花活。
+
+    为什么必须同时给「距均线多远」：贴着均线时"在上方"和"在下方"只差几分钱，
+    模型会随着价格穿越反复改方向。用单根均幅（近 14 根 ATR）归一化之后，
+    "是不是真的离得远"才看得见。距离不足 0.5 倍单根均幅直接标中性。
+    """
+    m = _ma_calc(rows, period)
+    if m is None:
+        return ""
+    d = max(0, int(digits))
+    if m["side"] == 0:
+        side = ("贴着均线 → 中性，别拿它当方向依据" if m["unit"] > 0
+                else "正好压在均线上 → 中性")
+    elif m["side"] > 0:
+        side = "在均线上方 → 中期偏多"
+    else:
+        side = "在均线下方 → 中期偏空"
+    rel = (f" ｜ 距均线 {m['gap']:+.{d}f}（= {m['ratio']:.1f} 倍单根均幅）"
+           if m["unit"] > 0 else f" ｜ 距均线 {m['gap']:+.{d}f}")
+    return (f"【背景】MA{period}（{period} 根 M1 收盘均值）= {m['ma']:.{d}f}"
+            f" ｜ 当前收盘 {m['last']:.{d}f} {side}{rel}")
+
+
 def _atr(rows: list[dict]) -> dict:
     """窗口内的真实波幅均值（ATR），以及归一化后的振幅。只用可见 14 根。
 
@@ -1225,6 +1308,14 @@ def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
     }
     if mtf:
         out["mtf"] = mtf
+    # MA28 同时落盘：以后才能回答「均线上方的单是不是真的更容易赢」。
+    # 只存数和方向标记，不存那 28 根原始 K 线（同上：特征够用，原文太胖）。
+    m = _ma_calc(rows)
+    if m is not None:
+        out["ma28"] = round(m["ma"], 4)
+        out["ma28_gap"] = round(m["gap"], 4)
+        out["ma28_atr"] = round(m["ratio"], 2)
+        out["ma28_side"] = m["side"]        # +1 上方 / -1 下方 / 0 贴线
     return out
 
 
@@ -1444,6 +1535,9 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
     spread_pts = int(round((ask - bid) / point)) if point else 0
     clock = time.strftime("%Y-%m-%d %H:%M", time.gmtime())
     dg = _digits(symbol)
+    # MA28 用**未截断的 rows**（至少 28 根）。拿不到就整块不出现，
+    # 不能让模板里留一行空的【背景】让模型猜。
+    ma_text = ma_line(rows, dg)
     return ENTRY_PROMPT.format(
         symbol=symbol, clock=clock, bid=_px(symbol, bid), ask=_px(symbol, ask),
         spread_pts=spread_pts,
@@ -1453,6 +1547,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
         mtf=mtf_text or "",
+        ma=(ma_text + "\n") if ma_text else "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
     )
 
@@ -2683,7 +2778,10 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         return row
     bid, ask = q
 
-    bars = rows if rows is not None else _bars(cfg.symbol, cfg.tf, cfg.bars)
+    # 取数要超过可见窗口：MA28 需要 28 根，模型仍然只看到其中最近 14 根
+    # （visible_bars 在 build_entry_prompt / _structure 里各截一次）。
+    bars = rows if rows is not None else _bars(
+        cfg.symbol, cfg.tf, max(int(cfg.bars or 0), MA_PERIOD + 6))
 
     pos = state.get("position")
     # 纸面仓位只存在于 state 里，券商那边什么都没有。拿它去和 MT5 持仓比对

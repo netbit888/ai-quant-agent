@@ -1500,6 +1500,63 @@ class TestStructure(unittest.TestCase):
         self.assertIn("不等于永远不做", sys)
 
 
+class TestMA28(unittest.TestCase):
+    """M1 的 MA28 背景偏向（用户 10-26 要求加，他自己做单也看这条）。
+
+    28 根是可见窗口（14 根）的两倍，所以**取数要多拉**；但模型仍然只看到
+    最近 14 根原始 K 线——多出来的只落成一个均线数字，和 M5 摘要同理。
+    这条边界要是破了，等于偷偷给它多看一倍行情。
+    """
+
+    def test_above_ma_is_bullish(self):
+        line = autotrade.ma_line(bars_up(30))       # 单调上行
+        self.assertIn("MA28", line)
+        self.assertIn("上方", line)
+        self.assertIn("中期偏多", line)
+
+    def test_below_ma_is_bearish(self):
+        line = autotrade.ma_line(bars_down(30))
+        self.assertIn("下方", line)
+        self.assertIn("中期偏空", line)
+
+    def test_not_enough_bars_returns_empty(self):
+        """数据不够就整块不出现，绝不编一个数出来。"""
+        self.assertEqual(autotrade.ma_line(bars_up(14)), "")
+        self.assertEqual(autotrade.ma_line(bars_up(27)), "")
+
+    def test_flat_price_is_neutral(self):
+        rows = [bar(4000, 4000.4, 3999.6, 4000.0, NOW + i * 60) for i in range(30)]
+        self.assertIn("中性", autotrade.ma_line(rows))
+
+    def test_matches_manual_average(self):
+        rows = bars_up(30)
+        expect = sum(r["close"] for r in rows[-28:]) / 28
+        self.assertAlmostEqual(autotrade._ma_calc(rows)["ma"], expect, places=6)
+
+    def test_prompt_carries_ma_but_still_14_bars(self):
+        """多拉的 28 根不能变成"模型可以多看 K 线"。"""
+        p = autotrade.build_entry_prompt(bars_up(40), 4040.0, 4040.24)
+        self.assertIn("MA28", p)
+        lines = re.findall(r"^(?:T-\d+|当前)\s+\d{2}-\d{2}", p, re.M)
+        self.assertEqual(len(lines), 14)
+        self.assertNotIn("T-14", p)
+
+    def test_prompt_omits_ma_line_when_data_short(self):
+        """只有 14 根时不许留一行空的【背景】让模型猜。"""
+        p = autotrade.build_entry_prompt(bars_up(14), 4040.0, 4040.24)
+        self.assertNotIn("MA28", p)
+
+    def test_feature_snapshot_records_ma(self):
+        feat = autotrade.feature_snapshot(bars_up(30))
+        self.assertIn("ma28", feat)
+        self.assertEqual(feat["ma28_side"], 1)     # 单调上行 → 上方
+        self.assertGreater(feat["ma28_gap"], 0)
+
+    def test_feature_snapshot_skips_ma_when_short(self):
+        feat = autotrade.feature_snapshot(bars_up(20))
+        self.assertNotIn("ma28", feat)
+
+
 class TestPromptPriority(unittest.TestCase):
     """用户明确要求：tick 是辅助，主看蜡烛图。提示词里主次写反了就白做。"""
 
