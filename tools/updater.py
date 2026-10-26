@@ -85,11 +85,16 @@ def ui_mode() -> str:
 
 # ---------------------------------------------------------------- 检测
 
+_last_fail_reason: str | None = None
+
+
 def fetch_latest() -> dict | None:
     """GET releases/latest。返回
     ``{'tag','version','notes','asset_url','asset_size'}``；网络失败/限流/
-    没有 Setup 资产一律返回 None（原因写进日志，不抛）。
+    没有 Setup 资产一律返回 None（原因存 ``_last_fail_reason``，不抛）。
     """
+    global _last_fail_reason
+    _last_fail_reason = None
     req = urllib.request.Request(RELEASE_API, headers={
         "User-Agent": UA, "Accept": ACCEPT})
     try:
@@ -97,16 +102,23 @@ def fetch_latest() -> dict | None:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 429):
+            _last_fail_reason = f"GitHub 限流（HTTP {exc.code}），配额一小时后恢复"
             print(f"[updater] rate limited ({exc.code})，稍后再试", flush=True)
+        elif exc.code == 404:
+            _last_fail_reason = "仓库不可达（404：私有/不存在，或还没有 Release）"
+            print(f"[updater] HTTP 404", flush=True)
         else:
+            _last_fail_reason = f"GitHub HTTP {exc.code}"
             print(f"[updater] HTTP {exc.code}", flush=True)
         return None
     except Exception as exc:  # noqa: BLE001  网络层的任何失败都不许冒泡
+        _last_fail_reason = f"网络不通（{type(exc).__name__}）"
         print(f"[updater] check failed: {type(exc).__name__}", flush=True)
         return None
 
     tag = str(data.get("tag_name") or "")
     if not tag:
+        _last_fail_reason = "Release 响应缺少 tag_name"
         return None
     # asset 可能有好几个（未来加 sha256/绿色版 zip）：挑字典序最大的 Setup，
     # 版本号大的名字也大（AIQuant-Setup-1.10.0 > 1.9.0 按字典序也成立，
@@ -142,7 +154,8 @@ def _do_check() -> None:
     _last_check = time.time()
     now = time.time()
     if info is None:
-        _set("check", status="error", error="无法访问 GitHub（网络或限流）",
+        _set("check", status="error",
+             error=_last_fail_reason or "无法访问 GitHub（网络或限流）",
              checked_at=now)
         return
     newer = is_newer(info["version"], APP_VERSION)

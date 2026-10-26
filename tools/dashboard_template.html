@@ -3127,8 +3127,13 @@ async function manualCheckUpdate() {
       updatePopup(j);
     } else if (j && j.check && j.check.status === 'ok') {
       b.textContent = `已是最新 v${j.check.current}`;
+      b.title = '';
     } else {
-      b.textContent = '检查失败（网络或限流）';
+      // 后端带回了具体原因（限流/404/网络），按钮上只放短话，悬停看全文
+      const err = (j && j.check && j.check.error) || '';
+      b.textContent = err.includes('限流') ? '检查失败（限流）'
+        : err.includes('404') ? '检查失败（仓库不可达）' : '检查失败（网络）';
+      b.title = err;
     }
   } catch (e) {
     b.textContent = '检查失败';
