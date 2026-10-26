@@ -160,13 +160,22 @@ def log_path(login: int | str | None = None) -> Path:
 
 
 def lessons_path(login: int | str | None = None) -> Path:
-    """教训库单独存一份，**不跟决策流水一起归档**。
+    """教训库的当前文件路径。**唯一出口**。
+
+    教训库现在是「可切换的包」：一组命名好的 .jsonl，面板上选一个生效。
+    包管理在 `live/lesson_packs.py`，这里只是转发——`active_file()`
+    返回当前激活的包。
+
+    `login` 参数保留但**不再使用**：以前教训按账户隔离，现在全局共享。
+    保留签名是为了不破坏 `append_lesson(row, login)` 等老调用方。
 
     以前教训只能从流水里读，而「重置」会把流水改名归档 → 教训跟着一起消失：
-    实测 2026-10-26 13:55 一次重置，188 条教训全变成不可见，注入的变成
-    「暂无复盘笔记」。经验要跨场次才有意义，就不能挂在会被清空的文件上。
+    实测 2026-10-26 13:55 一次重置，188 条教训全变成不可见。经验要跨场次
+    才有意义，就不能挂在会被清空的文件上。改成独立包之后，重置只清战绩、
+    清经验是另一个动作（`/api/autotrade/reset_lessons`），两者彻底解耦。
     """
-    return paths.account_file(paths.resolve_login(login), "lessons.jsonl")
+    from live import lesson_packs
+    return lesson_packs.active_file()
 
 
 def _empty_state() -> dict:
@@ -288,13 +297,14 @@ def lesson_rows(login: int | str | None = None) -> list[dict]:
     188 条复盘只有 86 条进库，而且随着日志变长不断往后滚——次数永远涨不到
     HARD_RULE_MIN=5，铁律机制自动失效。教训库现在是独立文件、全量读。
 
-    兼容：`lessons.jsonl` 还不存在时（老账户、老测试），退回从**当前日志**的
-    review 行里取（只看当前日志，不看归档——否则"清空经验"永远清不干净）。
-    文件存在但为空 = 已经被清空，不再回退，这是有意的。
+    包改成全局后：当前没有激活的包时返回 `[]`——不再退回首账户流水
+    （那是老 fallback，全局包语义下「没有包」就该是空的，不要把某个
+    账户的流水当教训来用）。
     """
-    if lessons_path(login).exists():
-        return _read_jsonl(lessons_path(login))
-    return [r for r in read_log(login) if r.get("kind") == "review" and r.get("lesson")]
+    p = lessons_path(login)
+    if p.exists():
+        return _read_jsonl(p)
+    return []
 
 
 def migrate_lessons(login: int | str | None = None) -> dict:

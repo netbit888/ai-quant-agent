@@ -474,6 +474,21 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/lesson_packs":
+            # 经验库包列表。读盘数行数不重（234 行 < 100KB），但也不放进
+            # 每秒轮询——选择器只在打开/切换时拉。
+            from live import lesson_packs
+            self._json(200, {"ok": True, "active": lesson_packs.active_id(),
+                             "packs": lesson_packs.list_packs()})
+            return
+
+        if parsed.path == "/api/lesson_packs/scan":
+            # 扫 import/ 目录，列出用户放进来的 .jsonl。内容解析在导入时做。
+            from live import lesson_packs
+            self._json(200, {"ok": True, "files": lesson_packs.scan_import(),
+                             "import_dir": str(lesson_packs.import_dir())})
+            return
+
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
@@ -506,6 +521,12 @@ class Handler(BaseHTTPRequestHandler):
             "/api/llm/switch": self._post_llm_switch,
             "/api/app/quit": self._post_app_quit,
             "/api/setup": self._post_setup,
+            "/api/lesson_packs/select": self._post_lesson_pack_select,
+            "/api/lesson_packs/create": self._post_lesson_pack_create,
+            "/api/lesson_packs/import": self._post_lesson_pack_import,
+            "/api/lesson_packs/export": self._post_lesson_pack_export,
+            "/api/lesson_packs/rename": self._post_lesson_pack_rename,
+            "/api/lesson_packs/delete": self._post_lesson_pack_delete,
         }
         handler = routes.get(parsed.path)
         if handler is None:
@@ -797,6 +818,74 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, res)
         except Exception as exc:  # noqa: BLE001
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    # ---------------------------------------------------------- 经验库包
+
+    def _lesson_pack_action(self, body: dict, fn) -> None:
+        """包操作的公共壳：取参数、调 lesson_packs、统一错误格式。"""
+        try:
+            from live import lesson_packs
+            self._json(200, fn(lesson_packs))
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_lesson_pack_select(self, body: dict) -> None:
+        pid = str(body.get("id") or "").strip()
+        if not pid:
+            self._json(400, {"ok": False, "error": "缺少 id"})
+            return
+        self._lesson_pack_action(body, lambda lp: lp.select(pid))
+
+    def _post_lesson_pack_create(self, body: dict) -> None:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._json(400, {"ok": False, "error": "请给经验库起个名字"})
+            return
+        self._lesson_pack_action(body, lambda lp: lp.create_empty(name))
+
+    def _post_lesson_pack_import(self, body: dict) -> None:
+        """file 必须是 /scan 返回的 name（不是任意路径）——后端从 import 目录拼接，
+        防路径穿越。"""
+        from live import lesson_packs
+        fname = str(body.get("file") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not fname:
+            self._json(400, {"ok": False, "error": "缺少 file（先扫描再导入）"})
+            return
+        # Path(name).name != name 挡掉任何带目录的写法（../ 也含 / 或 \）
+        if Path(fname).name != fname:
+            self._json(400, {"ok": False, "error": "file 只能是文件名"})
+            return
+        src = lesson_packs.import_dir() / fname
+        if not src.is_file():
+            self._json(400, {"ok": False, "error": f"import 目录里没有 {fname}"})
+            return
+        self._json(200, lesson_packs.import_from(src, name or src.stem))
+
+    def _post_lesson_pack_export(self, body: dict) -> None:
+        pid = str(body.get("id") or "").strip()
+        if not pid:
+            self._json(400, {"ok": False, "error": "缺少 id"})
+            return
+        self._lesson_pack_action(body, lambda lp: lp.export_to(pid))
+
+    def _post_lesson_pack_rename(self, body: dict) -> None:
+        pid = str(body.get("id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not pid or not name:
+            self._json(400, {"ok": False, "error": "缺少 id 或 name"})
+            return
+        self._lesson_pack_action(body, lambda lp: lp.rename(pid, name))
+
+    def _post_lesson_pack_delete(self, body: dict) -> None:
+        pid = str(body.get("id") or "").strip()
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true（经验删了心疼）"})
+            return
+        if not pid:
+            self._json(400, {"ok": False, "error": "缺少 id"})
+            return
+        self._lesson_pack_action(body, lambda lp: lp.delete(pid))
 
     def _post_session_note(self, body: dict) -> None:
         """场次备注：一句话 + 可选标签。不花钱，所以不需要 confirm。"""
@@ -1405,6 +1494,17 @@ def main(argv=None) -> int:
     # 可写目录先建好。放到 Program Files 这类只读位置时这里就报错，
     # 而不是等用户第一次点「开始做单」才 500——那时候根本看不出是权限问题。
     appdirs.ensure_writable_dirs()
+
+    # 经验库：index 为空时把各账户现有的 lessons.jsonl 提取成包（原文件保留）。
+    # 放在起服务/窗口之前——面板和 AI 做单读的都是 active 包，得先把包建出来。
+    # 幂等：index 已有包就什么都不做。
+    try:
+        from live import lesson_packs
+        lesson_packs.ensure_first_run()
+        lesson_packs.absorb_scratch()
+    except Exception as exc:  # noqa: BLE001
+        # 迁移失败绝不能挡住面板启动——教训还在原文件里，没丢
+        print(f"[!] 经验库迁移失败（不影响启动）：{type(exc).__name__}: {exc}")
 
     try:
         server, port, existing = _start_server(args.host, args.port)

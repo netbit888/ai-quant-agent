@@ -2067,7 +2067,10 @@ class TestResetHistory(TempLedger):
 
 class TestLessons(TempLedger):
     def _add(self, lesson, ts):
-        autotrade.append_log({"ts": ts, "kind": "review", "lesson": lesson})
+        # 直接写教训库（append_lesson 走 lessons_path → active 包）。
+        # 以前这里写流水、靠 lesson_rows 的 fallback 捞——fallback 移除后
+        # 必须写包。语义不变：往教训库加一条。
+        autotrade.append_lesson({"ts": ts, "lesson": lesson})
 
     def test_same_theme_is_merged_and_counted(self):
         """三条说法不同但讲同一件事的教训，必须并成一条并标次数。
@@ -2164,8 +2167,7 @@ class TestLessons(TempLedger):
     # ---- 行情状态标签与匹配、铁律升级（P3） ----
 
     def _add_regime(self, lesson, ts, regime):
-        autotrade.append_log({"ts": ts, "kind": "review", "lesson": lesson,
-                              "regime": regime})
+        autotrade.append_lesson({"ts": ts, "lesson": lesson, "regime": regime})
 
     def test_regime_of_buckets(self):
         """regime_of 必须和结构行的「行情判定」用同一套 ER 阈值。"""
@@ -2435,10 +2437,10 @@ class TestLessonScope(TempLedger):
     """
 
     def _add(self, lesson, ts, scope=None):
-        row = {"ts": ts, "kind": "review", "lesson": lesson}
+        row = {"ts": ts, "lesson": lesson}
         if scope:
             row["scope"] = scope
-        autotrade.append_log(row)
+        autotrade.append_lesson(row)
 
     def test_exit_lesson_not_injected_into_entry(self):
         self._add("止盈太早，结构没走完就平了", NOW, scope="exit")
@@ -2544,15 +2546,16 @@ class TestLessonStore(TempLedger):
         # 清完不许回退去读归档流水，否则"清空"立刻又长回来
         self.assertEqual(len(autotrade.read_log()), 2)
         self.assertIn("暂无", autotrade.recent_lessons())
-        self.assertTrue(list(autotrade.lessons_path().parent.glob("lessons.*.jsonl")))
+        # 归档文件确实留下了（改名不删除——教训是唯一副本）
+        self.assertTrue(res.get("archived"))
 
     def test_no_400_row_window(self):
         """教训库必须全量：以前 read_log(limit=400) 让 188 条复盘只剩 86 条进库。"""
         for i in range(420):
             autotrade.append_log({"ts": NOW + i, "kind": "skip", "reason": "冷却中"})
         for i in range(3):
-            autotrade.append_log({"ts": NOW + 500 + i, "kind": "review",
-                                  "lesson": f"在{4030 + i}追破位被假突破打掉，等确认再进"})
+            autotrade.append_lesson({"ts": NOW + 500 + i,
+                                     "lesson": f"在{4030 + i}追破位被假突破打掉，等确认再进"})
         self.assertIn("已出现 3 次", autotrade.recent_lessons())
 
     def test_lesson_file_makes_log_fallback_irrelevant(self):

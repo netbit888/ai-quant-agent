@@ -491,8 +491,8 @@
     box-shadow: 0 24px 60px -20px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.05) inset;
     padding: 20px 22px 16px; animation: rise .2s ease both;
   }
-  .modal h4 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
-  .modal .desc { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.modal h4 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+.modal .desc { font-size: 12.5px; color: var(--muted); line-height: 1.6; white-space: pre-wrap; }
   .modal .cost {
     margin: 14px 0; padding: 11px 13px; border-radius: 8px; font-size: 12px; line-height: 1.55;
     background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.28); color: #f0c674;
@@ -652,6 +652,16 @@
   .at-llm input.bad { border-color: #ff4d4f; }
   .at-llm-now { margin-left: auto; font-size: 12px; color: var(--muted, #8b96a5); }
   .at-llm-now b { color: #e8edf5; font-family: var(--mono); }
+  /* 经验库选择器：复用账户下拉的模式。select 全局 min-width:300px 是给
+     账户选择器的，这里空间窄，必须压回去。 */
+  .lesson-packs { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; flex-wrap: wrap; }
+  .lesson-packs select {
+    flex: 1; min-width: 0; background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 4px;
+    padding: 4px 6px; font-size: 12px; cursor: pointer; }
+  .lesson-packs select:hover { border-color: #4a9eff; background: rgba(74,158,255,.08); }
+  .lesson-packs select option { background: #12181f; color: var(--text); }
+  .lesson-packs .btn-ghost { padding: 4px 8px; font-size: 12px; flex: none; }
   /* 首启向导：一行一个字段，label 固定宽度让三个输入框左边缘对齐 */
   .modal .setup-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
   .modal .setup-row label { width: 66px; flex: none; font-size: 12.5px; color: var(--muted); }
@@ -1124,6 +1134,19 @@
         等待期间照常分析行情做下一笔。置灰的行是「跳过」——不花钱、没下单。
       </div>
     </details>
+    <!-- 经验库选择器：像选 EA 一样选一套经验。全局共享（不跟账户走），
+         AI 做单的提示词注入和复盘写入都用当前选中的这个。 -->
+    <div class="lesson-packs">
+      <select id="lpSelect" title="选择当前生效的经验库。AI 做单的提示词注入和复盘写入都用它。">
+        <option value="">读取中…</option>
+      </select>
+      <button class="btn-ghost" id="lpImport" onclick="lpScanAndImport()"
+              title="把 .jsonl 文件放进程序的 import 目录，然后点这里扫描导入">导入</button>
+      <button class="btn-ghost" id="lpExport" onclick="lpExportActive()"
+              title="把当前选中的经验库导出成 .jsonl 备份">导出</button>
+      <button class="btn-ghost" id="lpNew" onclick="lpCreate()"
+              title="新建一个空的经验库，从零积累">新建</button>
+    </div>
     <!-- 教训库：跨场次复发统计。默认收起——它要扫所有归档流水数平仓笔，
          比状态查询重，不该跟着 1 秒轮询跑，点开才拉。 -->
     <details id="atLessons" style="margin:10px 0 6px">
@@ -2569,6 +2592,103 @@ async function loadLessons() {
   }
 }
 
+/* ==================== 经验库包 ====================
+ * 像选 EA 一样选一套经验。全局共享（不跟账户走）：
+ * AI 做单的提示词注入和复盘写入都用当前选中的这个。
+ * 「没有缓存」是这套机制的根基——切换是原子改 index.json，
+ * 下一次决策读到的就是新包，不用任何失效逻辑。 */
+let lpPacks = [];
+
+async function loadLessonPacks() {
+  const sel = $('lpSelect');
+  if (!sel) return;
+  try {
+    const j = await (await fetch('/api/lesson_packs', { cache: 'no-store' })).json();
+    if (!j.ok) { sel.innerHTML = '<option value="">读取失败</option>'; return; }
+    lpPacks = j.packs || [];
+    const prev = sel.value;
+    sel.innerHTML = (j.packs || []).map(p =>
+      `<option value="${esc(p.id)}">${esc(p.name)}（${p.count} 条）</option>`
+    ).join('') || '<option value="">（还没有经验库）</option>';
+    const want = (prev && lpPacks.some(p => p.id === prev)) ? prev : (j.active || '');
+    if (want) sel.value = want;
+  } catch (e) {
+    sel.innerHTML = '<option value="">读取失败</option>';
+  }
+}
+
+async function lpSelectChanged() {
+  const id = $('lpSelect').value;
+  if (!id) return;
+  try {
+    const j = await (await fetch('/api/lesson_packs/select', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })).json();
+    if (!j.ok) atSay('<b>切换失败：</b>' + esc(j.error || ''), 'err');
+  } catch (e) { atSay('<b>切换请求失败：</b>' + String(e), 'err'); }
+}
+
+async function lpScanAndImport() {
+  let scan;
+  try {
+    scan = await (await fetch('/api/lesson_packs/scan', { cache: 'no-store' })).json();
+  } catch (e) { alert('扫描请求失败：' + String(e)); return; }
+  if (!scan.ok) { alert('扫描失败：' + (scan.error || '')); return; }
+  const dir = scan.import_dir || '';
+  if (!(scan.files || []).length) {
+    alert('import 目录里还没有 .jsonl 文件。\n\n把经验库文件（.jsonl）放进：\n' + dir
+      + '\n\n然后再点一次「导入」。');
+    return;
+  }
+  const list = scan.files.map(f => `${f.name}（${f.count} 条）`).join('\n');
+  const name = prompt(
+    'import 目录里发现：\n\n' + list + '\n\n给要导入的这仛起个名字：', '');
+  if (name === null) return;
+  const file = scan.files[0].name;   // 一次装一份；多了再点一次
+  try {
+    const j = await (await fetch('/api/lesson_packs/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file, name: name || file }),
+    })).json();
+    if (!j.ok) { alert('导入失败：' + (j.error || '')); return; }
+    alert(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`);
+    await loadLessonPacks();
+    loadLessons();
+  } catch (e) { alert('导入请求失败：' + String(e)); }
+}
+
+async function lpExportActive() {
+  const id = ($('lpSelect') || {}).value || '';
+  if (!id) { alert('先选一个要导出的经验库'); return; }
+  try {
+    const j = await (await fetch('/api/lesson_packs/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })).json();
+    if (!j.ok) { alert('导出失败：' + (j.error || '')); return; }
+    // 不能用浏览器下载（WebView2 里 ALLOW_DOWNLOADS=False），所以把路径告诉用户
+    confirmApiCall({
+      title: '导出完成',
+      desc: `已导出 ${j.count} 条到：\n${j.path}\n\n用文件管理器打开这个位置就能拿到 .jsonl 文件。`,
+      okText: '知道了',
+    });
+  } catch (e) { alert('导出请求失败：' + String(e)); }
+}
+
+async function lpCreate() {
+  const name = prompt('给新的经验库起个名字：', '');
+  if (!name) return;
+  try {
+    const j = await (await fetch('/api/lesson_packs/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })).json();
+    if (!j.ok) { alert('创建失败：' + (j.error || '')); return; }
+    await loadLessonPacks();
+  } catch (e) { alert('创建请求失败：' + String(e)); }
+}
+
 /* ==================== 模型切换 ====================
    为什么放到面板上：换模型是常用动作（免费额度用完、想对比判断质量），
    以前要改 .env 再重启面板——三步，还可能忘第三步，然后对着「模型没换」
@@ -3962,6 +4082,12 @@ loadLlm();
 updateModeHint();
 // 启动后查一次要不要弹配置向导。放在 loadLlm 之后：向导要用到供应商列表。
 checkSetup();
+// 经验库选择器：列表 + 切换事件。切换是原子改 index，下一次决策就生效。
+loadLessonPacks();
+(() => {
+  const sel = $('lpSelect');
+  if (sel) sel.addEventListener('change', lpSelectChanged);
+})();
 
 // 教训库：点开才拉（每次打开都重新扫，数据本来就该是最新的）
 (() => {
