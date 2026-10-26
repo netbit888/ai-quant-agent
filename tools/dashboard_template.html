@@ -2662,7 +2662,7 @@ async function lpScanAndImport() {
   }
   const list = scan.files.map(f => `${f.name}（${f.count} 条）`).join('\n');
   const name = prompt(
-    'import 目录里发现：\n\n' + list + '\n\n给要导入的这仛起个名字：', '');
+    'import 目录里发现：\n\n' + list + '\n\n给要导入的经验包取个名字：', '');
   if (name === null) return;
   const file = scan.files[0].name;   // 一次装一份；多了再点一次
   try {
