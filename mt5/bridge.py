@@ -14,7 +14,9 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+from live import appdirs
+
+DATA_DIR = appdirs.data_dir()
 
 TIMEFRAMES = {
     "M1": mt5.TIMEFRAME_M1,

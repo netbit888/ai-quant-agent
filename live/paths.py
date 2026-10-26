@@ -29,8 +29,13 @@ import shutil
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-LIVE_DIR = ROOT / "data" / "live"
+from live import appdirs
+
+# 可写数据根。源码态 = 仓库根；绿化版 = exe 同级。
+# **不要改回 Path(__file__).parent.parent**：冻结后那是 _MEIPASS（临时解压目录），
+# 账本会写进去并随进程退出被删——这是唯一副本，丢了不可恢复。
+ROOT = appdirs.app_root()
+LIVE_DIR = appdirs.data_dir() / "live"
 ACCOUNTS_DIR = LIVE_DIR / "accounts"
 INDEX_FILE = LIVE_DIR / "index.json"
 
@@ -150,7 +155,7 @@ def set_root(root: Path | str | None) -> None:
     传 None 恢复默认路径。
     """
     global LIVE_DIR, ACCOUNTS_DIR, INDEX_FILE, _current_login
-    LIVE_DIR = ROOT / "data" / "live" if root is None else Path(root)
+    LIVE_DIR = appdirs.data_dir() / "live" if root is None else Path(root)
     ACCOUNTS_DIR = LIVE_DIR / "accounts"
     INDEX_FILE = LIVE_DIR / "index.json"
     _current_login = None

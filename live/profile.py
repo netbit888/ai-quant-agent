@@ -26,8 +26,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-PROFILE_FILE = ROOT / "data" / "live" / "profile.json"
+from live import appdirs
+
+
+def profile_file() -> Path:
+    """画像落盘位置。走可写数据根，冻结后不能落进 _MEIPASS。"""
+    return appdirs.data_dir() / "live" / "profile.json"
 
 # 当前交易画像（2026-10 实测）。可用 `python -m tools.profile` 从数据重算。
 DEFAULT_PROFILE = {
@@ -45,9 +49,10 @@ DEFAULT_PROFILE = {
 
 
 def load_profile() -> dict:
-    if PROFILE_FILE.exists():
+    p = profile_file()
+    if p.exists():
         try:
-            data = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
             return {**DEFAULT_PROFILE, **data}
         except (OSError, json.JSONDecodeError):
             pass

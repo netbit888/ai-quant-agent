@@ -27,3 +27,9 @@ live_probe.json
 # 系统垃圾
 .DS_Store
 Thumbs.db
+
+# 打包产物（tools/build_portable.bat 生成）
+build/
+dist/
+# 绿色版的配置目录（含 API key，绝不能提交）
+config/

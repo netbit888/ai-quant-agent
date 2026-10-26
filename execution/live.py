@@ -23,8 +23,11 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = ROOT / "data" / "execution"
+from live import appdirs
+
+ROOT = appdirs.app_root()
+# 下单审计日志。走可写数据根——冻结后 _MEIPASS 是临时目录，写进去等于没写。
+LOG_DIR = appdirs.data_dir() / "execution"
 
 
 @dataclass

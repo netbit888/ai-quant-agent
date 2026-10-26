@@ -644,6 +644,18 @@
   .at-llm input.bad { border-color: #ff4d4f; }
   .at-llm-now { margin-left: auto; font-size: 12px; color: var(--muted, #8b96a5); }
   .at-llm-now b { color: #e8edf5; font-family: var(--mono); }
+  /* 首启向导：一行一个字段，label 固定宽度让三个输入框左边缘对齐 */
+  .modal .setup-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .modal .setup-row label { width: 66px; flex: none; font-size: 12.5px; color: var(--muted); }
+  .modal .setup-row select, .modal .setup-row input {
+    flex: 1; min-width: 0; background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 4px;
+    padding: 6px 8px; font-size: 12.5px; }
+  .modal .setup-row select { cursor: pointer; }
+  .modal .setup-row input:focus, .modal .setup-row select:focus {
+    outline: none; border-color: var(--info); }
+  .modal .setup-ok { color: var(--good); }
+  .modal .setup-err { color: var(--bad); }
 
   /* 操作结果条：只由 start/stop 写，轮询不碰它 */
   .at-msg { margin: 0 0 10px; padding: 9px 12px; border-radius: 6px;
@@ -873,6 +885,44 @@
   </div>
 </div>
 
+<!-- 首启配置向导：没配 API key 时自动弹出，也能从模型条手动打开。
+     写进本机 config/.env，和打包后的可写目录同源。 -->
+<div class="modal-mask hidden" id="setupMask">
+  <div class="modal modal-wide" role="dialog" aria-modal="true">
+    <h4>配一下模型 API</h4>
+    <div class="desc">
+      面板要靠大模型做决策和复盘，没有 key 就没法用 AI 做单。
+      填一次就行，存在本机 <b>config/.env</b>，不会上传。
+    </div>
+    <div class="setup-row"><label for="setupProvider">供应商</label>
+      <select id="setupProvider" onchange="onSetupProviderChange()"></select></div>
+    <div class="setup-row"><label for="setupModel">模型</label>
+      <input id="setupModel" class="mono" size="26" autocomplete="off" placeholder="留空用该供应商默认模型"></div>
+    <div class="setup-row"><label for="setupKey">API key</label>
+      <input id="setupKey" type="password" class="mono" size="42" autocomplete="off" placeholder="sk-..."></div>
+    <div class="mini" id="setupMsg" style="min-height:18px;margin-top:2px"></div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="skipSetup()">稍后设置</button>
+      <button class="btn-ok" onclick="saveSetup()">测试并保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 退出程序。为什么要有这个按钮：Windows 给控制台关闭事件的处理时限只有约 5 秒，
+     弹窗根本来不及；关黑窗口只能「尽力平仓」不能确认。这里的按钮是唯一可控的出口。 -->
+<div class="modal-mask hidden" id="quitMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h4>退出程序</h4>
+    <div class="desc" id="quitDesc"></div>
+    <div class="cost" id="quitCost"></div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="quitMaskClose()">取消</button>
+      <button class="btn-danger" id="quitForce" onclick="postQuit(false)">强制退出</button>
+      <button class="btn-ok" id="quitFlatten" onclick="postQuit(true)">先平仓再退出</button>
+    </div>
+  </div>
+</div>
+
 <!-- 单笔交易溯源：原料 → 结构 → 程序判断 vs 模型判断 → 执行结果 → 复盘 -->
 <div class="modal-mask hidden" id="tradeMask" onclick="if(event.target===this) tradeMaskClose()">
   <div class="modal modal-wide" role="dialog" aria-modal="true">
@@ -892,6 +942,9 @@
   <span class="pill iter-only">耗时 <b id="elapsed">-</b></span>
   <span class="spacer"></span>
   <span class="muted mono" id="updated" style="font-size:11.5px">-</span>
+  <button class="btn-ghost btn-danger" id="appQuit" onclick="quitApp()"
+          title="停掉 AI、必要时平仓，然后关闭整个程序"
+          style="margin-left:12px">退出程序</button>
 </header>
 
 <div class="tabs">
@@ -1004,6 +1057,9 @@
              placeholder="API key（沿用当前就留空）">
       <button class="btn-ghost" id="atLlmSave" onclick="switchLlm()">应用</button>
       <span class="at-llm-now" id="atLlmNow">—</span>
+      <button class="btn-ghost" onclick="openSetup()"
+              title="重新填 API key / 换供应商。点错的「稍后设置」也能从这里回来"
+              style="margin-left:8px;padding:3px 8px;font-size:12px">配置向导</button>
     </div>
     <!-- 操作结果单独一块：atNote 归轮询用（每 15 秒被 renderAutoTrade 覆写），
          把「启动失败」写在那里等于写了个寂寞——下一秒就被清空，
@@ -2604,6 +2660,161 @@ async function switchLlm() {
   }
 }
 
+/* ==================== 首启配置向导 ====================
+ * 没配 API key 时自动弹出，也能从模型条手动打开。
+ * 「要不要弹」由后端 /api/setup 的 needed 决定，判据是「模型能不能真调」，
+ * 不是「.env 存不存在」——半截配置恰恰最需要引导。
+ */
+async function checkSetup() {
+  try {
+    const j = await (await fetch('/api/setup', { cache: 'no-store' })).json();
+    if (!j || !j.ok || !j.needed) return;
+    openSetup(j);
+  } catch (e) {
+    /* 向导本身失败绝不能挡住面板 */
+  }
+}
+
+function openSetup(payload) {
+  if (!llmCfg) { loadLlm().then(() => openSetup(payload)); return; }
+  const sel = $('setupProvider');
+  if (sel && !sel.options.length) {
+    sel.innerHTML = (llmCfg.providers || []).map(p =>
+      `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    if (llmCfg.provider) sel.value = llmCfg.provider;
+  }
+  $('setupModel').value = (payload && payload.config && payload.config.model)
+    || (sel && sel.value && autoModel(sel.value)) || '';
+  $('setupKey').value = '';
+  $('setupKey').classList.remove('bad');
+  $('setupMsg').textContent = '';
+  $('setupMsg').className = 'mini';
+  $('setupMask').classList.remove('hidden');
+  setTimeout(() => $('setupKey').focus(), 80);
+}
+
+function autoModel(pid) {
+  const p = ((llmCfg && llmCfg.providers) || []).find(x => x.id === pid);
+  return (p && p.default_model) || '';
+}
+
+function onSetupProviderChange() {
+  // 换供应商要把模型名换成该家的默认，否则会拿 A 家的模型名去调 B 家，必然 400
+  $('setupModel').value = autoModel($('setupProvider').value);
+  $('setupMsg').textContent = '';
+  $('setupMsg').className = 'mini';
+}
+
+async function skipSetup() {
+  try {
+    await fetch('/api/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skip: true }),
+    });
+  } catch (e) { /* 标记写不上也不该拦住用户 */ }
+  $('setupMask').classList.add('hidden');
+  loadLlm();
+}
+
+async function saveSetup() {
+  const pid = $('setupProvider').value;
+  const key = ($('setupKey').value || '').trim();
+  const model = ($('setupModel').value || '').trim();
+  const msg = $('setupMsg');
+  if (!key) {
+    msg.textContent = '请先填 API key';
+    msg.className = 'mini setup-err';
+    $('setupKey').classList.add('bad');
+    $('setupKey').focus();
+    return;
+  }
+  msg.textContent = '正在真调一次模型验证（约 2 秒）…';
+  msg.className = 'mini';
+  try {
+    const r = await fetch('/api/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, provider: pid, key, model }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const secs = (typeof j.elapsed === 'number') ? j.elapsed.toFixed(2) + 's' : '—';
+      msg.textContent = `连通成功（${secs}），回「${j.reply || ''}」`;
+      msg.className = 'mini setup-ok';
+      $('setupKey').value = '';
+      setTimeout(() => {
+        $('setupMask').classList.add('hidden');
+        loadLlm();
+        loadAutoTrade();
+      }, 1100);
+    } else {
+      msg.textContent = '失败：' + (j.error || '未知错误') + '（已回滚，没留下坏配置）';
+      msg.className = 'mini setup-err';
+    }
+  } catch (e) {
+    msg.textContent = '请求失败：' + String(e);
+    msg.className = 'mini setup-err';
+  }
+}
+
+/* ==================== 退出程序 ====================
+ * 这是唯一可控的退出路径。关控制台窗口只有约 5 秒处理时限，
+ * 弹窗来不及，只能尽力平仓——所以主路径必须放在页面上。
+ */
+async function quitApp() {
+  let p = null;
+  try {
+    p = await (await fetch('/api/app/quit-preview', { cache: 'no-store' })).json();
+  } catch (e) {
+    p = { ok: false, count: 0, error: String(e) };
+  }
+  if (!p.count) {
+    const go = await confirmApiCall({
+      title: '退出程序？',
+      desc: p.mt5
+        ? '当前账户没有持仓。AI 线程会先停下，然后关闭程序。'
+        : '读不到持仓（MT5 未连接）。如果终端里还有仓，请先去 MT5 处理。',
+      cost: '不会下任何单',
+      okText: '退出',
+    });
+    if (go) postQuit(false);
+    return;
+  }
+  const f = Number(p.float_pnl || 0);
+  $('quitDesc').textContent =
+    `账户上有 ${p.count} 笔持仓，浮动盈亏 ${f >= 0 ? '+' : ''}${f.toFixed(2)} USD。`;
+  $('quitCost').textContent = p.dry_run === false
+    ? '强制退出会把仓位留在券商那边——这套策略不挂止盈止损，没人看着。'
+    : '纸面仓位只存在本地，强制退出等于直接丢弃。';
+  $('quitForce').disabled = false;
+  $('quitFlatten').disabled = false;
+  $('quitMask').classList.remove('hidden');
+}
+
+function quitMaskClose() { $('quitMask').classList.add('hidden'); }
+
+async function postQuit(flatten) {
+  $('quitForce').disabled = true;
+  $('quitFlatten').disabled = true;
+  let failed = 0;
+  try {
+    const r = await fetch('/api/app/quit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, flatten }),
+    });
+    const j = await r.json();
+    failed = (j.failed || []).length;
+  } catch (e) {
+    /* 进程死了会让 fetch 抛错——这恰恰说明退出成功 */
+  }
+  document.body.innerHTML =
+    '<div style="padding:56px;font:15px/1.8 system-ui,-apple-system,sans-serif;color:#e8eef6">'
+    + '<h3 style="margin:0 0 8px">程序已退出</h3>'
+    + (failed
+        ? `<p style="color:#ff8b8d">有 ${failed} 笔平仓失败，请去 MT5 终端确认。</p>`
+        : '<p>可以关闭这个页面了。</p>')
+    + '</div>';
+}
+
 /* ==================== 全屏提醒幕布 ====================
  * 目的只有一个：人离开屏幕时，别让别人（或自己）瞎点这台机器。
  * 为什么不做成新开窗口：浏览器只允许「用户点击」的那一刻进全屏，
@@ -3674,6 +3885,8 @@ refreshLive();
 loadAutoTrade();
 loadLlm();
 updateModeHint();
+// 启动后查一次要不要弹配置向导。放在 loadLlm 之后：向导要用到供应商列表。
+checkSetup();
 
 // 教训库：点开才拉（每次打开都重新扫，数据本来就该是最新的）
 (() => {

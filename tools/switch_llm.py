@@ -29,8 +29,12 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = ROOT / ".env"
+from live import appdirs
+
+ROOT = appdirs.app_root()
+# 唯一配置出口。源码态 = 仓库根 .env；绿化版 = exe 同级 config/.env。
+# **不能写 _MEIPASS**：那里进程退出就删，用户填的 key 全丢且不报错。
+ENV_FILE = appdirs.env_file()
 
 # 都是 OpenAI 兼容接口，所以换供应商只需要这三个值
 # models 只是**常用示例**，不是白名单——免费档的模型名换得很勤，
@@ -128,6 +132,9 @@ def switch(
     if key:
         values["LLM_API_KEY"] = key
     new = upsert_env(old_text, values)
+    # 首启时 config/ 还不存在（绿化版第一次配置就落在这里），不先建目录会
+    # FileNotFoundError: config.env 的父目录。源码态 config/ 也不存在，同样需要。
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     ENV_FILE.write_text(new, encoding="utf-8")
 
     # 让当前进程立刻用上新值（_load_dotenv 用 setdefault，必须显式覆盖）

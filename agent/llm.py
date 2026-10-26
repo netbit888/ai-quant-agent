@@ -47,7 +47,11 @@ def _load_dotenv() -> None:
     if _DOTENV_LOADED:
         return
     _DOTENV_LOADED = True
-    env_file = Path(__file__).resolve().parent.parent / ".env"
+    # 路径统一走 appdirs：源码态 = 仓库根 .env；绿化版 = exe 同级 config/.env。
+    # 这是唯一出口，读写两侧都从这里取，避免"向导写 A 文件、这里读 B 文件"。
+    from live import appdirs
+
+    env_file = appdirs.env_file()
     if not env_file.exists():
         return
     for raw in env_file.read_text(encoding="utf-8").splitlines():
