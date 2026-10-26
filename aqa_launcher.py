@@ -51,19 +51,49 @@ def _install_stdio_shim() -> None:
         sys.stderr = fh
 
 
-def _single_instance_mutex():
-    """给安装包的 AppMutex 用：程序在跑时，安装/卸载能提示先关掉。
+_ERROR_ALREADY_EXISTS = 183
+# 主窗口 + attach 窗口的标题。改标题时这两处要跟着动。
+_WINDOW_TITLES = (
+    "AI Quant Agent — 实盘账本",
+    "AI Quant Agent — 实盘账本（已有一份在运行）",
+)
 
-    返回值必须留住（不能让句柄被回收），所以由调用方持有。
+
+def _single_instance_mutex():
+    """一石二鸟的互斥体：既是安装包的 AppMutex，又是防多开的判据。
+
+    CreateMutexW 对已存在的命名互斥体照样返回有效句柄，只有 GetLastError()
+    会说是谁先建的——ERROR_ALREADY_EXISTS = 已经有一份在跑。
+    返回 (handle, already_running)，句柄必须留住（不能让引用被回收）。
     """
     if os.name != "nt":
-        return None
+        return None, False
     try:
         import ctypes
 
-        return ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\AIQuantDashboard")
+        k32 = ctypes.windll.kernel32
+        handle = k32.CreateMutexW(None, False, "Global\\AIQuantDashboard")
+        exists = bool(handle) and k32.GetLastError() == _ERROR_ALREADY_EXISTS
+        return handle, exists
     except Exception:  # noqa: BLE001
-        return None
+        return None, False
+
+
+def _focus_existing_window() -> bool:
+    """把已在运行的那个窗口拉到前台。找到并激活返回 True。"""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        for title in _WINDOW_TITLES:
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                user32.ShowWindow(hwnd, 9)          # SW_RESTORE（最小化也拉回来）
+                user32.SetForegroundWindow(hwnd)
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def _fatal_log_path() -> Path:
@@ -93,7 +123,21 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
 
-    _MUTEX = _single_instance_mutex()   # noqa: F841 —— 故意持有引用，别被回收
+    _MUTEX, _already = _single_instance_mutex()   # noqa: F841 —— 故意持有引用
+    if _already:
+        # 防多开：已有实例在跑，把它的窗口拉到前台就退出，绝不开第二份。
+        if _focus_existing_window():
+            return 0
+        # 窗口没找到（改过标题/还没建出来）：提示一下再退，别静默假死。
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(
+                None, "AI Quant Agent 已经在运行了。", "AI Quant Agent",
+                0x40 | 0x4000)   # MB_ICONINFORMATION | MB_TOPMOST
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
 
     from live import appdirs
 

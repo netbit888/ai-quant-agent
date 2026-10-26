@@ -973,6 +973,7 @@
   <span class="pill iter-only">阶段 <b id="phase">-</b></span>
   <span class="pill iter-only">耗时 <b id="elapsed">-</b></span>
   <span class="spacer"></span>
+  <span class="pill" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
   <span class="muted mono" id="updated" style="font-size:11.5px">-</span>
   <button class="btn-ghost" id="appUpdate" onclick="manualCheckUpdate()"
           title="检查是否有新版本" style="margin-left:12px">检查更新</button>
@@ -2649,6 +2650,31 @@ async function lpSelectChanged() {
 }
 
 async function lpScanAndImport() {
+  // 原生窗口：点「导入」直接弹系统文件选择框，不用先拷文件到 import 目录。
+  if (isNative() && typeof window.pywebview.api.pick_lesson_file === 'function') {
+    let picked;
+    try { picked = await bridgeCall('pick_lesson_file'); }
+    catch (e) { alert('打开文件选择器失败：' + String(e)); return; }
+    if (!picked || !picked.ok) {
+      if (picked && picked.error) alert('无法打开文件选择器：' + picked.error);
+      return;
+    }
+    if (!picked.path) return;   // 用户在对话框里点了取消，不是错误
+    const name = prompt('给要导入的经验包取个名字：', picked.name || '');
+    if (name === null) return;
+    try {
+      const j = await (await fetch('/api/lesson_packs/import_path', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: picked.path, name: name || picked.name }),
+      })).json();
+      if (!j.ok) { alert('导入失败：' + (j.error || '')); return; }
+      alert(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`);
+      await loadLessonPacks();
+      loadLessons();
+    } catch (e) { alert('导入请求失败：' + String(e)); }
+    return;
+  }
+  // 浏览器模式拿不到系统对话框：走 import 目录的老流程。
   let scan;
   try {
     scan = await (await fetch('/api/lesson_packs/scan', { cache: 'no-store' })).json();
@@ -2675,6 +2701,16 @@ async function lpScanAndImport() {
     await loadLessonPacks();
     loadLessons();
   } catch (e) { alert('导入请求失败：' + String(e)); }
+}
+
+async function loadAppVersion() {
+  try {
+    const j = await (await fetch('/api/app/version', { cache: 'no-store' })).json();
+    if (j.ok && j.version) {
+      $('appVersion').textContent = j.version;
+      $('verPill').style.display = '';
+    }
+  } catch (e) { /* 展示性元素，静默失败 */ }
 }
 
 async function lpExportActive() {
@@ -4223,6 +4259,8 @@ updateModeHint();
 checkSetup();
 // 经验库选择器：列表 + 切换事件。切换是原子改 index，下一次决策就生效。
 loadLessonPacks();
+// 版本号常驻 header。失败就保持隐藏，别让一个展示性元素报错。
+loadAppVersion();
 // 更新检测：安装版启动时静默查一次，有新版才弹窗；其他形态自动藏按钮
 startupUpdateCheck();
 (() => {

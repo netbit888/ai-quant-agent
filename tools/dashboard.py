@@ -475,6 +475,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, updater.snapshot())
             return
 
+        if parsed.path == "/api/app/version":
+            # header 常驻显示当前版本号。轻端点：不碰网络，只读常量。
+            from tools import updater
+            self._json(200, {"ok": True,
+                             "version": APP_VERSION,
+                             "mode": updater.ui_mode()})
+            return
+
         if parsed.path == "/api/setup":
             from agent.llm import current_config
 
@@ -540,6 +548,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/lesson_packs/select": self._post_lesson_pack_select,
             "/api/lesson_packs/create": self._post_lesson_pack_create,
             "/api/lesson_packs/import": self._post_lesson_pack_import,
+            "/api/lesson_packs/import_path": self._post_lesson_pack_import_path,
             "/api/lesson_packs/export": self._post_lesson_pack_export,
             "/api/lesson_packs/rename": self._post_lesson_pack_rename,
             "/api/lesson_packs/delete": self._post_lesson_pack_delete,
@@ -920,6 +929,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, lesson_packs.import_from(src, name or src.stem))
 
+    def _post_lesson_pack_import_path(self, body: dict) -> None:
+        """原生窗口文件选择器的配套入口：body.path 是用户在系统对话框里
+        **亲自选**的绝对路径。校验只留两道硬线（.jsonl 后缀 + 文件存在），
+        不做更多设防——用户能用鼠标选中的文件就是他的明确意图。"""
+        self._json(200, _import_lesson_pack_from_path(
+            body.get("path"), str(body.get("name") or "").strip()))
+
     def _post_lesson_pack_export(self, body: dict) -> None:
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -1094,6 +1110,29 @@ def setup_needed() -> bool:
 
 _QUITTING = threading.Event()
 
+
+def _resolve_import_path(raw) -> tuple["Path | None", "str | None"]:
+    """把文件选择器返回的绝对路径解析成可导入的源文件。返回 (path, error)。"""
+    # 注意先对**原串**判空再交给 Path：Path("") 会变成 "."，空串判断就失效了
+    cleaned = str(raw or "").strip().strip('"').strip()
+    if not cleaned:
+        return None, "缺少 path"
+    src = Path(cleaned)
+    if src.suffix.lower() != ".jsonl":
+        return None, "只能导入 .jsonl 文件"
+    if not src.is_file():
+        return None, f"文件不存在：{src}"
+    return src, None
+
+
+def _import_lesson_pack_from_path(raw, name: str) -> dict:
+    """文件选择器导入的完整流程（校验 + 落盘），handler 与测试共用。"""
+    from live import lesson_packs
+    src, err = _resolve_import_path(raw)
+    if err:
+        return {"ok": False, "error": err}
+    return lesson_packs.import_from(src, name or src.stem)
+
 # 窗口模式的状态。`_SHELL` 是唯一区分「原生窗口 / 浏览器」的开关，
 # 所有新分支都挂在它上面，保证 --web 的代码路径与加窗口之前逐字节一致。
 _SHELL = "browser"                  # "browser" | "native"
@@ -1116,6 +1155,27 @@ class _Bridge:
 
     def ping(self):
         return {"ok": True, "native": True, "shell": _SHELL}
+
+    def pick_lesson_file(self):
+        """弹系统「打开文件」对话框选一个 .jsonl 经验包。
+
+        桥里唯一一个允许长时间阻塞的方法：模态对话框本来就是在等用户
+        操作，不是慢代码。浏览器模式没有窗口对象，前端会降级回
+        import 目录的老流程。
+        """
+        if _WINDOW is None:
+            return {"ok": False, "error": "仅窗口模式支持文件选择"}
+        try:
+            import webview
+
+            files = _WINDOW.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=False,
+                file_types=("经验库文件 (*.jsonl)", "所有文件 (*.*)"))
+            p = files[0] if files else None
+            return {"ok": True, "path": p,
+                    "name": Path(p).stem if p else None}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def quit_dismissed(self):
         """用户在退出弹窗上点了「取消」。目前只需让他点得通。"""
