@@ -2653,7 +2653,7 @@ async function lpScanAndImport() {
   // 原生窗口：点「导入」直接弹系统文件选择框，不用先拷文件到 import 目录。
   if (isNative() && typeof window.pywebview.api.pick_lesson_file === 'function') {
     let picked;
-    try { picked = await bridgeCall('pick_lesson_file'); }
+    try { picked = await nativeApi('pick_lesson_file'); }
     catch (e) { alert('打开文件选择器失败：' + String(e)); return; }
     if (!picked || !picked.ok) {
       if (picked && picked.error) alert('无法打开文件选择器：' + picked.error);
