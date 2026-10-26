@@ -15,7 +15,12 @@
 ;      账本是唯一副本（MT5 历史有保留期、换服务器就丢），删了不可恢复。
 
 #define MyAppName "AI Quant Agent"
-#define MyAppVersion "1.1.0"
+; 版本号不再写死在这里：build_installer.bat 从仓库根 app_version.py 读出
+; APP_VERSION 后用 /DMyAppVersion= 传入。0.0.0 是"忘了传参"的醒目信号，
+; 故意不用任何真实版本——宁可看着离谱，也别静默发出版本号重复的包。
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
 #define MyAppExe "AIQuant.exe"
 #define MyAppPublisher "AI Quant Agent"
 ; 固定 GUID：升级和卸载靠它识别同一个产品，**永远不要改**
@@ -72,9 +77,12 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
 
 [Run]
+; 不带 skipifsilent：应用内一键升级走 /SILENT，装完必须由 Setup 拉起新版，
+; 否则用户面对"程序自己关了却没开"。首次手动安装时 postinstall 只是
+; 不显示勾选框、直接启动，行为无差。
 Filename: "{app}\{#MyAppExe}"; \
   Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall
 
 [UninstallDelete]
 ; 只清 WebView2 的缓存（可重建）。data\live 和 config\ 一个字都不碰。

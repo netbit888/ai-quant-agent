@@ -941,6 +941,20 @@
   </div>
 </div>
 
+<!-- 应用内更新：只在安装版（ui_mode==full）出现。检测/下载全走后端，
+     前端只是状态机——mode 不是 full 时按钮直接隐藏。 -->
+<div class="modal-mask hidden" id="updateMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h4 id="updateTitle">发现新版本</h4>
+    <div class="desc" id="updateDesc"></div>
+    <div class="mini" id="updateProgress" style="min-height:18px"></div>
+    <div class="actions">
+      <button class="btn-cancel" id="updateLater" onclick="updateLater()">暂不</button>
+      <button class="btn-ok" id="updateGo" onclick="startUpdateDownload()">下载并安装</button>
+    </div>
+  </div>
+</div>
+
 <!-- 单笔交易溯源：原料 → 结构 → 程序判断 vs 模型判断 → 执行结果 → 复盘 -->
 <div class="modal-mask hidden" id="tradeMask" onclick="if(event.target===this) tradeMaskClose()">
   <div class="modal modal-wide" role="dialog" aria-modal="true">
@@ -960,6 +974,8 @@
   <span class="pill iter-only">耗时 <b id="elapsed">-</b></span>
   <span class="spacer"></span>
   <span class="muted mono" id="updated" style="font-size:11.5px">-</span>
+  <button class="btn-ghost" id="appUpdate" onclick="manualCheckUpdate()"
+          title="检查是否有新版本" style="margin-left:12px">检查更新</button>
   <button class="btn-ghost btn-danger" id="appQuit" onclick="quitApp()"
           title="停掉 AI、必要时平仓，然后关闭整个程序"
           style="margin-left:12px">退出程序</button>
@@ -2991,6 +3007,126 @@ async function postQuit(flatten) {
     + '</div>';
 }
 
+// ---------------------------------------------------------------- 应用内更新
+// 前端只是状态机：检测/下载/安装全部在后端 updater。mode!=='full' 时
+// 整块 UI 隐藏（源码跑 git pull 重启即更新，绿色版没有升级通道）。
+
+function updateShow() { $('updateMask').classList.remove('hidden'); }
+function updateLater() { $('updateMask').classList.add('hidden'); }
+
+async function updateProgress() {
+  try {
+    return await (await fetch('/api/app/update/progress', { cache: 'no-store' })).json();
+  } catch (e) { return null; }
+}
+
+// 按 snapshot 驱动弹窗按钮与进度文案。返回 snapshot 供调用方读 check。
+async function updateRender() {
+  const j = await updateProgress();
+  if (!j) return null;
+  const d = j.download || {};
+  const go = $('updateGo'), later = $('updateLater'), prog = $('updateProgress');
+  if (d.status === 'downloading') {
+    go.disabled = true; later.disabled = true;
+    const mb = (d.received / 1048576).toFixed(1), tot = (d.total / 1048576).toFixed(1);
+    prog.textContent = `下载中 ${d.pct}% (${mb}/${tot} MB)`;
+  } else if (d.status === 'done') {
+    go.disabled = false; later.disabled = false;
+    go.textContent = '立即升级并重启'; go.onclick = applyUpdate;
+    prog.textContent = '下载完成。点击按钮后程序会退出、静默安装、然后自动重启。';
+  } else if (d.status === 'error') {
+    go.disabled = false; later.disabled = false;
+    go.textContent = '重试下载'; go.onclick = startUpdateDownload;
+    prog.textContent = '下载失败：' + (d.error || '未知错误');
+  } else {
+    go.disabled = false; later.disabled = false;
+    go.textContent = '下载并安装'; go.onclick = startUpdateDownload;
+    prog.textContent = '';
+  }
+  return j;
+}
+
+async function updateWaitCheck(ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const j = await updateRender();
+    if (j && j.check && j.check.status !== 'checking') return j;
+    await new Promise(r => setTimeout(r, 400));
+  }
+  return await updateRender();
+}
+
+function updatePopup(j) {
+  if (!j || !j.check || !j.check.newer) return;
+  $('updateTitle').textContent = `发现新版本 v${j.check.latest}（当前 v${j.check.current}）`;
+  $('updateDesc').textContent = (j.check.notes || '').slice(0, 2000) || '无更新日志';
+  updateShow();
+}
+
+// 页面加载时静默检查一次（走后端 60 秒节流，不在前端做频率控制）
+async function startupUpdateCheck() {
+  const j0 = await updateProgress();
+  if (!j0) return;                       // 后端都没连上，别谈更新
+  const btn = $('appUpdate');
+  if (j0.mode !== 'full') {
+    // 源码/绿色版没有升级通道：藏按钮，留一句话给好奇的人
+    if (btn) {
+      btn.style.display = 'none';
+      if (j0.mode === 'source') btn.title = '源码运行：git pull 后重启生效';
+    }
+    return;
+  }
+  try { await fetch('/api/app/update/check', { cache: 'no-store' }); } catch (e) { return; }
+  updatePopup(await updateWaitCheck(8000));
+}
+
+async function manualCheckUpdate() {
+  const b = $('appUpdate');
+  const old = b.textContent;
+  b.disabled = true; b.textContent = '检查中…';
+  try {
+    await fetch('/api/app/update/check?fresh=1', { cache: 'no-store' });
+    const j = await updateWaitCheck(15000);
+    if (j && j.check && j.check.newer) {
+      updatePopup(j);
+    } else if (j && j.check && j.check.status === 'ok') {
+      b.textContent = `已是最新 v${j.check.current}`;
+    } else {
+      b.textContent = '检查失败（网络或限流）';
+    }
+  } catch (e) {
+    b.textContent = '检查失败';
+  }
+  setTimeout(() => { b.textContent = old; b.disabled = false; }, 2500);
+}
+
+async function startUpdateDownload() {
+  try {
+    await fetch('/api/app/update/download', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+  } catch (e) { /* 由下面的进度轮询兜错 */ }
+  // 下载最长 10 分钟（PyInstaller 包一两百 MB），进度条每 0.5s 刷一次
+  const t0 = Date.now();
+  while (Date.now() - t0 < 10 * 60 * 1000) {
+    const j = await updateRender();
+    if (j && j.download && (j.download.status === 'done' || j.download.status === 'error')) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+async function applyUpdate() {
+  const go = $('updateGo'), later = $('updateLater');
+  go.disabled = true; later.disabled = true;
+  $('updateProgress').textContent = '正在退出并启动安装程序，装完后应用会自动重启…';
+  try {
+    await fetch('/api/app/update/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+  } catch (e) { /* fetch 断开 = 进程按计划退出，不是失败 */ }
+}
+
 /* 窗口 X 被点时由 Python 侧调用。复用 quitApp，不另写一套。
    连点 X 会重复进来，但 quitApp 的 preview 是只读的、mask 重复显示无害。 */
 function onNativeCloseRequested() {
@@ -4087,6 +4223,8 @@ updateModeHint();
 checkSetup();
 // 经验库选择器：列表 + 切换事件。切换是原子改 index，下一次决策就生效。
 loadLessonPacks();
+// 更新检测：安装版启动时静默查一次，有新版才弹窗；其他形态自动藏按钮
+startupUpdateCheck();
 (() => {
   const sel = $('lpSelect');
   if (sel) sel.addEventListener('change', lpSelectChanged);

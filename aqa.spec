@@ -60,6 +60,7 @@ hiddenimports = [
     "live.scoring", "live.quality", "live.cost", "live.profile",
     "agent.llm",
     "tools.lesson_stats", "tools.switch_llm", "tools.desktop",
+    "tools.updater",
     "execution.live",
     # 策略源码在运行时被 exec_module 加载，它内部的 import 静态扫不到
     "backtest.structure", "backtest.models", "backtest.indicators", "backtest.symbols",

@@ -16,6 +16,19 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+rem ---- version (single source: app_version.py) ---------------------------
+rem app_version.py is THE only place the version lives. iss no longer hardcodes it.
+for /f "usebackq delims=" %%i in (`".venv\Scripts\python.exe -c "import app_version; print(app_version.APP_VERSION)""`) do set "VER=%%i"
+if "%VER%"=="" (
+    echo [ERROR] cannot read APP_VERSION from app_version.py
+    exit /b 1
+)
+if "%VER%"=="0.0.0" (
+    echo [ERROR] APP_VERSION is 0.0.0, fix app_version.py first
+    exit /b 1
+)
+echo [INFO] building version %VER% ...
+
 rem ---- 1/3 dependencies -------------------------------------------------
 .venv\Scripts\python.exe -c "import PyInstaller" 2>nul
 if errorlevel 1 (
@@ -55,12 +68,13 @@ if not exist "%ISCC%" (
 
 echo.
 echo [3/3] compiling installer ...
-"%ISCC%" installer\aqa.iss || exit /b 1
+"%ISCC%" /DMyAppVersion=%VER% installer\aqa.iss || exit /b 1
 
 echo.
 echo ============================================
 echo   Done.
+echo   Version   : %VER%
 echo   App       : dist\AIQuant\AIQuant.exe
-echo   Installer : dist\installer\AIQuant-Setup-*.exe
+echo   Installer : dist\installer\AIQuant-Setup-%VER%.exe
 echo ============================================
 endlocal

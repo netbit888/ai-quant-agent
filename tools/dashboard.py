@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from app_version import APP_VERSION
 from live import appdirs
 
 # 四种路径，两种来源，别混：
@@ -98,7 +99,7 @@ def _start_server(host: str, want: int):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "QuantDashboard/1.0"
+    server_version = f"QuantDashboard/{APP_VERSION}"
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         """写响应。**客户端提前断开不算错误。**
@@ -461,6 +462,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _quit_preview())
             return
 
+        if parsed.path == "/api/app/update/check":
+            # ?fresh=1 手动检查（绕过 60 秒节流）；前端启动时的自动检查不带。
+            from tools import updater
+            qs = parse_qs(parsed.query)
+            self._json(200, updater.start_check(force="1" in (qs.get("fresh") or [])))
+            return
+
+        if parsed.path == "/api/app/update/progress":
+            # check + download 两块状态一起回，前端一个轮询端点吃到底。
+            from tools import updater
+            self._json(200, updater.snapshot())
+            return
+
         if parsed.path == "/api/setup":
             from agent.llm import current_config
 
@@ -520,6 +534,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/autotrade/reset_lessons": self._post_autotrade_reset_lessons,
             "/api/llm/switch": self._post_llm_switch,
             "/api/app/quit": self._post_app_quit,
+            "/api/app/update/apply": self._post_update_apply,
+            "/api/app/update/download": self._post_update_download,
             "/api/setup": self._post_setup,
             "/api/lesson_packs/select": self._post_lesson_pack_select,
             "/api/lesson_packs/create": self._post_lesson_pack_create,
@@ -767,6 +783,47 @@ class Handler(BaseHTTPRequestHandler):
             # 0.4s 留给浏览器读完。
             threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)),
                              name="quit", daemon=True).start()
+
+    def _post_update_apply(self, body: dict) -> None:
+        """一键升级：spawn 延迟安装链 → 本进程走正常退出链 → Setup 接管。
+
+        与 quit 共用同一份退出实现和同一个 `_QUITTING` 事件——升级退出就是
+        退出，不另写一条关停路径（两条实现迟早对不上账）。
+        """
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝升级"})
+            return
+        from tools import updater
+
+        pre = updater.prepare_apply()
+        if not pre.get("ok"):
+            self._json(400, {"ok": False, "error": pre.get("error")})
+            return
+        preview = _quit_preview()
+        if preview.get("count"):
+            # 裸仓升级的风险不在文件（data/ 会保留），在「AI 线程死了没人管仓」。
+            # 强制先平仓，和退出弹窗同一口径。
+            self._json(400, {"ok": False,
+                             "error": f"账户上还有 {preview['count']} 笔持仓，"
+                                      "请先平仓或走退出流程后再升级"})
+            return
+        if _QUITTING.is_set():
+            self._json(200, {"ok": True, "exiting": True, "note": "已经在退出"})
+            return
+        _QUITTING.set()
+        updater.spawn_setup_then_quit()
+        self._json(200, {"ok": True, "exiting": True})
+        if _SHELL == "native":
+            _schedule_window_quit(0.35)
+        else:
+            threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)),
+                             name="update-apply", daemon=True).start()
+
+    def _post_update_download(self, body: dict) -> None:
+        """开始下载安装包。只落一个文件到 data/update/，没有破坏性副作用，
+        不强制 confirm——真正的动作门槛在 apply（confirm + 无持仓）。"""
+        from tools import updater
+        self._json(200, updater.start_download())
 
     def _post_setup(self, body: dict) -> None:
         """首启配置向导。写 .env + 真调一次验证 + 进程内生效。
@@ -1506,6 +1563,17 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001
         # 迁移失败绝不能挡住面板启动——教训还在原文件里，没丢
         print(f"[!] 经验库迁移失败（不影响启动）：{type(exc).__name__}: {exc}")
+
+    # 更新器：清掉上次升级的残留安装包；安装版后台静默检查新版本。
+    # 都在 daemon 线程里、短超时、异常全吞——github.com 连不上是常态，
+    # 检测绝不能拖慢启动，更不能把面板搞挂。
+    try:
+        from tools import updater
+        updater.cleanup_stale()
+        if appdirs.is_frozen():
+            updater.start_check()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] 更新器初始化失败（不影响启动）：{type(exc).__name__}: {exc}")
 
     try:
         server, port, existing = _start_server(args.host, args.port)
