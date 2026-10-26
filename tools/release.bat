@@ -21,7 +21,10 @@ if not exist "%GH%" (
 
 rem ---- version (single source: app_version.py) ---------------------------
 rem Tag and package name both derive from it, so they can never disagree.
-for /f "usebackq delims=" %%i in (`".venv\Scripts\python.exe -c "import app_version; print(app_version.APP_VERSION)""`) do set "VER=%%i"
+rem Read via a temp file: for /f + nested parens/quotes is a cmd parsing minefield.
+.venv\Scripts\python.exe -c "import app_version; print(app_version.APP_VERSION)" > "%TEMP%\aqa_ver.tmp"
+set /p VER=<"%TEMP%\aqa_ver.tmp"
+del "%TEMP%\aqa_ver.tmp" 2>nul
 if "%VER%"=="" (
     echo [ERROR] cannot read APP_VERSION from app_version.py
     exit /b 1
