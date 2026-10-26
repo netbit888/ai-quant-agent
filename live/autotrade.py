@@ -530,21 +530,42 @@ VISIBLE_BARS = 14      # 当前 1 根 + 之前 13 根
 REVIEW_BEFORE_BARS = 7
 REVIEW_AFTER_BARS = 7
 
+# ---------------------------------------------------------------- 多周期背景
+#
+# 边界变更（2026-10-26，用户明确要求）：原来只有 M1 14 根，等于让模型在
+# 14 分钟的窗口里判断方向，完全不知道这 14 分钟处在更大的趋势的哪个位置。
+# 现在额外给一路 M5 背景，但**只给结构摘要、不给原始 K 线**：
+#   1) token：再来一份 14 行 OHLC，进场 prompt 直接翻倍；
+#   2) 一致性：给了原始表模型会自己重算 ER，和程序算的必然有出入，
+#      两个 ER 打架时它按哪个走都说不清。程序算好只给结论，
+#      和 M1 的处理方式保持一致。
+# 这不是"放宽 14 根"——M1 的可见根数仍然是 14，物理截断没有松动。
+# 新增的是一个**不同周期**的、已经压缩成一行结论的上下文。
+MTF_TF = "M5"
+MTF_BARS = 14          # 14 根 M5 = 70 分钟背景
+MTF_MIN_BARS = 5       # 少于这个数就不给背景（样本太少，ER 没意义）
+
 
 def visible_bars(rows: list[dict]) -> list[dict]:
     """裁到 AI 允许看到的 14 根。所有喂给模型的 prompt 都必须过这一道。"""
     return rows[-VISIBLE_BARS:] if rows else []
 
 
-ENTRY_SYSTEM = """你是 XAUUSD（现货黄金）的超短线交易员，看 M1 图。
+ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的超短线交易员，看 M1 图。
 你赚的是 1~3 分钟内的那一小段价差——不是趋势、不是波段、更不是隔夜。
 目标是尽可能多地把市场里真实存在的利润拿下来：单笔目标小、出手频次高，
 所以每一笔都必须干净利落，不要指望"大行情"来救你。
 
 【信息边界】
-你只能看到当前 1 根 K 线和之前 13 根，共 14 根，以及这 14 分钟内的逐笔 tick。
-没有更多数据，也不要假装有：不要引用均线、技术指标、更高周期、新闻、成交量、
-市场情绪，这些你根本看不到，编出来就是幻觉。
+你只能看到两样东西：
+  1) 当前 1 根 M1 和之前 13 根，共 14 根（约 14 分钟），以及这段时间的逐笔 tick；
+  2) 一行 M5 背景摘要：14 根 M5（约 70 分钟）的结构结论，程序算好的，没有原始 K 线。
+除此之外没有别的数据，也不要假装有：不要引用均线、其它技术指标、新闻、
+成交量、市场情绪——那些你根本看不到，编出来就是幻觉。
+
+M5 背景怎么用：它只回答"大方向偏哪一边"，**不参与 1~3 分钟的进出场判定**。
+M1 决定时机，M5 决定你更愿意站在哪一侧。两者打架时（M1 位置提示做多、
+M5 却是下跌趋势），不是禁止交易，但你需要更强的理由，p_up 也不该给到激进的一端。
 
 【主次不能反】
 以上面 1 分钟蜡烛图为主：结构、连阳连阴、实体与影线、收盘在区间里的位置，
@@ -584,12 +605,21 @@ tick 稀疏而安静 = 突破多半是假的。
 用户消息按这个顺序给，内容只有数据，规则全在本段：
   1) 品种与周期
   2) 【主】14 根 M1 K 线：序号（T-13…T-1、当前）/ 时间 / 开 / 高 / 低 / 收
-  3) 【主】结构指标：ER、振幅、收盘位置、连阳连阴、行情判定
-  4) 【辅】tick 数据：每根内的笔数与买卖价区间、点差，以及最近若干笔原始 tick
-  5) 短周期变化与振幅
-  6) 你的历史战绩与最近复盘
-  7) 当前报价与来回成本
-  8) 当前时间（最后一行）
+  3) 【主】结构指标：ER、振幅与 ATR 倍数、收盘位置、连阳连阴、行情判定
+  4) 【背景】M5 结构摘要（一行；程序拿不到时这一行不出现）
+  5) 【辅】tick 数据：每根内的笔数与买卖价区间、点差，以及最近若干笔原始 tick
+  6) 短周期变化与振幅
+  7) 你的历史战绩与最近复盘
+  8) 当前报价与来回成本
+  9) 当前时间（最后一行）
+
+关于「× ATR」这个数：结构行里的振幅会同时给一个「= N 倍单根均幅」的比值。
+单根均幅 = 这 14 根每根真实波幅（高-低，并与前收比较取大）的平均值。
+这个比值是**无量纲**的，所以能跨品种、跨时段比较：
+  上限约 13（每根都创新高/新低才能到）；
+  越接近 13，说明这波越接近单边走到极限，追进去的余地越小；
+  比值小说明区间被压缩，突破前的蓄势，假突破概率高。
+用它判断"这波走完了没有"，比单看振幅绝对数字可靠。
 
 【输出】
 只输出一个 JSON 对象，不要解释、不要 markdown 代码块、不要前后缀：
@@ -623,6 +653,7 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 【主】K线（序号 / 时间 UTC / 开 / 高 / 低 / 收）
 {bars}
 【主】{structure}
+{mtf}
 【辅】Tick 级数据（逐笔 bid/ask，时间段与上面 14 根完全相同；只用于确认突破真假与点差）
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
@@ -631,24 +662,29 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 报价 bid={bid}  ask={ask}  点差={spread_pts} 点
 时间 {clock} UTC"""
 
-EXIT_SYSTEM = """你是 XAUUSD 超短线交易员的持仓管理模块，只决定「继续持有」还是「立刻平仓」。
+EXIT_SYSTEM = """你是 {SYMBOL_LABEL} 超短线交易员的持仓管理模块，只决定「继续持有」还是「立刻平仓」。
 这套打法的钱来自「方向对的时候拿够一段」，不是靠秒级周转——实测 60 秒就跑的
-时候平均只抓 1 美元，光点差就吃掉四分之一，做的越多亏得越快。
+时候平均只抓到很小一段（黄金实盘口径：约 1 美元），光点差就吃掉四分之一，
+做的越多亏得越快。
 
 【信息边界】
-你只能看到当前 1 根 K 线和之前 13 根，共 14 根，以及这 14 分钟内的逐笔 tick。
-没有更多数据。
+你只能看到两样东西：
+  1) 当前 1 根 M1 和之前 13 根，共 14 根（约 14 分钟），以及这段时间的逐笔 tick；
+  2) 一行 M5 背景摘要（14 根 M5 约 70 分钟的结构结论，程序算好的，没有原始 K 线）。
+除此之外没有更多数据。M5 只用来判断"这波大方向还有没有余量"，
+不改变 M1 的出场时机判断。
 
 【输入格式（顺序固定）】
   1) 品种与周期
   2) 【主】14 根 M1 K 线：序号 / 时间 / 开 / 高 / 低 / 收
-  3) 【主】结构指标：ER、振幅、收盘位置、连阳连阴、行情判定
-  4) 【辅】tick 数据（只用于确认突破真假与点差异常）
-  5) 短周期变化
-  6) 当前持仓：方向 / 手数 / 开仓价 / 已持仓时间 / 浮动盈亏 / 当初开仓依据
-  7) 你从自己交易里总结的教训（按重复次数排序）
-  8) 当前报价
-  9) 当前时间（最后一行）
+  3) 【主】结构指标：ER、振幅与 ATR 倍数、收盘位置、连阳连阴、行情判定
+  4) 【背景】M5 结构摘要（一行；拿不到时不出现）
+  5) 【辅】tick 数据（只用于确认突破真假与点差异常）
+  6) 短周期变化
+  7) 当前持仓：方向 / 手数 / 开仓价 / 已持仓时间 / 浮动盈亏 / 当初开仓依据
+  8) 你从自己交易里总结的教训（按重复次数排序）
+  9) 当前报价
+ 10) 当前时间（最后一行）
 
 出场同样要看教训：像「止跌没延续就该立刻走」这种话，只有出现在出场判断里才有用。
 
@@ -659,10 +695,11 @@ close —— true 表示立刻市价平仓，false 表示继续持有。
 reason —— 不超过 40 字的中文依据，必须引用具体数字。
 
 【系统的自动规则（不用你判断，也不要跟它较劲）】
-- 浮亏达到 3.0 USD：系统直接市价平，不会问你；
-- 持仓满 60 分钟：系统无条件平掉，不管盈亏；
-- 浮盈不到 3.25 USD：系统也不问你要不要平，直接继续持有。
-所以**你被问到，就说明这笔单已经浮盈 ≥ 3.25 USD**，而且还没到 60 分钟。
+- 浮亏达到 {SL_USD} USD：系统直接市价平，不会问你；
+- 持仓满 {MAX_HOLD_MIN} 分钟：系统无条件平掉，不管盈亏；
+- 浮盈不到 {TP_MIN_USD} USD：系统也不问你要不要平，直接继续持有。
+这些数字会随配置变，以本段显示的为准，不要引用你记忆里的旧值。
+所以**你被问到，就说明这笔单已经浮盈 ≥ {TP_MIN_USD} USD**，而且还没到 {MAX_HOLD_MIN} 分钟。
 
 【判断原则】
 - 主看 K 线结构，tick 只做辅证；两者冲突时以 K 线为准。
@@ -672,12 +709,13 @@ reason —— 不超过 40 字的中文依据，必须引用具体数字。
   · 结构已经走完（贴到反向沿、连续形态被打断、ER 掉回震荡区）→ 落袋。
 - 成本不由你负责：点差由系统承担，不要用"点差吃掉利润"当平仓理由。
 - 必须二选一，不存在"再等等看情况"。
-- 别因为"已经赚了 3 块多"就急着落袋，也别死拿等它翻倍——看结构，不看金额。"""
+- 别因为"已经浮盈够出场门槛了"就急着落袋，也别死拿等它翻倍——看结构，不看金额。"""
 
 EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 13 根）
 【主】K线（序号 / 时间 UTC / 开 / 高 / 低 / 收）
 {bars}
 【主】{structure}
+{mtf}
 【辅】Tick 级数据（逐笔 bid/ask，时间段与上面 14 根完全相同）
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}
@@ -688,7 +726,7 @@ EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 
 报价 bid={bid}  ask={ask}
 时间 {clock} UTC"""
 
-REVIEW_SYSTEM = """你是一名 XAUUSD 超短线交易员的复盘教练。仓位已经平掉了，这一笔的钱已经落袋，
+REVIEW_SYSTEM = """你是一名 {SYMBOL_LABEL} 超短线交易员的复盘教练。仓位已经平掉了，这一笔的钱已经落袋，
 所以你现在可以看比平时更多的 K 线：**平仓前 7 根 + 平仓这根 + 平仓后 7 根，共 15 根**。
 平仓后那 7 根是你判断"这笔平得对不对"的唯一依据：
   - 平完行情继续顺着原方向走 → 平早了，该多拿一会儿；
@@ -778,6 +816,42 @@ def _structure(rows: list[dict]) -> dict:
             "drift": closes[-1] - closes[0]}
 
 
+def _atr(rows: list[dict]) -> dict:
+    """窗口内的真实波幅均值（ATR），以及归一化后的振幅。只用可见 14 根。
+
+    为什么必须有这个（2026-10-26 加）
+    ---------------------------------
+    模型看到的「振幅 5.100」是绝对价格，它不知道这算大还是小。同样 5.1 USD，
+    在亚洲盘午后和纽约开盘（非农）是两个完全不同的信号，但数字一模一样。
+    ATR 就是这个数字的参照系——**振幅 ÷ ATR 才是无量纲、可跨时段比较的量**。
+
+    为什么不是常见的 ATR(14)
+    -------------------------
+    TR 需要"前一根收盘"，所以 14 根 K 线只能产出 13 个 TR。命名上不装成
+    ATR14，就叫 `atr`，并在 `n_tr` 里如实给出用了几个 TR。
+
+    TR = max(高-低, |高-前收|, |低-前收|)
+    必须带上后两项：跳空时（周开盘、数据窗）光看高低差会严重低估波动。
+    """
+    w = visible_bars(rows)
+    if len(w) < 2:
+        return {"ok": False, "atr": 0.0, "n_tr": 0, "span": 0.0, "span_atr": 0.0}
+    trs = []
+    for i in range(1, len(w)):
+        high = float(w[i].get("high") or 0.0)
+        low = float(w[i].get("low") or 0.0)
+        prev_close = float(w[i - 1].get("close") or 0.0)
+        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    atr = sum(trs) / len(trs) if trs else 0.0
+    highs = [float(r.get("high") or 0.0) for r in w]
+    lows = [float(r.get("low") or 0.0) for r in w]
+    span = (max(highs) - min(lows)) if highs else 0.0
+    # 比值上限约等于根数（每根都创新高/新低才能到）。分母为 0 时给 0，不编数。
+    ratio = (span / atr) if atr > 0 else 0.0
+    return {"ok": True, "atr": atr, "n_tr": len(trs), "span": span,
+            "span_atr": ratio}
+
+
 def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
     """位置判定：同一个「贴下沿」，在震荡里是买点，在下跌趋势里是弱势延续。
 
@@ -840,6 +914,64 @@ def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
     return -1                  # 震荡或跌势贴上沿：倾向做空
 
 
+def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
+                     zone_edge: float | None = None,
+                     mtf: dict | None = None) -> dict:
+    """决策时刻的特征快照，落盘到日志行。
+
+    为什么要存（2026-10-26 加）
+    --------------------------
+    这些数算出来就被扔掉了，事后想问最基础的问题——「ER 高的单是不是更容易赢」
+    「振幅大的时候胜率有没有下降」——一个都答不了。原来只能靠从终端历史重建，
+    而 M1 历史有限，越老的订单越必然重建失败（trade_detail 里就是这个困境：
+    终端没开或者历史不够，结构就永远显示不出来）。
+
+    为什么只存数、不存原始 14 根 K 线
+    ---------------------------------
+    每笔都存 14 行 OHLC 会让 open 行膨胀到 3~4 倍，而「特征值 + 结果」已经
+    够做全部单变量/双变量分析。真要看 K 线原文时，终端历史还在就重建，
+    不在就认了——但特征本身从此不会再丢。
+
+    为什么读数都是 round 过的
+    ------------------------
+    日志是给人看也给人算的，5~6 位小数足够区分任何两个决策点，
+    再多只是把文件撑大。
+    """
+    w = visible_bars(rows)
+    s = _structure(rows)
+    if not s.get("ok"):
+        return {"ok": False, "n": len(w)}
+    r1, r5, r13, _ = _returns(rows)
+    a = _atr(rows)
+    edge = float(zone_edge if zone_edge is not None
+                 else (cfg.zone_edge if cfg is not None else 0.35))
+    out = {
+        "ok": True,
+        "symbol": cfg.symbol if cfg is not None else None,
+        "tf": cfg.tf if cfg is not None else "M1",
+        "n": len(w),
+        # 窗口的真实边界：事后核对"这笔决策时用的是哪 14 分钟"，比什么都可靠
+        "win": ([int(w[0].get("time") or 0), int(w[-1].get("time") or 0)]
+                if w else []),
+        "er": round(s["er"], 4),
+        "drift": round(s["drift"], 5),
+        "pos": round(s["pos"], 4),
+        "span": round(s["span"], 5),
+        "streak": int(s["streak"]),
+        "path": round(s["path"], 5),
+        "r1": round(r1, 6),
+        "r5": round(r5, 6),
+        "r13": round(r13, 6),
+        "atr": round(a.get("atr") or 0.0, 5),
+        "span_atr": round(a.get("span_atr") or 0.0, 3),
+        "regime": regime_of(rows),
+        "prog_dir": _prog_direction(rows, edge),
+    }
+    if mtf:
+        out["mtf"] = mtf
+    return out
+
+
 def _structure_text(rows: list[dict], zone_edge: float = 0.35,
                     digits: int = 3) -> str:
     s = _structure(rows)
@@ -867,9 +999,80 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35,
     drift = s["drift"]
     dir_text = "上行" if drift > 0 else ("下行" if drift < 0 else "走平")
     d = max(0, int(digits))
+    # 振幅后面补一个无量纲比值：绝对价格模型没法判断大小，比值可以。
+    # 拿不到 ATR 就不写这一截，不编一个数出来。
+    a = _atr(rows)
+    atr_text = (f"（= {a['span_atr']:.1f} 倍单根均幅 {a['atr']:.{d}f}）"
+                if a.get("ok") and a.get("atr", 0) > 0 else "")
     return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.{d}f}（{dir_text}）/ 总行程 {s['path']:.{d}f}）"
-            f"｜振幅 {s['span']:.{d}f}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
+            f"｜振幅 {s['span']:.{d}f}{atr_text}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
             f"｜{streak_text}｜位置判定：{zone}｜行情判定：{regime}")
+
+
+def _regime_word(er: float, drift: float) -> str:
+    """三态归类的**短词**版本，给多周期背景用。
+
+    没复用 `_structure_text` 里的长文案：那一段带「→ 低买高卖」这类打法指引，
+    是给 M1 主窗口的。M5 背景只该回答"大方向偏哪边"，不该再给一套打法，
+    否则模型会在两套打法之间反复横跳。
+    """
+    if er < ER_RANGE_MAX:
+        return "窄幅震荡"
+    if er > ER_TREND_MIN:
+        return "单边上行" if drift > 0 else "单边下行"
+    return "方向不明"
+
+
+def _mtf_bundle(symbol: str, zone_edge: float = 0.35,
+                digits: int = 3) -> dict:
+    """更高周期背景：M5 14 根的结构摘要。返回 {"text": ..., "info": ...}。
+
+    返回两个东西是刻意的：`text` 拼进 prompt，`info` 落进特征快照。
+    只取一次 M5 行情就同时满足两处，不在 tick 里查两遍。
+
+    为什么只给结论不给原始 K 线：见 MTF_TF 处的注释（token + 一致性）。
+
+    设计上刻意**不让它推翻 M1**：system 里写明 M5 只决定"更愿意站哪一侧"，
+    不参与 1~3 分钟的进出场判定。否则模型会拿 M5 的趋势去否决 M1 的位置，
+    而 M1 的超短线逻辑本来就是"在震荡里做边缘"，两者会互相拆台。
+    """
+    empty = {"text": "", "info": None}
+    try:
+        rows = _bars(symbol, MTF_TF, MTF_BARS)
+    except Exception:  # noqa: BLE001
+        return empty
+    w = [r for r in (rows or []) if r][-MTF_BARS:]
+    if len(w) < MTF_MIN_BARS:
+        return empty
+    s = _structure(w)
+    if not s.get("ok"):
+        return empty
+    a = _atr(w)
+    d = max(0, int(digits))
+    drift = s["drift"]
+    dir_text = "上行" if drift > 0 else ("下行" if drift < 0 else "走平")
+    has_atr = bool(a.get("ok") and a.get("atr", 0) > 0)
+    atr_part = (f"｜振幅 {s['span']:.{d}f}（{a['span_atr']:.1f} 倍单根均幅）"
+                if has_atr else f"｜振幅 {s['span']:.{d}f}")
+    regime = _regime_word(s["er"], drift)
+    text = (f"【背景】M5 {len(w)} 根（约 {len(w) * 5} 分钟）："
+            f"ER={s['er']:.2f}（净移动 {drift:+.{d}f} {dir_text}）"
+            f"｜收盘位置 {s['pos']:.0%}{atr_part}｜判定：{regime}")
+    info = {
+        "tf": MTF_TF,
+        "n": len(w),
+        "er": round(s["er"], 4),
+        "pos": round(s["pos"], 4),
+        "drift": round(drift, 5),
+        "regime": regime,
+        "span_atr": round(a.get("span_atr") or 0.0, 3),
+    }
+    return {"text": text, "info": info}
+
+
+def _mtf_text(symbol: str, zone_edge: float = 0.35, digits: int = 3) -> str:
+    """只要 prompt 那一行的简版包装（测试和 trade_detail 用）。"""
+    return _mtf_bundle(symbol, zone_edge, digits)["text"]
 
 
 def _fmt_bar_lines(rows: list[dict], digits: int = 3) -> str:
@@ -971,7 +1174,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
                        symbol: str = "XAUUSDm", tf: str = "M1",
                        point: float = 0.001, stats: dict | None = None,
                        lots: float = 0.01, lessons: str = "",
-                       ticks_text: str = "", zone_edge: float = 0.35) -> str:
+                       ticks_text: str = "", zone_edge: float = 0.35,
+                       mtf_text: str = "") -> str:
     w = visible_bars(rows)
     r1, r5, r13, span = _returns(w)
     st = stats or {}
@@ -992,6 +1196,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         r1=r1, r5=r5, r13=r13, span=_px(symbol, span),
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
+        mtf=mtf_text or "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
     )
 
@@ -999,7 +1204,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
 def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
                       tf: str = "M1", contract: float = 100.0,
                       ticks_text: str = "", symbol: str = "XAUUSDm",
-                      lessons: str = "", zone_edge: float = 0.35) -> str:
+                      lessons: str = "", zone_edge: float = 0.35,
+                      mtf_text: str = "") -> str:
     w = visible_bars(rows)
     r1, r5, r13, _ = _returns(w)
     direction = int(position.get("direction") or 1)
@@ -1023,6 +1229,7 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
         structure=_structure_text(w, zone_edge, dg),
         r1=r1, r5=r5, r13=r13,
         lessons=lessons or "暂无复盘笔记。",
+        mtf=mtf_text or "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
     )
 
@@ -1124,7 +1331,7 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
                                  cfg.tf, close_ts=closed_at,
                                  after=REVIEW_AFTER_BARS, symbol=cfg.symbol)
     try:
-        text, usage = _chat(prompt, REVIEW_SYSTEM)
+        text, usage = _chat(prompt, system_for(REVIEW_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login,
                   purpose="autotrade_review")
@@ -1421,7 +1628,7 @@ def _log_call(ok: bool, usage: dict | None, error: str | None = None,
 
 def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
               stats: dict | None = None, login: int | str | None = None,
-              ticks_text: str = "") -> dict:
+              ticks_text: str = "", mtf_text: str = "") -> dict:
     """让模型给上涨概率。**模型没答上来就不做**，不拿规则替它下单。"""
     prompt = build_entry_prompt(rows, bid, ask, cfg.symbol, cfg.tf,
                                 _point(cfg.symbol), stats,
@@ -1430,9 +1637,10 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                     login, ignore_cost=cfg.ignore_spread,
                                     regime=regime_of(rows)),
                                 zone_edge=cfg.zone_edge,
-                                ticks_text=ticks_text)
+                                ticks_text=ticks_text,
+                                mtf_text=mtf_text)
     try:
-        text, usage = _chat(prompt, ENTRY_SYSTEM)
+        text, usage = _chat(prompt, system_for(ENTRY_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login)
         return _entry_skip(f"模型调用失败（{type(exc).__name__}: {exc}）")
@@ -1458,16 +1666,18 @@ def _entry_skip(why: str) -> dict:
 
 def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
              cfg: Cfg, contract: float = 100.0,
-             login: int | str | None = None, ticks_text: str = "") -> dict:
+             login: int | str | None = None, ticks_text: str = "",
+             mtf_text: str = "") -> dict:
     prompt = build_exit_prompt(rows, position, bid, ask, cfg.tf, contract,
                                ticks_text=ticks_text, symbol=cfg.symbol,
                                lessons=recent_lessons(
                                    login, ignore_cost=cfg.ignore_spread,
                                    regime=regime_of(rows)),
-                               zone_edge=cfg.zone_edge)
+                               zone_edge=cfg.zone_edge,
+                               mtf_text=mtf_text)
     held = int(time.time()) - int(position.get("opened_at") or time.time())
     try:
-        text, usage = _chat(prompt, EXIT_SYSTEM)
+        text, usage = _chat(prompt, system_for(EXIT_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login)
         return _exit_hold(f"模型调用失败（{type(exc).__name__}: {exc}）")
@@ -1511,6 +1721,36 @@ SYMBOL_LABELS = {
     "XAUUSDm": "黄金 XAUUSD",
     "BTCUSDm": "比特币 BTCUSD",
 }
+
+
+def _symbol_label(symbol: str) -> str:
+    """system prompt 里自我介绍用的品种名。
+
+    为什么必须动态（2026-10-26 修）：三个 system prompt 原来全部硬编码
+    「XAUUSD」。上一轮加 BTC 时改了精度、白名单、成本提示，唯独漏了这里——
+    真选 BTC 跑起来，模型会被告知"你是黄金交易员"同时收到 80000 的价格。
+    这比没验证更糟：它会把黄金的波动直觉套到 BTC 上。
+    """
+    name = SYMBOL_LABELS.get(symbol)
+    return name or symbol
+
+
+def system_for(template: str, cfg: Cfg) -> str:
+    """把 system 模板里的占位符换成**当前配置的实际值**。
+
+    除了品种名，出场阈值也必须换：`sl_usd` / `tp_min_usd` / `max_hold_sec`
+    都是可配的，而 system 里原来硬编码着 3.0 / 3.25 / 60 分钟。cfg 一改，
+    system 就在骗模型——它会以 3.0 为前提判断"系统什么时候会砍我"，
+    实际却是 5.0。这类"界面说一套、代码做一套"的错位最难查，因为不报错。
+
+    用 str.replace 而不是 str.format：system 里含 JSON 示例的花括号，
+    format 会把它当占位符直接炸。
+    """
+    out = template.replace("{SYMBOL_LABEL}", _symbol_label(cfg.symbol))
+    out = out.replace("{SL_USD}", f"{float(cfg.sl_usd):g}")
+    out = out.replace("{TP_MIN_USD}", f"{float(cfg.tp_min_usd):g}")
+    out = out.replace("{MAX_HOLD_MIN}", f"{int(cfg.max_hold_sec) // 60}")
+    return out
 
 
 def symbol_options() -> list[dict]:
@@ -1838,8 +2078,10 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                 "reason": gate["reason"], "source": gate["source"],
             }
         else:
+            mtf = _mtf_bundle(cfg.symbol, cfg.zone_edge, _digits(cfg.symbol))
             decision = ask_exit(bars, pos, bid, ask, cfg, contract, login,
-                                ticks_text=_ticks_text(cfg, bars))
+                                ticks_text=_ticks_text(cfg, bars),
+                                mtf_text=mtf["text"])
             # 模型失败要计数：进场失败只是少做一笔，出场失败意味着仓位没人管，
             # 连错 3 次必须停下来让人接手，不能让它一直挂在那儿。
             if decision.get("source") == "error":
@@ -1924,8 +2166,14 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
     # 落盘后才能事后对账「程序对 vs 模型对」。
     prog_dir = _prog_direction(bars, cfg.zone_edge)
+    # M5 背景只查一次：text 进 prompt，info 进特征快照。
+    mtf = _mtf_bundle(cfg.symbol, cfg.zone_edge, _digits(cfg.symbol))
     decision = ask_entry(bars, bid, ask, cfg, state, login,
-                         ticks_text=_ticks_text(cfg, bars))
+                         ticks_text=_ticks_text(cfg, bars),
+                         mtf_text=mtf["text"])
+    # 特征快照：决策当下就走一次，后面所有分支（skip / open / failed）都带上。
+    # 不存它的话，事后想问「ER 高的单更容易赢吗」只能靠重建，而重建必然失败。
+    feat = feature_snapshot(bars, cfg, mtf=mtf["info"])
     p_up = float(decision.get("p_up") if decision.get("p_up") is not None else 0.5)
     act = decision.get("act")
     direction = 1 if p_up > 0.5 else -1
@@ -1941,6 +2189,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     if act is False:
         failed = decision.get("source") == "error"
         row = {"ts": now, "kind": "skip", "p_up": p_up, "act": False,
+               "prog_dir": prog_dir, "feat": feat,
                "reason": (decision.get("reason") if failed else
                           f"模型判定不做：{decision.get('reason') or '未给理由'}")}
         if failed:
@@ -1956,7 +2205,8 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     # 5 秒周期下每分钟能出现十几次这种"微弱优势"，不挡住就是稳定亏损。
     edge = abs(p_up - 0.5)
     if cfg.min_edge > 0 and edge < cfg.min_edge:
-        row = {"ts": now, "kind": "skip", "p_up": p_up,
+        row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
+               "prog_dir": prog_dir, "agree": agree, "feat": feat,
                "reason": (f"信号不够强：p_up={p_up:.2f}，偏离 0.50 仅 {edge:.2f}，"
                           f"低于门槛 {cfg.min_edge:.2f}（开仓要先付点差）")}
         state["last_tick_ts"] = now
@@ -2000,6 +2250,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "lots": cfg.lots, "price": price, "p_up": p_up,
         "confidence": round(max(p_up, 1 - p_up), 4),
         "prog_dir": prog_dir, "agree": agree,
+        "feat": feat,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "dry_run": cfg.dry_run,
     }
@@ -2577,9 +2828,11 @@ def trade_detail(ticket: int, login: int | str | None = None,
     面板的交易溯源接口背后是这个。设计约束：
     - **只读日志，不调模型，不连终端**（除非 live=True 且要补 tick）。
       查历史不能产生 API 费用，也不能因为 MT5 没开就查不了。
-    - K 线是**现拉的**（decision 时刻的原始行情没存盘——存了也就 14 行，
-      但每笔都存会让日志膨胀 40 倍，不值得）。live=True 时从终端补拉
-      开仓时刻附近的数据重算结构；拿不到就如实说"行情已过，无法重建"，
+    - 2026-10-26 起，open 行自带 `feat` 特征快照（ER/位置/振幅×ATR/regime/
+      prog_dir/M5 背景），所以**结构数不再依赖终端**——终端没开也能看到
+      当时的特征。下面这段"现拉 K 线"只是补 K 线原文，补不到就明说。
+    - K 线原文没有落盘（每笔存 14 行会让日志膨胀 3~4 倍）。live=True 时
+      从终端补拉开仓时刻附近的数据重建；拿不到就如实说"行情已过，无法重建"，
       绝不用现在的行情冒充当时的。
     - 复盘窗口可以事后重建（K 线历史还在），所以教训部分总是完整的。
     """
@@ -2625,7 +2878,12 @@ def trade_detail(ticket: int, login: int | str | None = None,
         structure_note = "终端未连接，历史行情无法重建"
 
     # --- 程序 vs 模型：分歧记账的两列 ----------------------------------------
+    feat = open_row.get("feat") or None
     prog_dir = open_row.get("prog_dir")
+    if prog_dir is None and isinstance(feat, dict):
+        # 2026-10-26 起 open 行带特征快照，里面的 prog_dir 比重建算出来的可靠得多：
+        # 它是决策当下程序真实给出的建议，不是事后拿同一批 K 线重算的近似值。
+        prog_dir = feat.get("prog_dir")
     model_dir = open_row.get("direction")
     agree_field = open_row.get("agree")
     if prog_dir is None and structure:
@@ -2642,6 +2900,11 @@ def trade_detail(ticket: int, login: int | str | None = None,
     else:
         verdict = None
 
+    # 终端重建失败时，把「特征其实还在」说清楚——否则看面板的人会以为
+    # 这笔的 ER/位置全丢了。丢的只是 K 线原文，结构数在 feat 里。
+    if structure_note and isinstance(open_row.get("feat"), dict):
+        structure_note += "；但决策时刻的特征快照完整（见下），结构数没有丢"
+
     return {
         "ok": True,
         "ticket": int(ticket),
@@ -2657,6 +2920,11 @@ def trade_detail(ticket: int, login: int | str | None = None,
         "recon": {
             "bars": bars,
             "structure": structure,
+            # 决策时刻的特征快照。2026-10-26 之前的老单没有这个字段，
+            # 那时候只存了 p_up 和理由，结构数算完就扔了。
+            "feat": open_row.get("feat"),
+            "mtf": (open_row.get("feat") or {}).get("mtf")
+                   if isinstance(open_row.get("feat"), dict) else None,
             "prog_dir": prog_dir,
             "ticks": ticks_block,
             "note": structure_note,

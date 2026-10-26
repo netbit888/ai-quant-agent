@@ -255,7 +255,13 @@ try {
     result: { pnl: 0.68, hit: true, held_sec: 60, exit_source: 'llm' },
     recon: { bars: 'T-13  10-23 11:33  4022.8  4023.8  4021.8  4022.8',
              structure: '结构 ER=0.08（净移动 -0.412（下行）/ 总行程 5.100）｜位置判定：贴上沿（程序倾向：可考虑做空）',
-             prog_dir: -1, ticks: 'tick 合计 1800 笔', note: null },
+             prog_dir: -1, ticks: 'tick 合计 1800 笔', note: null,
+             feat: { ok: true, symbol: 'XAUUSDm', tf: 'M1', n: 14,
+                     er: 0.08, drift: -0.412, pos: 0.92, span: 5.1,
+                     streak: -3, atr: 0.412, span_atr: 12.38,
+                     regime: 'range', prog_dir: -1,
+                     mtf: { tf: 'M5', er: 0.62, pos: 0.88, regime: '单边上行', span_atr: 5.2 } },
+             mtf: { tf: 'M5', er: 0.62, pos: 0.88, regime: '单边上行', span_atr: 5.2 } },
     judgement: { prog_dir: -1, model_dir: -1, agree_field: true, p_up: 0.2,
                  model_reason: '贴上沿，窄幅震荡，考虑做空', verdict: '一致' },
   };
@@ -271,6 +277,11 @@ try {
     ['结构行', htmlFull.includes('ER=0.08')],
     ['K 线原料', htmlFull.includes('T-13')],
     ['复盘教训', htmlFull.includes('等反抽再空')],
+    // 特征快照（2026-10-26 起落盘）：快照优先，重建只是补充
+    ['快照标注', htmlFull.includes('决策时刻落盘')],
+    ['ER 数值', htmlFull.includes('0.08')],
+    ['ATR 倍数', htmlFull.includes('12.4')],
+    ['M5 背景', htmlFull.includes('M5 背景') && htmlFull.includes('单边上行')],
   ];
   for (const [name, ok] of fullChecks) {
     console.log(`  溯源·${name} ${ok ? '✓' : '✗'}`);

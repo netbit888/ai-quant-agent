@@ -2161,12 +2161,30 @@ function renderTradeDetail(d) {
     + `<div class="mini" style="margin-top:5px">开仓理由：${esc(o.reason || '—')}</div>`
     + `</div>`;
 
-  // 3. 原料与结构（重建）
-  html += `<div class="td-sec"><b>决策时的原料与结构</b>`;
-  if (rc.note) html += `<div class="td-note">${esc(rc.note)}——原始行情没存盘（决策时刻的 14 根不落日志），需要 MT5 终端在线且历史覆盖到开仓时刻才能重建。</div>`;
-  if (rc.structure) html += `<pre>${esc(rc.structure)}</pre>`;
-  if (rc.prog_dir != null && rc.structure) html += `<div class="mini" style="margin-top:4px">由以上结构算出程序建议：${PROG_DIR_TEXT[rc.prog_dir] || rc.prog_dir}</div>`;
-  if (rc.bars) html += `<pre style="margin-top:8px">${esc(rc.bars)}</pre>`;
+  // 3. 特征与结构。快照优先——它是决策当下落的盘，比重建可靠；
+  //    重建只是补 K 线原文，补不到也不影响这些数。
+  html += `<div class="td-sec"><b>决策时的特征与结构</b>`;
+  const ft = rc.feat;
+  if (ft && ft.ok) {
+    html += `<div class="mini" style="margin-top:4px">决策时刻落盘（非重建）· 窗口 ${ft.n} 根 · ${esc(ft.symbol || '')} ${esc(ft.tf || '')}</div>`;
+    html += tradeRow('ER / 净移动',
+      `${fmt(ft.er, 2)}　${ft.drift > 0 ? '+' : ''}${fmt(ft.drift, 3)}`);
+    html += tradeRow('收盘位置', ft.pos == null ? '—' : (ft.pos * 100).toFixed(0) + '%');
+    html += tradeRow('振幅',
+      `${fmt(ft.span, 3)}（${fmt(ft.span_atr, 1)}× 单根均幅，ATR=${fmt(ft.atr, 3)}）`);
+    html += tradeRow('连阳连阴 / 状态', `${ft.streak} 根　${esc(ft.regime || '—')}`);
+    html += tradeRow('程序建议',
+      PROG_DIR_TEXT[ft.prog_dir] != null ? PROG_DIR_TEXT[ft.prog_dir] : '—');
+  }
+  if (rc.mtf) {
+    html += tradeRow('M5 背景',
+      `ER=${fmt(rc.mtf.er, 2)}　位置 ${rc.mtf.pos == null ? '—' : (rc.mtf.pos * 100).toFixed(0) + '%'}`
+      + `　${fmt(rc.mtf.span_atr, 1)}× 均幅　${esc(rc.mtf.regime || '')}`);
+  }
+  if (!ft && rc.note) html += `<div class="td-note">${esc(rc.note)}——原始行情没存盘，这笔也没有特征快照（2026-10-26 之前的老单），只能靠终端重建。</div>`;
+  if (rc.structure) html += `<div class="mini" style="margin-top:6px">重建的结构行：</div><pre>${esc(rc.structure)}</pre>`;
+  if (rc.prog_dir != null && rc.structure && !ft) html += `<div class="mini" style="margin-top:4px">由以上结构算出程序建议：${PROG_DIR_TEXT[rc.prog_dir] || rc.prog_dir}</div>`;
+  if (rc.bars) html += `<details style="margin-top:8px"><summary class="mini" style="cursor:pointer">重建的 14 根 K 线</summary><pre>${esc(rc.bars)}</pre></details>`;
   if (rc.ticks && !rc.ticks.startsWith('（')) html += `<details style="margin-top:8px"><summary class="mini" style="cursor:pointer">tick 聚合数据</summary><pre>${esc(rc.ticks)}</pre></details>`;
   html += `</div>`;
 

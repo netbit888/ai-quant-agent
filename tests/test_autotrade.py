@@ -428,8 +428,11 @@ class TestTick(TempLedger):
         self.assertIsNone(autotrade.load_state()["position"])
 
     def test_missing_quote_logs_skip(self):
-        row = autotrade.tick(self.cfg, now=NOW, quote=None,
-                             rows=bars_up(), positions=[])
+        # 必须把 _quote 一起挡住：终端在线时 tick 会去拉真报价，这条就变成
+        # 「环境决定断言」而不是「代码决定断言」。要测的是拿不到报价的分支。
+        with mock.patch.object(autotrade, "_quote", return_value=None):
+            row = autotrade.tick(self.cfg, now=NOW, quote=None,
+                                 rows=bars_up(), positions=[])
         self.assertEqual(row["kind"], "skip")
         self.assertIn("报价", row["reason"])
 
@@ -643,7 +646,12 @@ class TestConnectionKeepAlive(unittest.TestCase):
         with mock.patch.object(mt5, "shutdown") as m_shutdown:
             rows = autotrade._bars("XAUUSDm", "M1", 10)
         m_shutdown.assert_not_called()
-        self.assertEqual(rows, [])
+        # 只验证「取行情不会关连接」。原来还断言 rows == []，那是把
+        # 「终端没开」当成前置条件——终端一开这条就随机变红（踩过很多次）。
+        # 有没有行情是环境的事，跟这条逻辑无关。
+        self.assertIsInstance(rows, list)
+        if rows:
+            self.assertIn("close", rows[0])
 
     def test_keep_alive_executor_skips_shutdown(self):
         from execution.live import ExecConfig, Executor
@@ -1418,11 +1426,31 @@ class TestMinHold(TempLedger):
         m_exit.assert_called_once()
 
     def test_exit_system_states_the_real_gate(self):
-        """提示词必须和真实闸门一致，否则模型会以为还能自己扛单。"""
-        self.assertIn("浮盈不到 3.25 USD", autotrade.EXIT_SYSTEM)
-        self.assertIn("系统直接市价平", autotrade.EXIT_SYSTEM)
+        """提示词必须和真实闸门一致，否则模型会以为还能自己扛单。
+
+        2026-10-26 起阈值改成占位符渲染：原来写死 3.0/3.25/60，
+        cfg 一改 system 就在骗模型（它按 3.0 判断"系统什么时候砍我"，
+        实际却是 5.0）。所以断言必须打在**渲染之后**的文本上，
+        并且验证改 cfg 时文案真的跟着变。
+        """
+        cfg = autotrade.Cfg()
+        sys_text = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg)
+        self.assertIn(f"浮盈不到 {cfg.tp_min_usd:g} USD", sys_text)
+        self.assertIn("系统直接市价平", sys_text)
         # 旧文案说"没有止损也没有止盈"，现在程序层有止损，不能再这么写
-        self.assertNotIn("没有止损也没有止盈", autotrade.EXIT_SYSTEM)
+        self.assertNotIn("没有止损也没有止盈", sys_text)
+        # 占位符必须被替换干净，不能漏一个到模型眼前
+        self.assertNotIn("{", sys_text.replace('{"close"', "") .replace('""}', ""))
+
+    def test_exit_system_follows_cfg_not_hardcoded(self):
+        """改 sl_usd / tp_min_usd / max_hold_sec，system 文案必须跟着变。"""
+        cfg = autotrade.Cfg(sl_usd=5.0, tp_min_usd=4.5, max_hold_sec=1800)
+        sys_text = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg)
+        self.assertIn("浮亏达到 5 USD", sys_text)
+        self.assertIn("浮盈不到 4.5 USD", sys_text)
+        self.assertIn("持仓满 30 分钟", sys_text)
+        self.assertNotIn("3.25", sys_text)
+        self.assertNotIn("3.0 USD", sys_text)
 
 
 class TestIgnoreSpread(unittest.TestCase):
@@ -2018,6 +2046,212 @@ class TestSymbolSupport(unittest.TestCase):
         c_xau = autotrade._spread_cost("XAUUSDm", 0.01)
         self.assertAlmostEqual(c_btc, 0.064, places=6)
         self.assertAlmostEqual(c_xau, 0.24, places=6)
+
+
+# ------------------------------------------------------------------ 特征工程
+#
+# 2026-10-26 加的一批：ATR 归一化、特征快照落盘、多周期背景、system 参数化。
+# 共同点是「算出来的东西不能只活在内存里」——每条断言都钉一个事后要用的具体数字。
+
+
+class TestAtr(unittest.TestCase):
+    def test_gap_counts_as_true_range(self):
+        """跳空必须计入 TR。只算 high-low 会严重低估波动。
+
+        构造：第 1 根收 100，第 2 根直接在 110 开盘、高低只差 1。
+        看高低差会得到 1；真实 TR 应该是 |111-100| = 11。
+        """
+        rows = [
+            {"time": NOW, "open": 100, "high": 101, "low": 99, "close": 100},
+            {"time": NOW + 60, "open": 110, "high": 111, "low": 110, "close": 110},
+        ]
+        a = autotrade._atr(rows)
+        self.assertTrue(a["ok"])
+        self.assertEqual(a["n_tr"], 1)          # 2 根只能出 1 个 TR
+        self.assertAlmostEqual(a["atr"], 11.0, places=6)
+
+    def test_known_series(self):
+        """bars_up 每根 high-low 恒为 2、前收差 1.5，所以 TR 恒 2、ATR=2。
+
+        14 根极差 = (4001+13) - 3999 = 15，比值 7.5。
+        这个数一旦变了，说明 TR 公式或窗口被动过。
+        """
+        a = autotrade._atr(bars_up(14))
+        self.assertAlmostEqual(a["atr"], 2.0, places=6)
+        self.assertAlmostEqual(a["span"], 15.0, places=6)
+        self.assertAlmostEqual(a["span_atr"], 7.5, places=6)
+
+    def test_ratio_is_dimensionless(self):
+        """比值必须无量纲：整体价格乘 10，比值一个字节都不该变。
+
+        这是它能跨品种（黄金 vs BTC）、跨时段（亚洲盘 vs 纽约盘）比较的前提。
+        """
+        base = bars_up(14)
+        scaled = [{**r, "open": r["open"] * 10, "high": r["high"] * 10,
+                   "low": r["low"] * 10, "close": r["close"] * 10} for r in base]
+        self.assertAlmostEqual(autotrade._atr(base)["span_atr"],
+                               autotrade._atr(scaled)["span_atr"], places=6)
+
+    def test_degenerate_inputs(self):
+        self.assertFalse(autotrade._atr([])["ok"])
+        self.assertFalse(autotrade._atr(bars_up(1))["ok"])
+        self.assertEqual(autotrade._atr(bars_up(1))["atr"], 0.0)
+
+    def test_structure_line_exposes_the_ratio(self):
+        text = autotrade._structure_text(bars_up(14))
+        self.assertIn("倍单根均幅", text)
+        self.assertIn("7.5 倍", text)
+
+
+class TestFeatureSnapshot(unittest.TestCase):
+    def test_all_fields_for_offline_analysis(self):
+        """快照必须自带分析所需的全部维度，否则落盘等于白落。"""
+        snap = autotrade.feature_snapshot(bars_up(20), autotrade.Cfg())
+        for key in ("ok", "symbol", "tf", "n", "win", "er", "drift", "pos",
+                    "span", "streak", "path", "r1", "r5", "r13",
+                    "atr", "span_atr", "regime", "prog_dir"):
+            self.assertIn(key, snap)
+        self.assertTrue(snap["ok"])
+        self.assertEqual(snap["n"], 14)
+        self.assertEqual(snap["symbol"], "XAUUSDm")
+        self.assertEqual(snap["regime"], "trend")     # 一路上涨
+
+    def test_window_bounds_are_the_real_14(self):
+        """win 记的是实际用到的窗口，事后核对「这笔决策看的哪 14 分钟」靠它。"""
+        rows = bars_up(40)
+        snap = autotrade.feature_snapshot(rows, autotrade.Cfg())
+        self.assertEqual(snap["win"], [rows[-14]["time"], rows[-1]["time"]])
+
+    def test_values_are_rounded(self):
+        """日志是给机器算也是给人看的，长尾小数只会把文件撑大。"""
+        snap = autotrade.feature_snapshot(bars_up(14), autotrade.Cfg())
+        for key in ("er", "pos", "span_atr"):
+            self.assertLessEqual(len(str(snap[key])), 8, key)
+
+    def test_degenerate_rows(self):
+        self.assertFalse(autotrade.feature_snapshot([])["ok"])
+        self.assertFalse(autotrade.feature_snapshot(bars_up(1))["ok"])
+
+    def test_mtf_info_is_embedded(self):
+        snap = autotrade.feature_snapshot(
+            bars_up(14), autotrade.Cfg(),
+            mtf={"tf": "M5", "er": 0.6, "pos": 0.8, "regime": "单边上行"})
+        self.assertEqual(snap["mtf"]["regime"], "单边上行")
+
+
+class TestFeatureSnapshotLands(TempLedger):
+    """快照必须真的写进日志——算出来不落盘，等于没算。"""
+
+    def test_open_row_carries_snapshot(self):
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"p_up": 0.7, "act": True,
+                                             "agree": True, "reason": "结构支持",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open",
+                               return_value={"ok": True, "order": 7, "price": 4040.0}), \
+             mock.patch.object(autotrade, "_mtf_bundle",
+                               return_value={"text": "", "info": None}):
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4040.0, 4040.24), rows=bars_up(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "open")
+        feat = row["feat"]
+        self.assertTrue(feat["ok"])
+        self.assertEqual(feat["n"], 14)
+        self.assertIn("er", feat)
+        self.assertIn("span_atr", feat)
+
+    def test_skip_row_carries_snapshot(self):
+        """被闸门拦掉的单也要留特征——否则没法回答「min_edge 是不是误杀」。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"p_up": 0.52, "act": True,
+                                             "agree": True, "reason": "轻微看多",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "_mtf_bundle",
+                               return_value={"text": "", "info": None}):
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4040.0, 4040.24), rows=bars_up(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "skip")
+        self.assertIn("信号不够强", row["reason"])
+        self.assertTrue(row["feat"]["ok"])
+
+
+class TestMtfBackground(unittest.TestCase):
+    def test_degrades_silently_when_terminal_down(self):
+        """终端没连时不给背景，也不写"不可用"——那会让模型去想缺了什么。"""
+        with mock.patch.object(autotrade, "_bars", side_effect=RuntimeError("no mt5")):
+            b = autotrade._mtf_bundle("XAUUSDm")
+        self.assertEqual(b["text"], "")
+        self.assertIsNone(b["info"])
+
+    def test_too_few_bars_gives_nothing(self):
+        with mock.patch.object(autotrade, "_bars", return_value=bars_up(3)):
+            self.assertEqual(autotrade._mtf_bundle("XAUUSDm")["text"], "")
+
+    def test_one_line_with_er_no_raw_bars(self):
+        with mock.patch.object(autotrade, "_bars", return_value=bars_up(20)):
+            b = autotrade._mtf_bundle("XAUUSDm", 0.35, 3)
+        self.assertTrue(b["text"].startswith("【背景】M5 14 根"))
+        self.assertIn("ER=", b["text"])
+        self.assertEqual(b["text"].count("\n"), 0)      # 只有一行，没有 K 线表
+        self.assertNotIn("T-13", b["text"])
+        self.assertEqual(b["info"]["tf"], "M5")
+        self.assertEqual(b["info"]["n"], 14)
+
+    def test_prompt_bar_count_unchanged(self):
+        """加了 M5 背景后，M1 的 K 线行数必须还是 14——边界没有松动。"""
+        with mock.patch.object(autotrade, "_bars", return_value=bars_up(20)):
+            mtf = autotrade._mtf_text("XAUUSDm")
+        p = autotrade.build_entry_prompt(bars_up(20), 4040.0, 4040.24,
+                                         mtf_text=mtf)
+        lines = re.findall(r"^(?:T-\d+|当前)\s+\d{2}-\d{2}", p, re.M)
+        self.assertEqual(len(lines), 14)
+        self.assertIn("【背景】M5", p)
+        self.assertNotIn("T-14", p)
+
+
+class TestSystemFollowsCfg(unittest.TestCase):
+    def test_no_hardcoded_symbol_in_templates(self):
+        """三个 system 模板里不许再出现具体品种名（加 BTC 时漏改过的 bug）。"""
+        for name in ("ENTRY_SYSTEM", "EXIT_SYSTEM", "REVIEW_SYSTEM"):
+            tmpl = getattr(autotrade, name)
+            self.assertIn("{SYMBOL_LABEL}", tmpl, name)
+            self.assertNotIn("XAUUSD", tmpl, name)
+
+    def test_gold_renders_gold(self):
+        text = autotrade.system_for(autotrade.ENTRY_SYSTEM, autotrade.Cfg())
+        self.assertIn("黄金 XAUUSD", text)
+        self.assertNotIn("{SYMBOL_LABEL}", text)
+
+    def test_btc_renders_btc(self):
+        """选 BTC 时不能再告诉模型"你是黄金交易员"。
+
+        只检查开头那行自我介绍。正文里"黄金实盘口径"是标注实测来源的，
+        留着才对——它提醒模型这个数字是别的品种跑出来的。
+        """
+        cfg = autotrade.Cfg(symbol="BTCUSDm")
+        for name in ("ENTRY_SYSTEM", "EXIT_SYSTEM", "REVIEW_SYSTEM"):
+            first = autotrade.system_for(getattr(autotrade, name), cfg).splitlines()[0]
+            self.assertIn("BTCUSD", first, name)
+            self.assertNotIn("XAUUSD", first, name)
+            self.assertNotIn("黄金", first, name)
+
+    def test_exit_thresholds_follow_cfg(self):
+        """出场阈值同理：cfg 改了 system 必须跟着改，否则就是在骗模型。"""
+        cfg = autotrade.Cfg(sl_usd=5.0, tp_min_usd=4.5, max_hold_sec=1800)
+        text = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg)
+        self.assertIn("浮亏达到 5 USD", text)
+        self.assertIn("浮盈不到 4.5 USD", text)
+        self.assertIn("持仓满 30 分钟", text)
+        self.assertNotIn("{SL_USD}", text)
+        self.assertNotIn("{TP_MIN_USD}", text)
+        self.assertNotIn("{MAX_HOLD_MIN}", text)
+
+    def test_unknown_symbol_falls_back_to_code(self):
+        text = autotrade.system_for(autotrade.ENTRY_SYSTEM,
+                                    autotrade.Cfg(symbol="WHATEVER"))
+        self.assertIn("WHATEVER", text)
 
 
 if __name__ == "__main__":
