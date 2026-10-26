@@ -253,6 +253,21 @@ def disconnect() -> None:
 # ------------------------------------------------------------------ 账户
 
 
+def is_demo_mode(trade_mode) -> bool:
+    """MT5 `trade_mode` → 这个账户是不是虚拟资金。
+
+    0 = DEMO，1 = CONTEST（比赛盘，也是虚拟），2 = REAL。
+    只有 REAL 才是真钱。
+
+    **未知取值一律返回 False（=按真实处理）**：把真钱当假钱会让人放松警惕，
+    比反过来危险得多。
+    """
+    try:
+        return int(trade_mode) in (0, 1)
+    except (TypeError, ValueError):
+        return False
+
+
 def account_snapshot(allow_launch: bool = False) -> dict:
     """当前账户状态快照。"""
     mt5 = _mt5(allow_launch)
@@ -272,7 +287,10 @@ def account_snapshot(allow_launch: bool = False) -> dict:
         "margin_level": round(ai.margin_level, 2) if ai.margin_level else 0.0,
         "profit": round(ai.profit, 2),
         "leverage": ai.leverage,
-        "is_demo": ai.trade_mode != 0,  # trade_mode: 0=DEMO 1=CONTEST 2=REAL
+        # 原来写 `ai.trade_mode != 0`，方向是反的：DEMO(0) 被算成 False→"不是模拟"，
+        # 真实账户(2) 反而被算成 True→"是模拟"。实测本账户 trade_mode=0、
+        # server=Exness-MT5Trial5（模拟盘），却被记成 is_demo=false。
+        "is_demo": is_demo_mode(ai.trade_mode),
         "trade_mode": {0: "demo", 1: "contest", 2: "real"}.get(ai.trade_mode, str(ai.trade_mode)),
         "terminal_connected": bool(ti and ti.connected),
         "ts": int(time.time()),

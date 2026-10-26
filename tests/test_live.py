@@ -8,11 +8,34 @@ from tests._stubs import install_missing_stubs
 
 install_missing_stubs()  # 没装 MetaTrader5 / openai 时用最小桩，别让无关用例变红
 
-from live.journal import Trade, _reason, build_trades
+from live.journal import Trade, _reason, build_trades, is_demo_mode
 from live.stats import compute, risk_flags
 
 DAY = 86400
 T0 = 1_790_000_000
+
+
+class TestIsDemoMode(unittest.TestCase):
+    """账户类型判定。写反了会把真钱当假钱——这是最不能错的一格。
+
+    实测 bug：原逻辑 `trade_mode != 0`，而 MT5 里 DEMO 恰好等于 0，
+    于是模拟盘被标成"不是模拟"，真实账户反而被标成"是模拟"，两个方向全反。
+    """
+
+    def test_mt5_constants(self):
+        self.assertTrue(is_demo_mode(0))     # ACCOUNT_TRADE_MODE_DEMO
+        self.assertTrue(is_demo_mode(1))     # ACCOUNT_TRADE_MODE_CONTEST
+        self.assertFalse(is_demo_mode(2))    # ACCOUNT_TRADE_MODE_REAL
+
+    def test_unknown_value_is_treated_as_real(self):
+        """认不出来就当真实处理：把真钱当假钱比反过来危险。"""
+        self.assertFalse(is_demo_mode(None))
+        self.assertFalse(is_demo_mode("xx"))
+        self.assertFalse(is_demo_mode(99))
+
+    def test_accepts_numeric_string(self):
+        self.assertTrue(is_demo_mode("0"))
+        self.assertFalse(is_demo_mode("2"))
 
 
 def deal(ticket, pid, typ, entry, vol, price, profit=0.0, t=T0, comment="", swap=0.0):
