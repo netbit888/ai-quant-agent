@@ -1483,9 +1483,21 @@ class TestStructure(unittest.TestCase):
             '{"act": true, "p_up": 0.6, "reason": "x"}')["agree"])
 
     def test_system_forbids_one_side_locking(self):
-        """提示词必须明说"机会对等"，否则教训里的偏空描述会锁死方向。"""
-        self.assertIn("贴下沿 ≠ 买点", autotrade.ENTRY_SYSTEM)
-        self.assertIn("机会是对等的", autotrade.ENTRY_SYSTEM)
+        """提示词必须明说"机会对等"，否则教训里的偏空描述会锁死方向。
+
+        实测 10-26：p_up<0.5 的 38 次机会一次空单都没开。旧文案那句
+        「贴下沿 ≠ 买点，贴上沿 ≠ 卖点」是无条件的，模型读成"贴顶不许做空"，
+        连震荡市（ER≈0）的高抛都一起禁了——把「低买高卖」废掉一半。
+        """
+        sys = autotrade.ENTRY_SYSTEM
+        self.assertIn("机会是对等的", sys)
+        # 震荡市必须显式允许贴边动手，这是唯一能"到了就做"的情形
+        self.assertIn("震荡市贴边就动手", sys)
+        self.assertIn("贴着上沿做空不叫追空", sys)
+        # 看跌 ≠ 不做，这句是把 p_up 语义钉死的
+        self.assertIn("看跌就要考虑做空", sys)
+        # 趋势里"等反抽"不能被读成"永不出手"
+        self.assertIn("不等于永远不做", sys)
 
 
 class TestPromptPriority(unittest.TestCase):
