@@ -53,10 +53,14 @@ class Cfg:
 
     symbol: str = "XAUUSDm"
     lots: float = 0.01
-    interval_sec: int = 5
+    # 决策节奏。用户 10-26 明确要求默认 60 秒：3 秒那个档位一轮决策约 2.6 秒，
+    # 等于不间断连打模型，一天上万次调用，而且平仓后 30 秒冷却根本插不进去。
+    interval_sec: int = 60
     cooldown_sec: int = 30
     magic: int = 20261022
-    dry_run: bool = True
+    # 用户 10-26 明确要求默认真实做单。**面板启动前仍要过一次确认弹窗**，
+    # 且纸面/真实二选一始终留在界面上——默认值只是省一次点击，不是免确认。
+    dry_run: bool = False
     tf: str = "M1"
     # 只取 14 根就够：AI 只允许看当前 + 前 13 根。多取没意义，
     # 反正 prompt 层还会再截一次（见 visible_bars）。
@@ -3496,7 +3500,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     running = bool(state.get("running"))
     stale = running and state.get("owner") == "panel" and not WORKER.alive()
     saved_cfg = state.get("cfg") or {}
-    dry_run = bool(saved_cfg.get("dry_run")) if "dry_run" in saved_cfg else True
+    # 旧 state 没有这个字段时回退到**当前**默认（默认真实），
+    # 写死 True 会让面板显示"真实"而实际按纸面跑，是最坏的那种谎。
+    dry_run = bool(saved_cfg.get("dry_run")) if "dry_run" in saved_cfg else Cfg.dry_run
     pending = state.get("pending_reviews") or []
     # 旧 state 里没有新加的字段，缺的时候要回退到当前默认值
     _defaults = Cfg()
@@ -3730,7 +3736,7 @@ def trade_detail(ticket: int, login: int | str | None = None,
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="AI 实时做单（默认纸面，不发真单）")
+    parser = argparse.ArgumentParser(description="AI 实时做单（默认真实下单；加 --paper 只记账）")
     parser.add_argument("--symbol", default="XAUUSDm")
     parser.add_argument("--lots", type=float, default=0.01)
     parser.add_argument("--interval", type=int, default=Cfg.interval_sec,
@@ -3739,14 +3745,16 @@ def main() -> None:
     parser.add_argument("--max-trades", type=int, default=0, help="开仓笔数上限，0=不限")
     parser.add_argument("--max-loss", type=float, default=0.0, help="累计亏损上限 USD，0=不限")
     parser.add_argument("--max-minutes", type=int, default=0, help="运行时长上限分钟，0=不限")
-    parser.add_argument("--live", action="store_true", help="关掉纸面模式，真发单（危险）")
+    # 用户 10-26 要求默认真实下单，所以这个开关反过来了：
+    # 以前要 --live 才发真单，现在要 --paper 才不发单。
+    parser.add_argument("--paper", action="store_true", help="只记账不发单（纸面模式）")
     parser.add_argument("--status", action="store_true", help="只看状态，不跑")
     parser.add_argument("--once", action="store_true", help="只跑一轮")
     args = parser.parse_args()
 
     cfg = Cfg(
         symbol=args.symbol, lots=args.lots, interval_sec=args.interval,
-        cooldown_sec=args.cooldown, dry_run=not args.live,
+        cooldown_sec=args.cooldown, dry_run=args.paper,
         max_trades=args.max_trades, max_loss_usd=args.max_loss,
         max_minutes=args.max_minutes,
     )

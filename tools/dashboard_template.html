@@ -961,23 +961,23 @@
       </label>
       <div class="at-mode" role="radiogroup" aria-label="做单模式">
         <label title="只调模型、只在本地记账，不发单给券商">
-          <input type="radio" name="atMode" id="atModePaper" value="paper" checked
+          <input type="radio" name="atMode" id="atModePaper" value="paper"
                  onchange="updateModeHint()"> 纸面
         </label>
         <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
-          <input type="radio" name="atMode" id="atModeLive" value="live"
+          <input type="radio" name="atMode" id="atModeLive" value="live" checked
                  onchange="updateModeHint()"> 真实做单
         </label>
       </div>
-      <span class="mini" id="atModeHint">只调模型，不发单</span>
+      <span class="mini" id="atModeHint">向券商发真实市价单</span>
       <label class="mini at-int" title="两次决策之间的间隔。3 秒是物理下限：模型单次调用约 2.6 秒">
         间隔
         <select id="atInterval" onchange="updateCostHint()">
           <option value="3">3 秒</option>
-          <option value="5" selected>5 秒</option>
+          <option value="5">5 秒</option>
           <option value="10">10 秒</option>
           <option value="30">30 秒</option>
-          <option value="60">60 秒</option>
+          <option value="60" selected>60 秒</option>
         </select>
       </label>
       <span class="at-sep"></span>
@@ -2226,7 +2226,9 @@ function atLiveMode() {
 
 function atIntervalSec() {
   const v = parseInt(($('atInterval') || {}).value, 10);
-  return Number.isFinite(v) && v >= 3 ? v : 5;
+  // 兜底要和 Cfg.interval_sec 一致（60）。写 5 的话，选择器一旦读不到值，
+  // 界面显示 60 秒、实际按 5 秒连打模型——数字对不上是最难查的那类 bug。
+  return Number.isFinite(v) && v >= 3 ? v : 60;
 }
 
 /* 把代价直接写在选择器旁边。

@@ -224,8 +224,9 @@ class TestNextWait(unittest.TestCase):
         self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(interval_sec=3)), [])
         self.assertEqual(len(autotrade.validate_cfg(autotrade.Cfg(interval_sec=2))), 1)
 
-    def test_default_interval_is_fast(self):
-        self.assertEqual(autotrade.Cfg().interval_sec, 5)
+    def test_default_interval_is_60s(self):
+        """用户 10-26 明确要求默认 60 秒。3 秒档等于不间断连打模型。"""
+        self.assertEqual(autotrade.Cfg().interval_sec, 60)
 
     def test_cooldown_never_longer_than_interval(self):
         # 冷却配得比周期还长时，也不能让等待超过一个周期

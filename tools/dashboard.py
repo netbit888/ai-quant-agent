@@ -465,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
                 lots=float(body.get("lots") or 0.01),
                 interval_sec=int(body.get("interval_sec") or autotrade.Cfg.interval_sec),
                 cooldown_sec=int(body.get("cooldown_sec") or 30),
-                dry_run=bool(body.get("dry_run", True)),
+                dry_run=bool(body.get("dry_run", False)),
                 max_trades=int(body.get("max_trades") or 0),
                 max_loss_usd=float(body.get("max_loss_usd") or 0.0),
                 max_minutes=int(body.get("max_minutes") or 0),
