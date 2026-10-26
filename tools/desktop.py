@@ -134,6 +134,9 @@ def run_window(*, url: str, title: str, js_api, on_window, on_closing,
         url,
         width=1480,
         height=920,
+        # 默认最大化：这是个看板，宽屏能同时放下状态带 + 流水表。
+        # width/height 仍然有用——用户点「还原」时回到这个尺寸。
+        maximized=True,
         # 1120 是 .at-bar 折行的临界值（flex-wrap），再小程序顶部会变两行
         min_size=(1120, 720),
         js_api=js_api,

@@ -201,6 +201,14 @@
     background: linear-gradient(90deg, var(--border), transparent);
   }
   svg { width: 100%; height: 156px; display: block; overflow: visible; }
+
+  /* ---- 滚动条 ----
+     原生窗口里不需要浏览器那种粗滚动条：默认最大化 + 宽屏，正文基本一屏装得下，
+     偶尔超出的地方（长表格、参数详情、弹窗）用滚轮就能滚。
+     注意：`width/height: 0` 只藏视觉，**滚动能力不变**；
+     真用 `display:none` 在部分内核上会连滚动一起废掉，别改。 */
+  *::-webkit-scrollbar { width: 0; height: 0; }
+  * { scrollbar-width: none; }          /* Firefox / 新版 WebView2 */
   .grid-line { stroke: rgba(120,160,200,.09); stroke-width: 1; }
   .zero-line { stroke: rgba(140,170,200,.42); stroke-width: 1; stroke-dasharray: 4 4; }
   .line-up { fill: none; stroke: var(--up); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(46,204,113,.55)); }
