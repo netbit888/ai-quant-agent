@@ -1,5 +1,8 @@
 # Python 依赖（版本为 2026-10-21 迁移时从 .venv 实测核对，非猜测值）
-# DeepSeek 走 OpenAI 兼容接口；MetaTrader5 仅 Windows 需要
+# DeepSeek / 智谱都走 OpenAI 兼容接口；MetaTrader5 和 pywebview 仅 Windows 需要
 openai==3.35.1
 MetaTrader5==5.0.6231 ; sys_platform == "win32"
 numpy==2.5.4
+# 原生窗口（Edge WebView2 后端）。打包才需要，源码态 `--web` 模式可以不装，
+# 但 `tools/desktop.py` 是延迟 import，装了才能用 --native 调试窗口。
+pywebview==6.2.1 ; sys_platform == "win32"

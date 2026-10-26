@@ -15,7 +15,7 @@ MT5 的 Python 接口（`mt5.login`）需要账号的**密码**才能切换登�
       index.json                 账户索引（login → 服务器/币种/首次与最后出现时间）
       profile.json               品种画像（全局，不分账户）
       accounts/
-        232307606/               每个账户一套完整账本
+        <login>/                 每个账户一套完整账本
           deals.jsonl
           daily.json  account.json  account_daily.json
           quality_daily.json  advice.json  api_calls.jsonl

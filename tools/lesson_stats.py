@@ -17,7 +17,7 @@
 用法
 ----
     .venv/Scripts/python.exe -m tools.lesson_stats
-    .venv/Scripts/python.exe -m tools.lesson_stats --login 277733809 --json
+    .venv/Scripts/python.exe -m tools.lesson_stats --login <login> --json
 """
 
 from __future__ import annotations

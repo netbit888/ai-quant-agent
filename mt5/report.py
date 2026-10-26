@@ -1,7 +1,7 @@
 """解析 MT5 策略测试器导出的 HTML 报告
 
 用法：
-    python -m mt5.report data/reports/ReportTester-277733809.html
+    python -m mt5.report data/reports/ReportTester-<login>.html
     python -m mt5.report data/reports/xxx.html --json out.json
 
 MT5 报告特点：

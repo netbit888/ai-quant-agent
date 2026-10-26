@@ -6,7 +6,7 @@
 ## 一、基准数据来源
 
 MT5 策略测试器导出的原始报告：
-`data/reports/ReportTester-277733809.html`
+`data/reports/ReportTester-<login>.html`
 
 | 项 | 值 |
 |---|---|

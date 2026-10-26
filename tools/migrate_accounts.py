@@ -15,8 +15,8 @@
 
 用法
 ----
-    python -m tools.migrate_accounts --other 232307606          # 自动识别当前账户
-    python -m tools.migrate_accounts --current 419219926 --other 232307606
+    python -m tools.migrate_accounts --other <login>            # 自动识别当前账户
+    python -m tools.migrate_accounts --current <login> --other <旧账户>
     python -m tools.migrate_accounts --dry-run                  # 只看会做什么
 
 幂等：根目录旧文件处理后改名 `.legacy`，重复执行不会重复导入。

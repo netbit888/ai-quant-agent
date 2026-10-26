@@ -37,7 +37,3 @@ config/
 # 安装包产物
 dist/installer/
 installer/*.isl
-
-# 安装包产物
-dist/installer/
-installer/*.isl

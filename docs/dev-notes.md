@@ -19,7 +19,7 @@
   这是唯一能事后拆分混账的手段（曾因切账户不记录导致 160 条混进 1 条，全盘指标失真）
 - 用户在 MT5 终端里切账户，程序自动识别 `account_info().login`
 - 归档账户只离线读（`collect_offline`），不生成新 AI 复盘（POST 带归档账户直接 400）
-- 历史账户：232307606（已归档，76 笔，净 −119.03）、419219926（当前）
+- 历史账户 A（已归档，76 笔，净 −119.03）、历史账户 B（已归档）
 
 ## 用户的真实交易习惯（影响评分系统设计）
 
@@ -88,7 +88,7 @@
 
 | 数据 | 位置 | 处置 |
 |---|---|---|
-| 真实账户账本 | `data/live/`、`data/live_backup_231239/` | **珍贵，唯一副本，永不重生** |
+| 真实账户账本 | `data/live/`、`data/live_backup_<旧账户>/` | **珍贵，唯一副本，永不重生** |
 | 迭代证据 | `data/runs/`、`data/evaluations/` | 保留，简历素材 |
 | MT5 行情 CSV | `data/*.csv`（15MB） | 可再生：MT5 终端开着 + `python aqa.py data pull --symbol XAUUSDm --tf H4` |
 | 回测报告 | `data/reports/`（2.4MB） | 可再生：MT5 界面跑策略测试器导出 |
@@ -97,7 +97,7 @@
 
 ## 迁移记录（2026-10-21）
 
-从 `C:\Users\35688\WorkBuddy\2026-10-19-00-22-52\ai-quant-agent\`（WorkBuddy 会话目录）
+从 `C:\Users\<user>\WorkBuddy\2026-10-19-00-22-52\ai-quant-agent\`（WorkBuddy 会话目录）
 迁至 `D:\Projects\ai-quant-agent\`，首次纳入 git。旧目录保留两周后删除。
 桌面 `AI量化面板.bat` 路径已同步更新（备份：`AI量化面板.bat.bak`）。
 
