@@ -24,6 +24,20 @@
     --warn: #f0b429;
     --info: #4a9eff;
     --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    /* ---- 间距：4pt 网格。原来 9/10/11/12/13/14/15/17px 混用，
+       相邻两个卡片的间距全靠手感，扫起来没有节奏。 ---- */
+    --sp1: 4px;  --sp2: 8px;  --sp3: 12px;
+    --sp4: 16px; --sp5: 20px; --sp6: 24px;
+    /* ---- 字号：只有四档，够用且不会互相打架 ---- */
+    --fs-label: 11px;   /* 卡片小标题 / 表头 / 单位 */
+    --fs-body: 13px;    /* 正文 / 表格 */
+    --fs-num: 19px;     /* KPI 数字 */
+    --fs-num-lg: 26px;  /* 首屏主数字 */
+    /* ---- 圆角：两档。11/12/9/7/5 混用是"手抖"不是"设计" ---- */
+    --r1: 7px; --r2: 11px;
+    /* 层级强度：三档卡片的背景差。差一点点就够，不需要描边区分。 */
+    --surf1: rgba(22,31,44,.96);
+    --surf2: rgba(16,23,33,.92);
   }
   * { box-sizing: border-box; }
   html, body { min-height: 100%; }
@@ -36,6 +50,9 @@
     background-attachment: fixed;
     color: var(--text);
     font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    /* 数字一律等宽：表格里 1 和 8 宽度不同会让整列数字的位数对不齐，
+       扫一眼分不出 +3.33 和 +13.33。中文不受影响。 */
+    font-variant-numeric: tabular-nums;
     -webkit-font-smoothing: antialiased;
   }
   body::before {
@@ -86,9 +103,9 @@
   }
   .spacer { flex: 1; }
 
-  .tabs { display: flex; gap: 4px; margin: 18px 0 16px; padding: 4px;
+  .tabs { display: flex; gap: var(--sp1); margin: var(--sp4) 0 var(--sp4); padding: var(--sp1);
     background: rgba(255,255,255,.02); border: 1px solid var(--border);
-    border-radius: 10px; width: fit-content; }
+    border-radius: var(--r1); width: fit-content; }
   .tab {
     padding: 7px 16px; border-radius: 7px; cursor: pointer; font-size: 13px;
     background: transparent; color: var(--muted); border: 0;
@@ -97,56 +114,88 @@
   .tab:hover { color: var(--text); }
   .tab.active {
     color: #fff;
-    background: linear-gradient(180deg, rgba(74,158,255,.22), rgba(74,158,255,.08));
-    box-shadow: 0 0 0 1px rgba(74,158,255,.35) inset, 0 0 16px -4px rgba(74,158,255,.6);
+    background: rgba(74,158,255,.16);
+    box-shadow: 0 0 0 1px rgba(74,158,255,.3) inset;
   }
 
-  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
+  /* 轮次/阶段/耗时是「实时迭代」页的字段，实盘页留着它仨只是在抢宽度 */
+  body[data-view="live"] .iter-only { display: none; }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: var(--sp3); }
   .kpi {
     position: relative; overflow: hidden;
-    background: linear-gradient(180deg, rgba(20,28,39,.95), rgba(13,19,27,.95));
+    background: var(--surf2);
     border: 1px solid var(--border);
-    border-radius: 11px; padding: 15px 17px 14px;
-    transition: border-color .2s, transform .2s, box-shadow .2s;
+    border-radius: var(--r2); padding: 14px var(--sp4) var(--sp3);
+    transition: border-color .18s;
   }
   .kpi::before {
     content: ""; position: absolute; left: 0; top: 12px; bottom: 12px;
-    width: 2.5px; border-radius: 2px;
-    background: linear-gradient(180deg, var(--info), transparent);
-    opacity: .8;
+    width: 2px; border-radius: 2px;
+    background: linear-gradient(180deg, rgba(74,158,255,.5), transparent);
   }
-  .kpi:hover {
-    border-color: var(--border-hi);
-    transform: translateY(-1px);
-    box-shadow: 0 10px 26px -14px rgba(0,0,0,.9);
-  }
+  /* 悬停只换边框色，**不再位移**。这是盯盘面板不是官网落地页：
+     鼠标划过时卡片往上跳 1px，一屏几十个数字跟着抖，是纯干扰。 */
+  .kpi:hover { border-color: var(--border-hi); }
   .kpi .k {
-    font-size: 10.5px; color: var(--muted); text-transform: uppercase;
-    letter-spacing: 1.2px; font-weight: 600;
+    font-size: var(--fs-label); color: var(--muted);
+    letter-spacing: .5px; font-weight: 600;
   }
   .kpi .v {
-    font-size: 26px; font-weight: 700; margin-top: 7px;
+    font-size: var(--fs-num-lg); font-weight: 700; margin-top: 6px;
     font-family: var(--mono); letter-spacing: -.8px; line-height: 1.1;
   }
-  .kpi .s { font-size: 10.5px; color: var(--dim); margin-top: 3px; letter-spacing: .3px; }
-  .pos { color: var(--up); text-shadow: 0 0 18px rgba(46,204,113,.35); }
-  .neg { color: var(--down); text-shadow: 0 0 18px rgba(255,77,79,.3); }
-  .neut { color: var(--warn); text-shadow: 0 0 16px rgba(240,180,41,.25); }
+  .kpi .s { font-size: 11px; color: var(--dim); margin-top: var(--sp1); letter-spacing: .2px; }
+  /* 涨跌色：**不带光晕**。原来每条数字都在发 18px 的绿光/红光，一屏十几个
+     数字同时发光 = 全都是重点 = 没有重点，而且数字边缘会糊，扫读变慢。
+     只在首屏大数字（KPI 的 .v）上留一点点，用来标记"这一块是主数字"。 */
+  .pos { color: var(--up); }
+  .neg { color: var(--down); }
+  .neut { color: var(--warn); }
+  .idle { color: var(--muted); }
+  .kpi .v.pos { text-shadow: 0 0 22px rgba(46,204,113,.28); }
+  .kpi .v.neg { text-shadow: 0 0 22px rgba(255,77,79,.24); }
+  .kpi .v.neut { text-shadow: 0 0 20px rgba(240,180,41,.2); }
 
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp4); margin-top: var(--sp4); }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  /* 卡片分三档，判据不是"重要性"这种空话，是**看它的频率**：
+       l1（实时区）= 每 60 秒扫一眼 → 背景更亮、边框更亮、留白更大；
+       默认（判断区）= 一场看完一次；
+       l3（证据区）= 出问题才翻 → 脱掉卡片壳，只剩一条顶线，变成"段落"。
+     原来 30 个卡片边框/圆角/padding 全一样，视觉权重相等 = 谁都不突出。 */
   .card {
-    background: linear-gradient(180deg, rgba(18,25,35,.92), rgba(12,17,24,.92));
+    background: var(--surf2);
     border: 1px solid var(--border);
-    border-radius: 11px; padding: 17px 18px; margin-top: 14px;
-    box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+    border-radius: var(--r2); padding: var(--sp4) var(--sp4) 15px;
+    margin-top: var(--sp4);
   }
   .grid2 .card { margin-top: 0; }
+  .card.l1 {
+    background: var(--surf1);
+    border-color: var(--border-hi);
+    padding: var(--sp5) var(--sp5) var(--sp4);
+    box-shadow: 0 18px 48px -34px rgba(0,0,0,.95);
+  }
+  /* 证据区：不带壳、不缩进，靠一条顶线和上方 24px 的间距分章。
+     30 个同权重卡片变成三层结构，靠的就是这一条。 */
+  .card.l3 {
+    background: none; border: 0; border-radius: 0;
+    border-top: 1px solid var(--border);
+    padding: 15px 2px 0; margin-top: var(--sp6);
+  }
+  /* 网格里的证据块不能吃 24px 上边距，否则左右两栏顶线对不齐 */
+  .grid2 .card.l3 { margin-top: 0; }
   .card h2 {
-    margin: 0 0 14px; font-size: 10.5px; font-weight: 700;
-    color: var(--muted); text-transform: uppercase; letter-spacing: 1.4px;
+    margin: 0 0 var(--sp3); font-size: var(--fs-label); font-weight: 700;
+    color: var(--muted); letter-spacing: .5px;
     display: flex; align-items: center; gap: 8px;
   }
+  /* 实时区标题用正文色：它得压得住下面那堆数字 */
+  /* 实时区标题用正文色：它得压得住下面那堆数字 */
+  .card.l1 h2 { font-size: 12px; color: var(--text); letter-spacing: .3px; }
+  /* 证据区已经有顶线了，标题后面的渐隐横线是第二条线，去掉 */
+  .card.l3 h2::after { display: none; }
   .card h2::after {
     content: ""; flex: 1; height: 1px;
     background: linear-gradient(90deg, var(--border), transparent);
@@ -162,12 +211,40 @@
   .pt { fill: #0b111a; stroke: var(--info); stroke-width: 1.6; }
   .lbl { fill: var(--dim); font-size: 10px; font-family: var(--mono); }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 9px 11px; text-align: right; border-bottom: 1px solid rgba(30,42,56,.55); }
+  table { width: 100%; border-collapse: collapse; font-size: var(--fs-body); }
+  th, td { padding: 6px 12px; text-align: right; border-bottom: 1px solid rgba(30,42,56,.55);
+           white-space: nowrap; }
+  /* 理由列是长句，必须能换行；但得限宽，否则它会把「时间 / 动作 / 方向」
+     这些短列压到只剩一个字宽——中文可以在任意字之间断行，压缩的表现就是
+     表头还正常、每行第一列只剩「时」「间」上下两行。 */
+  #rowsAuto td:nth-child(7), #rowsAuto td:nth-child(8),
+  #rowsTrade td:nth-child(11), #rowsPos td:nth-child(9) {
+    white-space: normal; max-width: 340px; word-break: break-word;
+  }
+  /* 长文本和文本类列一律左对齐。右对齐对数字有意义（个位对个位），
+     对「窄幅震荡，收盘位置 50%」这种句子是灾难：每行末尾才对齐，
+     眼睛每次都要横向扫到最右边才能开始读。 */
+  .tbl-left, #rowsAuto td:nth-child(2), #rowsAuto td:nth-child(3),
+  #rowsAuto td:nth-child(6), #rowsAuto td:nth-child(7), #rowsAuto td:nth-child(8),
+  #rowsAuto th:nth-child(2), #rowsAuto th:nth-child(3),
+  #rowsAuto th:nth-child(6), #rowsAuto th:nth-child(7), #rowsAuto th:nth-child(8),
+  #rowsTrade td:nth-child(2), #rowsTrade td:nth-child(3),
+  #rowsTrade td:nth-child(8), #rowsTrade td:nth-child(11),
+  #rowsTrade th:nth-child(2), #rowsTrade th:nth-child(3),
+  #rowsTrade th:nth-child(8), #rowsTrade th:nth-child(11),
+  #rowsPos td:nth-child(2), #rowsPos td:nth-child(3),
+  #rowsPos th:nth-child(2), #rowsPos th:nth-child(3) { text-align: left; }
+  /* 空状态是整行一句话，不能被 td 的 nowrap 撑成一条超长的单行 */
+  .empty { white-space: normal; }
+  /* 直接装表格的卡片允许横向滚。表格现在所有格都不换行（不然中文会被压成
+     一个字一列），11 列的「最近平仓记录」在 1280 宽下会顶出卡片——
+     让卡片自己滚，别把整页撑出横向滚动条。 */
+  .card:has(> table) { overflow-x: auto; }
   th {
-    color: var(--muted); font-weight: 600; font-size: 10px;
-    text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted); font-weight: 600; font-size: 10.5px;
+    letter-spacing: .4px;
     border-bottom: 1px solid var(--border);
+    white-space: nowrap;
   }
   th:first-child, td:first-child { text-align: left; }
   tbody tr { transition: background .15s; }
@@ -233,21 +310,37 @@
   .card, .kpi { animation: rise .35s ease both; }
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-  /* ---------------- 实盘视图 ---------------- */
-  .acct {
-    display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
-    padding: 16px 20px; margin-bottom: 14px;
-    background: linear-gradient(135deg, rgba(24,36,52,.95), rgba(14,20,29,.95));
-    border: 1px solid var(--border); border-radius: 12px;
-    box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 8px 28px -14px rgba(0,0,0,.9);
+  /* 键盘可达性：只在键盘聚焦时画环（:focus-visible），鼠标点完不留蓝边。
+     面板上有六个会真动钱的按钮，看不见焦点等于不能用键盘操作。 */
+  :focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+  button:focus:not(:focus-visible) { outline: none; }
+
+  /* 尊重系统「减少动态效果」：一屏三十个卡片同时淡入，对前庭敏感的人是干扰 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
   }
-  .acct .who { display: flex; flex-direction: column; gap: 3px; }
-  .acct .who b { font-size: 16px; letter-spacing: .5px; }
-  .acct .who span { font-size: 11.5px; color: var(--muted); }
-  .acct .figs { display: flex; gap: 26px; flex-wrap: wrap; margin-left: auto; }
-  .acct .fig { text-align: right; }
-  .acct .fig i { display: block; font-style: normal; font-size: 10.5px; color: var(--dim); letter-spacing: .6px; }
-  .acct .fig b { font-size: 19px; font-family: var(--mono); font-weight: 700; }
+
+  /* ---------------- 实盘视图 ---------------- */
+  /* 账户条：**不再做成 hero**。原来它有渐变 + 强阴影 + 19px 数字，
+     和 AI 交易员卡片抢同一屏的头把交椅——可它是静态的，几分钟才变一次。
+     现在它和普通卡片同一层级，让 l1 的实时区成为首屏唯一"抬起来"的面。 */
+  .acct {
+    display: flex; align-items: center; gap: var(--sp4); flex-wrap: wrap;
+    padding: var(--sp3) var(--sp4); margin-bottom: var(--sp4);
+    background: var(--surf2);
+    border: 1px solid var(--border); border-radius: var(--r2);
+  }
+  .acct .who { display: flex; flex-direction: column; gap: 2px; }
+  .acct .who b { font-size: 15px; letter-spacing: .3px; }
+  .acct .who span { font-size: 11px; color: var(--muted); }
+  .acct .figs { display: flex; gap: var(--sp4) var(--sp5); flex-wrap: wrap; margin-left: auto; }
+  .acct .fig { text-align: right; min-width: 68px; }
+  .acct .fig i { display: block; font-style: normal; font-size: var(--fs-label); color: var(--dim); letter-spacing: .4px; }
+  .acct .fig b { font-size: 16px; font-family: var(--mono); font-weight: 700; }
 
   .badge-mode {
     display: inline-flex; align-items: center; gap: 5px;
@@ -332,7 +425,8 @@
   }
   .btn-ghost:hover { background: rgba(74,158,255,.2); border-color: #4a9eff; }
   .btn-ghost:disabled { opacity: .45; cursor: default; }
-  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+               flex-wrap: wrap; margin-bottom: 12px; }
   .card-head h2 { margin: 0; }
   .pos-long { color: var(--up); }
   .pos-short { color: var(--down); }
@@ -526,8 +620,15 @@
   .at-mode label { display: flex; align-items: center; gap: 4px; font-size: 12.5px; cursor: pointer; }
   .at-mode input { accent-color: #4a9eff; margin: 0; cursor: pointer; }
   .at-int { display: flex; align-items: center; gap: 4px; }
+  /* 全局 select 的 min-width:300px 是给账户选择器的；套到「品种」「间隔」上
+     会把选择器拉成一条横贯整行的白条，把后面的按钮全部挤到第二行。 */
+  .at-int select { min-width: 0; }
   .at-int select { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
-                   border-radius: 4px; padding: 2px 4px; font-size: 12px; cursor: pointer; }
+                   border-radius: var(--r1); padding: 3px 6px; font-size: 12px; cursor: pointer; }
+
+  /* 成本提示单独占一行。它有三四十个字（"真实 · 黄金 XAUUSD · 每 60 秒判断 ·
+     约 60 次调用/小时…"），夹在控件中间会把「关闭并清仓」顶到下一行去。 */
+  .at-bar #atModeHint { flex: 1 0 100%; order: 99; color: var(--dim); }
 
   /* 模型切换条：不重启、不改 .env。放在卡头下面单独一行，
      因为这行要放输入框，塞进卡头会把「开始做单」挤走。 */
@@ -547,28 +648,214 @@
   /* 操作结果条：只由 start/stop 写，轮询不碰它 */
   .at-msg { margin: 0 0 10px; padding: 9px 12px; border-radius: 6px;
             font-size: 13px; line-height: 1.6; }
+
+  /* ---- AI 交易员卡片的排版 ----
+     原来卡头一行塞了「标题 + 状态 + 品种 + 模式单选 + 提示 + 间隔 + 5 个按钮
+     + 备注」，1440 宽以下必然折行，而且折完之后「关闭并清仓」会掉到第二行
+     最左边，跟「开始做单」隔着半个屏——那是个会真动钱的按钮，不能让它乱跑。
+     现在拆成两层：上层只放身份和状态，下层放全部控制项，用分隔线分成
+     「参数 | 运维」两组。 */
+  .at-head { align-items: center; }
+  .at-head-main { display: flex; align-items: center; gap: 10px;
+                  flex-wrap: wrap; min-width: 0; }
+  .at-head-note { margin-left: auto; text-align: right; line-height: 1.5;
+                  max-width: 46%; }
+  .at-bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
+    margin: 0 0 10px; padding: 9px 12px; border-radius: 6px;
+    background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.09);
+  }
+  .at-bar .at-sep { width: 1px; align-self: stretch; min-height: 20px;
+                    background: rgba(255,255,255,.12); }
+  .at-bar .at-grow { flex: 1 1 auto; }
+  .at-bar .btn-ghost { margin: 0; }
+
+  /* 三条出场闸门做成常驻胶囊：这是每 60 秒都在用的数字，不该埋在一段
+     小字里让人找。详细规则收进下面的折叠块，默认收起。 */
+  .at-gates { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+  .at-gate { display: inline-flex; align-items: baseline; gap: 6px;
+             padding: 4px 10px; border-radius: 999px; font-size: 12px;
+             color: var(--muted);
+             background: rgba(255,255,255,.04);
+             border: 1px solid rgba(255,255,255,.1); }
+  .at-gate b { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .at-gate.sl b { color: var(--bad); }
+  .at-gate.tp b { color: var(--good); }
+  .at-gate.guard b { color: var(--info); }
+  .at-gate.off { opacity: .45; }
+  .at-gate.off b { color: var(--muted); text-decoration: line-through; }
+
+  .at-rules summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+  .at-rules summary:hover { color: var(--text); }
+  .at-rules[open] summary { margin-bottom: 7px; }
+  .at-rules .at-rules-body { font-size: 11.5px; color: var(--dim);
+                             line-height: 1.75; padding-left: 2px; }
+  .at-rules .at-rules-body b { color: var(--muted); }
+
+  /* 运行计数行：每段之间用间隔号分开，空段由 JS 置空后不会留下孤立的分隔符 */
+  .at-status { display: flex; flex-wrap: wrap; align-items: baseline;
+               gap: 2px 4px; margin: 0 0 10px; min-height: 1px; }
+  .at-status span:not(:empty) + span:not(:empty)::before {
+    content: '·'; margin-right: 4px; color: var(--dim);
+  }
+
+  /* 流水表上方的过滤条：左边开关、右边"共 N 条 / 显示 M 条" */
+  .tbl-bar { display: flex; align-items: center; gap: var(--sp3);
+             margin: var(--sp2) 0 6px; }
+  .tbl-bar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .tbl-bar input { accent-color: var(--info); margin: 0; cursor: pointer; }
+  .tbl-bar #atRowsHint { margin-left: auto; color: var(--dim); }
+
+  /* ---- 常驻状态带（sticky）----
+     第一性原理：这个面板 90% 的使用场景是「瞄一眼」。要回答的只有一句
+     「在跑吗、有没有仓、现在多少」。但原来这条信息要滚回页面顶部才看得到——
+     看完流水第 200 行想确认一下持仓，得往上滑一屏。
+     所以把它做成 sticky 的一条，贴在视口顶端，滚到哪儿都跟着。
+     它只属于实盘视图（是 #view-live 的第一个子元素），切到别的 tab 自然没有。 */
+  .statusbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: var(--sp2) var(--sp3); flex-wrap: wrap;
+    margin: 0 0 var(--sp4); padding: 8px var(--sp4);
+    border-radius: var(--r1);
+    background: rgba(9,13,19,.9);
+    -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    border: 1px solid var(--border-hi);
+    box-shadow: 0 16px 32px -24px #000;
+    font-size: 12px;
+  }
+  .statusbar .sb-dot { width: 7px; height: 7px; border-radius: 50%;
+                       background: var(--dim); flex: 0 0 auto; }
+  .statusbar.on .sb-dot { background: var(--good); box-shadow: 0 0 10px rgba(46,204,113,.85); }
+  .statusbar.on .sb-state { color: var(--good); }
+  .statusbar.warn .sb-dot { background: var(--warn); box-shadow: 0 0 10px rgba(240,180,41,.8); }
+  .statusbar.warn .sb-state { color: var(--warn); }
+  .statusbar .sb-state { font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .statusbar .sb-sep { width: 1px; align-self: stretch; min-height: 16px; background: var(--border); }
+  .statusbar .sb-grow { flex: 1 1 auto; }
+  .statusbar .sb-k { color: var(--dim); font-size: 11px; }
+  .statusbar .sb-v { font-family: var(--mono); font-weight: 600; }
+  .statusbar .btn-ghost { margin: 0; padding: 4px 10px; font-size: 11.5px; }
   .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
   .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
   .at-msg b { color: #fff; }
 
-  /* 全屏提醒幕布：铺满整块屏幕的红字，防止人在它做单时误操作。
-     用黑底而不是纯红底：红底看久了眼睛累，黑底红字对比度更高、也更像警告。 */
-  .curtain { position: fixed; inset: 0; z-index: 9999; display: flex;
-             align-items: center; justify-content: center; text-align: center;
-             padding: 4vw; background: #08090c; }
+  /* ---- 全屏提醒幕布 ----
+     目的只有一个：**别让人误操作这台电脑**。所以第一版把「AI 交易员正在交易」
+     做成 150px 红字是搞反了主角——路过的家人读到的应该是「别动」，
+     而不是「有个 AI 在交易」。现在主标题是「请勿操作这台电脑」。
+     颜色也换了语义：红色只表示**异常**（AI 已停止），正常运行时用近白 + 琥珀，
+     否则真出事的时候没有更强的信号可用。 */
+  .curtain {
+    position: fixed; inset: 0; z-index: 9999;
+    display: grid; grid-template-rows: auto 1fr auto;
+    padding: clamp(20px, 2.6vw, 44px) clamp(24px, 3.4vw, 64px);
+    background:
+      radial-gradient(1200px 620px at 50% 0%, rgba(255,45,45,.07), transparent 70%),
+      #07080b;
+    color: #e8eef6;
+    overflow: hidden;
+  }
   .curtain.hidden { display: none; }
-  .curtain-kicker { font-family: var(--mono); font-size: clamp(14px, 1.4vw, 22px);
-                    letter-spacing: .3em; color: #6b7686; margin-bottom: 2.4vh; }
-  .curtain-title { font-size: clamp(44px, 9.5vw, 150px); line-height: 1.06;
-                   font-weight: 900; letter-spacing: .03em; color: #ff2d2d;
-                   text-shadow: 0 0 60px rgba(255,45,45,.45); }
-  .curtain-sub { font-size: clamp(28px, 5.6vw, 88px); line-height: 1.15;
-                 font-weight: 800; color: #ffd7d7; margin-top: 1.6vh; }
-  .curtain-stat { margin-top: 4vh; font-size: clamp(15px, 1.9vw, 30px); line-height: 1.9;
-                  color: #c9d3de; }
-  .curtain-stat b { color: #fff; }
-  .curtain-hint { margin-top: 4vh; font-size: clamp(13px, 1.3vw, 20px); color: #6b7686; }
-  .curtain-hint b { color: #9fb0c2; }
+
+  /* 顶部状态条：这屏是「活的」还是「死的」，一眼能看出来。
+     时钟放在最右且用等宽字——离开一会儿回来，第一眼看的就是时间。 */
+  .cur-top {
+    display: flex; align-items: center; gap: clamp(10px, 1.2vw, 20px);
+    font-size: clamp(13px, 1.15vw, 20px); color: var(--muted);
+  }
+  .cur-state { display: inline-flex; align-items: center; gap: 10px; }
+  .cur-state b { color: #cfd9e4; font-weight: 600; }
+  .cur-dot {
+    width: clamp(8px, .7vw, 12px); aspect-ratio: 1; border-radius: 50%;
+    background: var(--good); box-shadow: 0 0 14px rgba(46,204,113,.9);
+    animation: pulse 1.6s infinite;
+  }
+  .cur-sep { width: 1px; height: 1.1em; background: rgba(255,255,255,.16); }
+  .cur-grow { flex: 1 1 auto; }
+  .cur-clock {
+    font-family: var(--mono); font-size: clamp(18px, 1.9vw, 34px);
+    color: #e8eef6; letter-spacing: .02em;
+  }
+
+  .cur-mid {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; min-height: 0;
+    padding: clamp(12px, 2vw, 40px) 0;
+  }
+  .cur-title {
+    margin: 0; font-weight: 900; color: #f4f8fc;
+    font-size: clamp(44px, 7.6vw, 148px);
+    line-height: 1.04; letter-spacing: -.02em;
+    text-wrap: balance; max-width: 13em;
+    text-shadow: 0 0 90px rgba(255,255,255,.06);
+  }
+  /* 停止状态：整块转红。红色在这个屏上只有一个意思——**出事了**。 */
+  .curtain.is-stopped .cur-title { color: #ff3b3b; text-shadow: 0 0 80px rgba(255,59,59,.35); }
+  .curtain.is-stopped .cur-dot {
+    background: var(--bad); box-shadow: 0 0 14px rgba(255,77,79,.95);
+    animation: none;
+  }
+  .cur-lead {
+    margin-top: clamp(14px, 2.2vh, 32px);
+    font-size: clamp(15px, 1.5vw, 26px); line-height: 1.6;
+    color: #93a3b6; max-width: 34em; text-wrap: balance;
+  }
+
+  /* 数字卡：路人只需要三个数——有没有仓、现在赚不赚、今天多少。
+     横排三块，等宽字体，扫一眼就够。 */
+  .cur-stat { margin-top: clamp(18px, 3.4vh, 56px); width: 100%; }
+  .cur-cards {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: clamp(10px, 1.4vw, 26px);
+  }
+  .cur-card {
+    display: flex; flex-direction: column; gap: clamp(4px, .6vh, 10px);
+    flex: 1 1 0; min-width: clamp(150px, 15vw, 240px); max-width: clamp(190px, 19vw, 330px);
+    padding: clamp(12px, 1.4vw, 24px) clamp(16px, 1.8vw, 32px);
+    border-radius: clamp(8px, .8vw, 14px);
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.1);
+  }
+  .cur-card i {
+    font-style: normal; font-size: clamp(11px, 1vw, 16px);
+    color: #7d8fa3; letter-spacing: .06em;
+  }
+  .cur-card b {
+    font-family: var(--mono); font-weight: 700;
+    font-size: clamp(22px, 2.5vw, 46px); line-height: 1.15;
+    color: #e8eef6;
+  }
+  /* 涨跌色必须写成 `.cur-card b.xxx`：`.cur-card b` 是「元素+类」，
+     特异性比单独的 `.pos` 高，直接写 class 会被压掉（"多"绿、"0.01"白）。 */
+  .cur-card b.pos, .cur-card b.pos-long { color: var(--up); }
+  .cur-card b.neg, .cur-card b.pos-short { color: var(--down); }
+  .cur-card b.idle, .cur-card b.neut { color: var(--muted); }
+  .cur-card s {
+    text-decoration: none; font-size: clamp(11px, 1vw, 16px); color: #6b7686;
+    font-family: var(--mono);
+  }
+
+  .cur-bot {
+    display: flex; flex-direction: column; align-items: center;
+    gap: clamp(8px, 1.2vh, 16px); text-align: center;
+  }
+  .cur-rules {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: clamp(8px, 1.4vw, 26px);
+    font-size: clamp(12px, 1.05vw, 18px); color: #7d8fa3;
+  }
+  .cur-rules span::before { content: "·"; margin-right: 8px; color: #45525f; }
+  .cur-rules span:first-child::before { content: none; }
+  /* 停了就别再喊「别手动开平仓」——那时候手动平仓是正确动作 */
+  .curtain.is-stopped .cur-rules { display: none; }
+  .cur-exit { font-size: clamp(14px, 1.25vw, 22px); color: #a9b6c5; }
+  .cur-exit kbd {
+    font-family: var(--mono); font-size: .95em; color: #fff;
+    padding: 3px 12px; margin: 0 3px; border-radius: 6px;
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.18);
+    box-shadow: 0 1px 0 rgba(255,255,255,.14) inset;
+  }
 
 </style>
 </head>
@@ -600,9 +887,9 @@
 <header>
   <h1>AI Quant</h1>
   <span class="pill"><span id="dot" class="dot"></span><span id="statusText">连接中</span></span>
-  <span class="pill">轮次 <b id="roundInfo">-</b></span>
-  <span class="pill">阶段 <b id="phase">-</b></span>
-  <span class="pill">耗时 <b id="elapsed">-</b></span>
+  <span class="pill iter-only">轮次 <b id="roundInfo">-</b></span>
+  <span class="pill iter-only">阶段 <b id="phase">-</b></span>
+  <span class="pill iter-only">耗时 <b id="elapsed">-</b></span>
   <span class="spacer"></span>
   <span class="muted mono" id="updated" style="font-size:11.5px">-</span>
 </header>
@@ -615,6 +902,19 @@
 </div>
 
 <section id="view-live">
+  <!-- 常驻状态带：滚到哪里都能看到「在不在跑 / 有没有仓 / 现在多少」。
+       数字由 renderAutoTrade 填，和下面 AI 卡片同源，不会出现两处打架。 -->
+  <div class="statusbar" id="atBar">
+    <span class="sb-dot"></span>
+    <span class="sb-state" id="atBarState">未启动</span>
+    <span class="sb-sep"></span>
+    <span id="atBarPos"><span class="sb-k">空仓</span></span>
+    <span class="sb-sep"></span>
+    <span class="sb-k" id="atBarStat">—</span>
+    <span class="sb-grow"></span>
+    <button class="btn-ghost btn-danger" id="atBarStop" onclick="stopAutoTrade()"
+            title="停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）">关闭并清仓</button>
+  </div>
   <div class="acct" id="acct">
     <div class="who">
       <b class="mono" id="acctLogin">读取中…</b>
@@ -641,11 +941,20 @@
   <div class="acct-note" id="acctNote"></div>
 
   <!-- AI 交易员：自己猜方向、自己发市价单平仓。不挂止盈止损。
-       信息边界：只能看当前 K 线 + 之前 13 根；平仓后才可以回看更长一段做复盘。 -->
-  <div class="card">
-    <div class="card-head">
-      <h2>AI 交易员</h2>
-      <span class="badge-off" id="atState" style="display:none">未启动</span>
+       信息边界：只能看当前 K 线 + 之前 13 根；平仓后才可以回看更长一段做复盘。
+       class=l1：它是整个面板唯一的实时区，视觉权重最高。 -->
+  <div class="card l1">
+    <div class="card-head at-head">
+      <div class="at-head-main">
+        <h2>AI 交易员</h2>
+        <span class="badge-off" id="atState" style="display:none">未启动</span>
+      </div>
+      <!-- 常驻备注（经验库条数 / 停止原因）。归轮询写，所以单独一个槽位，
+           不跟控制按钮抢位置。 -->
+      <span class="mini at-head-note" id="atNote"></span>
+    </div>
+    <!-- 控制条：参数组 | 运维组。参数跑起来就锁死，运维按钮不锁。 -->
+    <div class="at-bar">
       <label class="mini at-int" title="做单品种。只列实测过 point/contract/spread 的品种——没测过的品种点差成本会算成 0，风险失控">
         品种
         <select id="atSymbol" onchange="updateCostHint()"></select>
@@ -671,13 +980,16 @@
           <option value="60">60 秒</option>
         </select>
       </label>
+      <span class="at-sep"></span>
       <button class="btn-ghost" id="atStart" onclick="startAutoTrade()">开始做单</button>
       <button class="btn-ghost btn-danger" id="atStop" onclick="stopAutoTrade()">关闭并清仓</button>
+      <span class="at-grow"></span>
       <button class="btn-ghost" id="atReset" onclick="resetAutoTrade()"
-              title="清空 AI 自己攒的教训和战绩（旧流水归档保留），换参数前用">重置</button>
+              title="清空 AI 的战绩统计（旧流水归档保留），换参数前用。经验不受影响">重置战绩</button>
+      <button class="btn-ghost" id="atResetLessons" onclick="resetLessons()"
+              title="只清 AI 攒的复盘教训，战绩和持仓都不动">清空经验</button>
       <button class="btn-ghost" id="atCurtainBtn" onclick="enterTradingFullscreen()"
               title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
-      <span class="mini" id="atNote"></span>
     </div>
     <!-- 模型切换：改这里就够了，不用动 .env、不用重启。
          key 输入框留空 = 沿用当前 key（只换模型时不用重填）。 -->
@@ -685,10 +997,10 @@
       <span class="mini">模型</span>
       <select id="atLlmProvider" onchange="onLlmProviderChange()"
               title="换供应商要填该家的 key；同一个 key 不能跨家通用"></select>
-      <input id="atLlmModel" list="atLlmModelList" class="mono" size="17" autocomplete="off"
+      <input id="atLlmModel" list="atLlmModelList" class="mono" size="15" autocomplete="off"
              placeholder="模型名" title="可以手输任意模型名，以平台控制台为准（免费档改名很勤）">
       <datalist id="atLlmModelList"></datalist>
-      <input id="atLlmKey" type="password" size="26" autocomplete="off"
+      <input id="atLlmKey" type="password" size="18" autocomplete="off"
              placeholder="API key（沿用当前就留空）">
       <button class="btn-ghost" id="atLlmSave" onclick="switchLlm()">应用</button>
       <span class="at-llm-now" id="atLlmNow">—</span>
@@ -704,17 +1016,22 @@
       <div class="kpi"><div class="k">方向命中率</div><div class="v mono" id="atHit">—</div><div class="s" id="atHitSub">只算模型自己决定的</div></div>
       <div class="kpi"><div class="k">累计盈亏</div><div class="v mono" id="atPnl">—</div><div class="s" id="atPnlSub">—</div></div>
     </div>
-    <div class="mini" style="margin:10px 0 6px">
-      规则：XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b>
-      · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
-      <br><b>出场有三个程序闸门（不问模型）</b>：浮亏 <b>−3.00 USD 硬止损</b> ·
-      持仓满 <b>60 分钟无条件平</b> · 浮盈不到 <b>3.25 USD 不许平</b>（继续持有）。
-      只有浮盈 ≥ 3.25 时才会问模型要不要落袋。参数是用当天真实 M1 K 线回放 191 笔入场扫出来的，
-      不是拍的——见 <code>tools/replay_exit.py</code>。
-      <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
-      <br><b>无视点差成本</b>（不由模型负责）· 止损是程序按浮亏主动市价平，<b>不给订单挂 SL/TP</b>（账本里仍是手动平仓）。
-      <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」，等这几根才看得出平得早还是平得对。等待期间照常分析行情做下一笔。
-      置灰的行是「跳过」——不花钱、没下单。
+    <!-- 出场闸门：做成常驻胶囊，数字由 renderAutoTrade 按实际 cfg 填。
+         放这里是因为这是每 60 秒都在用的三条线，不该埋在一段小字里让人找。
+         参数被关掉（sl_usd=0 等）时胶囊标 .off，不能显示一个不存在的规则。 -->
+    <div class="at-gates">
+      <span class="at-gate sl" id="atGateSl"
+            title="浮亏到线由程序直接市价平，不问模型。账本里仍记为「手动平仓」，不给订单挂 SL">硬止损 <b id="atGateSlV">−3.00</b></span>
+      <span class="at-gate guard" id="atGateGuard"
+            title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。决策间隔是 60 秒，这中间价格能跑完一整根 M1，止损会超调">止损快查 <b id="atGateGuardV">每 5 秒</b></span>
+      <span class="at-gate tp" id="atGateTp"
+            title="浮盈没到这个数就不平、也不调模型（省 token）。到线才问模型要不要落袋">止盈门槛 <b id="atGateTpV">3.25</b></span>
+      <span class="at-gate" id="atGateHold"
+            title="到点无条件市价平，盈亏都平。防止震荡行情里拖成隔夜单">持仓上限 <b id="atGateHoldV">60 分钟</b></span>
+    </div>
+    <!-- 运行计数：动态、每轮刷新。以前和规则说明混在同一段小字里，
+         一刷新就得重新找一遍。 -->
+    <div class="mini at-status">
       <span id="atDecline"></span>
       <span id="atFail"></span>
       <span id="atSl"></span>
@@ -723,11 +1040,46 @@
       <span id="atCache"></span>
       <span id="atModel"></span>
     </div>
+    <!-- 完整规则与信息边界：默认收起。这些都是「看一次就够」的口径说明，
+         摊开在页面上会把 KPI 和流水挤到看不见。 -->
+    <details class="at-rules">
+      <summary>完整规则与信息边界</summary>
+      <div class="at-rules-body">
+        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后 30 秒冷却、1 分钟内必须重新开仓</b>
+        · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
+        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 止盈门槛，顺序写死。
+        只有浮盈 ≥ 止盈门槛时才会问模型要不要落袋。参数是用真实 M1 K 线回放 191 笔入场
+        扫出来的，不是拍的——见 <code>tools/replay_exit.py</code>；扫了 36 组，
+        <b>全部负期望</b>，最优一组仍是 −0.09/笔，所以别指望调这两个数扭亏。
+        <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；
+        收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
+        <br><b>无视点差成本</b>（不由模型负责）· 止损是程序按浮亏主动市价平，
+        <b>不给订单挂 SL/TP</b>（账本里仍是手动平仓）。
+        <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，
+        且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」。
+        等待期间照常分析行情做下一笔。置灰的行是「跳过」——不花钱、没下单。
+      </div>
+    </details>
+    <!-- 教训库：跨场次复发统计。默认收起——它要扫所有归档流水数平仓笔，
+         比状态查询重，不该跟着 1 秒轮询跑，点开才拉。 -->
+    <details id="atLessons" style="margin:10px 0 6px">
+      <summary class="mini" style="cursor:pointer">
+        教训库 <span id="atLessonsHint">点开看跨场次复发（这个错误还在不在犯）</span>
+      </summary>
+      <pre id="atLessonsText" style="white-space:pre-wrap">点开即加载…</pre>
+    </details>
+    <!-- 流水过滤：60 秒一轮意味着一小时 60 条记录，其中绝大多数是「跳过/继续持有」。
+         默认只显示**真正执行过**的行（开仓/平仓/复盘），否则真正要看的平仓行
+         会被 50 条灰行冲掉。想看全量就勾上。 -->
+    <div class="tbl-bar">
+      <label class="mini"><input type="checkbox" id="atShowSkip"> 显示跳过 / 继续持有</label>
+      <span class="mini" id="atRowsHint"></span>
+    </div>
     <table><thead><tr><th>时间</th><th>动作</th><th>方向</th><th>p_up</th><th>盈亏</th><th>来源</th><th>开仓理由</th><th>平仓理由</th><th></th></tr></thead><tbody id="rowsAuto"></tbody></table>
   </div>
 
   <!-- 本场复盘：盘后打开先看这一块。按「上一笔平仓→下一笔开仓」超过 30 分钟切场 -->
-  <div class="card">
+  <div class="card l1">
     <div class="card-head">
       <h2>本场复盘</h2>
       <div class="win-tabs" id="sessTabs"></div>
@@ -810,7 +1162,7 @@
     <div class="card"><h2>逐日盈亏</h2><svg id="chartDaily" viewBox="0 0 620 156" preserveAspectRatio="none"></svg></div>
   </div>
 
-  <div class="card">
+  <div class="card l3">
     <div class="card-head">
       <h2>账户余额（每日快照）</h2>
       <span class="mini" id="histNote"></span>
@@ -835,7 +1187,7 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card l3">
     <div class="card-head">
       <h2>行为标记累计（跨场次）</h2>
       <span class="mini" id="markNote"></span>
@@ -844,13 +1196,13 @@
   </div>
 
   <div class="grid2">
-    <div class="card"><h2>分方向</h2><table><thead><tr><th>方向</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsDir"></tbody></table></div>
-    <div class="card"><h2>分平仓原因</h2><table><thead><tr><th>原因</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsReason"></tbody></table></div>
+    <div class="card l3"><h2>分方向</h2><table><thead><tr><th>方向</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsDir"></tbody></table></div>
+    <div class="card l3"><h2>分平仓原因</h2><table><thead><tr><th>原因</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsReason"></tbody></table></div>
   </div>
 
   <div class="grid2">
-    <div class="card"><h2>分品种</h2><table><thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsSym"></tbody></table></div>
-    <div class="card"><h2>分星期</h2><table><thead><tr><th>星期</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsWeek"></tbody></table></div>
+    <div class="card l3"><h2>分品种</h2><table><thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsSym"></tbody></table></div>
+    <div class="card l3"><h2>分星期</h2><table><thead><tr><th>星期</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsWeek"></tbody></table></div>
   </div>
 
   <div class="card">
@@ -858,7 +1210,7 @@
     <table><thead><tr><th>开仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>现价</th><th>止损</th><th>止盈</th><th>浮动盈亏</th></tr></thead><tbody id="rowsPos"></tbody></table>
   </div>
 
-  <div class="card">
+  <div class="card l3">
     <h2>最近平仓记录</h2>
     <table><thead><tr><th>平仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th><th>原因</th><th>持仓</th><th>评分</th><th>进场理由</th></tr></thead><tbody id="rowsTrade"></tbody></table>
   </div>
@@ -1256,6 +1608,15 @@ const ts2str = ts => {
   const p = n => String(n).padStart(2, '0');
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
+/* 只要时分秒。ts2str 只到分钟（11 个字符），原先调用处用它的 [11:] 取秒，
+ * 等于永远取到空字符串——AI 流水表的「时间」列因此长期整列为空，
+ * 「最近一次判断」后面也只剩一个孤零零的「 · 」。 */
+const hhmmss = ts => {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 const mins = m => {
   if (m === null || m === undefined) return '—';
   if (m < 60) return `${m.toFixed(m < 10 ? 1 : 0)} 分`;
@@ -1357,7 +1718,7 @@ function renderLive(d) {
     const hh = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     syncEl.textContent = '实时 · ' + hh;
     syncEl.className = 'badge-live';
-    $('acctNote').textContent = '每 3 秒刷新一次（AI 交易员那块每 1 秒）。切换账户请在 MT5 终端里操作，这里会自动识别并归档到独立账本。';
+    $('acctNote').textContent = '切换账户请在 MT5 终端里操作，这里会自动识别并归档到独立账本。';
   }
 
   $('acctLogin').textContent = '#' + (a.login || '—');
@@ -1548,7 +1909,66 @@ const AT_KIND = {
   review: '复盘', flatten: '清仓', error: '异常',
 };
 
+/* 常驻状态带。和 AI 卡片同源渲染，两处数字不可能打架。
+ * 这里只放三个问题：在不在跑 / 有没有仓 / 现在多少。
+ * 其余一律留给下面的卡片——状态带一长就没人看了。 */
+function renderStatusBar(a) {
+  const bar = $('atBar');
+  if (!bar) return;
+  let state = '未启动', cls = '';
+  if (!a || !a.ok) {
+    state = '数据读取失败';
+  } else if (a.running) {
+    state = a.dry_run ? '运行中 · 纸面' : '运行中 · 真实';
+    cls = a.dry_run ? 'on' : 'warn';
+  } else if (a.stale) {
+    state = '已停止（面板曾重启）';
+    cls = 'warn';
+  } else if (a.stop_reason) {
+    state = '已停止 · ' + String(a.stop_reason).slice(0, 22);
+    cls = 'warn';
+  }
+  bar.className = 'statusbar' + (cls ? ' ' + cls : '');
+  $('atBarState').textContent = state;
+
+  const p = a && a.position;
+  if (p) {
+    const dir = p.direction > 0 ? '多' : '空';
+    const fp = (a.float_pnl == null) ? '—' : money(a.float_pnl);
+    const pk = (p.peak_pnl == null) ? null : money(Number(p.peak_pnl));
+    const fpCls = (a.float_pnl == null) ? '' : signClass(a.float_pnl);
+    $('atBarPos').innerHTML =
+      `<span class="sb-v ${p.direction > 0 ? 'pos-long' : 'pos-short'}">` +
+      `${dir} ${p.lots}</span>` +
+      `<span class="sb-k">@</span><span class="sb-v">${fmt(p.price_open, 3)}</span>` +
+      `<span class="sb-k">浮盈</span><span class="sb-v ${fpCls}">${fp}</span>` +
+      (pk ? `<span class="sb-k">峰</span><span class="sb-v">${pk}` +
+            (a.tp_min_usd ? '/' + fmt(a.tp_min_usd, 2) : '') + `</span>` : '');
+  } else {
+    const pend = Number(a && a.pending_reviews || 0);
+    $('atBarPos').innerHTML = `<span class="sb-k">空仓` +
+      (pend ? ` · ${pend} 笔待复盘` : '') + `</span>`;
+  }
+
+  if (a && a.ok) {
+    // 状态带同理：写胜/负，不写命中率（分母剔了硬止损，天生接近 100%）。
+    const cT = (a.closed_today == null) ? (a.closed || 0) : a.closed_today;
+    const pT = (a.pnl_today == null) ? (a.pnl || 0) : a.pnl_today;
+    const tally = (a.wins_today == null || a.losses_today == null) ? ''
+      : `${a.wins_today} 胜 ${a.losses_today} 负 · `;
+    $('atBarStat').innerHTML =
+      `今日 已平 <b class="sb-v">${cT}</b> 笔 · ${tally}累计 ` +
+      `<b class="sb-v ${signClass(pT)}">${money(pT)}</b>`;
+  } else {
+    $('atBarStat').textContent = '—';
+  }
+  // 停线程 / 清仓都要能用：stale 状态（面板重启过、磁盘还留着 running=true）
+  // 也得让人点得到，否则界面永远卡在「运行中」而线程早没了。
+  $('atBarStop').disabled = !(a && (a.running || a.stale));
+}
+
 function renderAutoTrade(a) {
+  renderStatusBar(a);
   const st = $('atState');
   st.style.display = '';
   if (!a || !a.ok) {
@@ -1572,11 +1992,15 @@ function renderAutoTrade(a) {
     st.className = 'badge-off';
   }
   if (a.stale) {
-    $('atNote').className = 'mini red';
+    $('atNote').className = 'mini at-head-note red';
     $('atNote').textContent = '上次的线程已不在，请重新点「开始做单」';
   } else {
-    $('atNote').className = 'mini';
-    $('atNote').textContent = a.stop_reason ? ('停止原因：' + a.stop_reason) : '';
+    // 经验条数写在常驻位：重置战绩之后这里不清零，才看得出经验真的留住了。
+    const bits = [];
+    if (typeof a.lessons === 'number') bits.push('经验库 ' + a.lessons + ' 条');
+    if (a.stop_reason) bits.push('停止原因：' + a.stop_reason);
+    $('atNote').className = 'mini at-head-note';
+    $('atNote').textContent = bits.join(' · ');
   }
 
   // 当前持仓
@@ -1584,11 +2008,22 @@ function renderAutoTrade(a) {
   if (p) {
     $('atPos').textContent = (p.direction > 0 ? '多' : '空') + ' ' + p.lots + ' 手';
     $('atPos').className = 'v ' + (p.direction > 0 ? 'pos-long' : 'pos-short');
-    $('atPosSub').textContent = '开仓 ' + fmt(p.price_open, 3) +
-      ' · AI 给的方向概率 ' + fmt((p.p_up || 0) * 100, 0) + '%';
+    let sub = '开仓 ' + fmt(p.price_open, 3) +
+      ' · p_up ' + fmt((p.p_up || 0) * 100, 0) + '%';
+    // 峰值浮盈：这一笔从开仓到现在摸到过的最高浮盈。必须和门槛放一起看——
+    // 「峰值 +2.20 / 3.25」一眼就知道是差一口气，还是从头到尾没靠近过。
+    // 没有这个数的时候，一笔单跑到 −3.77 根本分不清是「摸到过没舍得走」
+    // 还是「一路不回头」，两种情况的处置完全相反。
+    if (p.peak_pnl != null && !Number.isNaN(Number(p.peak_pnl))) {
+      sub += ' · 峰值 ' + money(Number(p.peak_pnl))
+        + (a.tp_min_usd ? ' / ' + fmt(a.tp_min_usd, 2) : '');
+    }
+    $('atPosSub').textContent = sub;
   } else {
     $('atPos').textContent = '空仓';
-    $('atPos').className = 'v neut';
+    // 空仓用中性灰，不用 --warn 的黄：黄在这个面板里表示「要你看一眼」，
+    // 而空仓是最正常的状态，标成警告等于天天报警。
+    $('atPos').className = 'v idle';
     $('atPosSub').textContent = '等下一次判断';
   }
 
@@ -1602,10 +2037,10 @@ function renderAutoTrade(a) {
       const verb = ld.act === false ? '不做'
         : (ld.act === true ? (ld.direction > 0 ? '→ 做多' : '→ 做空')
                            : (ld.direction > 0 ? '→ 偏多' : '→ 偏空'));
-      $('atCallSub').textContent = verb + ' · ' + ts2str(ld.ts).slice(11);
+      $('atCallSub').textContent = verb + ' · ' + hhmmss(ld.ts);
     } else {
       $('atCall').textContent = ld.close ? '平仓' : '继续持有';
-      $('atCallSub').textContent = ts2str(ld.ts).slice(11);
+      $('atCallSub').textContent = hhmmss(ld.ts);
     }
   } else {
     $('atCall').textContent = '—';
@@ -1621,22 +2056,44 @@ function renderAutoTrade(a) {
     $('atHitSub').textContent = a.llm_closes ? '样本不足' : '只算模型自己决定的';
   } else {
     $('atHit').textContent = fmt(a.llm_hit_rate * 100, 1) + '%';
-    $('atHitSub').textContent = a.llm_closes + ' 笔模型决策样本';
+    // 分母必须写清楚：硬止损平的笔不进这个率，否则 100% 会被当成"全对"
+    const slN = Number(a.sl_closes || 0);
+    $('atHitSub').textContent = a.llm_closes + ' 笔模型平仓'
+      + (slN ? `（${slN} 笔硬止损不计）` : '');
   }
 
   $('atPnl').textContent = money(a.pnl || 0);
   $('atPnl').className = 'v mono ' + signClass(a.pnl || 0);
   $('atPnlSub').textContent = a.dry_run ? '纸面记账（不发真单）' : '真实成交';
 
+  // 出场闸门胶囊：数字一律取实际 cfg（存在 state 里的那份），不能写死——
+  // 页面写 3.25 而实际跑 0（关掉）是最坏的一种谎。
+  const gSl = Number(a.sl_usd || 0);
+  const gTp = Number(a.tp_min_usd || 0);
+  const gGuard = Number(a.guard_sec || 0);
+  const gHold = Number(a.max_hold_sec || 0);
+  const ivSec = Number((a.cfg && a.cfg.interval_sec) || 0) || 60;
+  $('atGateSlV').textContent = gSl > 0 ? '−' + fmt(gSl, 2) : '关闭';
+  $('atGateSl').className = 'at-gate sl' + (gSl > 0 ? '' : ' off');
+  $('atGateTpV').textContent = gTp > 0 ? fmt(gTp, 2) : '关闭';
+  $('atGateTp').className = 'at-gate tp' + (gTp > 0 ? '' : ' off');
+  // 快查要严于决策间隔才有意义：配得 >= interval_sec 时 _wait_next 会夹到
+  // interval_sec，等于每轮只查一次，那就是旧行为，显示成「关闭」才诚实。
+  const guardOn = gGuard > 0 && gGuard < ivSec;
+  $('atGateGuardV').textContent = guardOn ? '每 ' + fmt(gGuard, 0) + ' 秒' : '关闭';
+  $('atGateGuard').className = 'at-gate guard' + (guardOn ? '' : ' off');
+  $('atGateHoldV').textContent = gHold > 0 ? fmt(Math.round(gHold / 60), 0) + ' 分钟' : '关闭';
+  $('atGateHold').className = 'at-gate' + (gHold > 0 ? '' : ' off');
+
   // 模型自己说"不做"的次数。它和"被闸门挡掉"是两回事：
   // 如果这个数一直涨、开仓一直是 0，说明它变胆小了，那是另一种失败。
   $('atDecline').textContent = a.model_declines
-    ? `　·　模型主动放弃 ${a.model_declines} 次` : '';
+    ? `模型主动放弃 ${a.model_declines} 次` : '';
 
   // 调用失败（429/超时/key 错）和"它主动不做"是两回事：
   // 前者是 API 挂了，这时候一笔不做是故障，不是稳健。
   $('atFail').textContent = a.model_failures
-    ? `　·　⚠ 模型调用失败 ${a.model_failures} 次（免费额度/限速？）` : '';
+    ? `⚠ 模型调用失败 ${a.model_failures} 次（免费额度/限速？）` : '';
   $('atFail').style.color = a.model_failures ? 'var(--bad)' : '';
 
   // 程序止损笔数：这个数和"模型平仓"要分开看。止损多说明入场方向差，
@@ -1644,7 +2101,7 @@ function renderAutoTrade(a) {
   const slN = Number(a.sl_closes || 0);
   if (slN) {
     const tpTxt = (a.tp_min_usd == null) ? '' : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`;
-    $('atSl').textContent = `　·　程序止损 ${slN} 笔`
+    $('atSl').textContent = `程序止损 ${slN} 笔`
       + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
       + (a.tp_min_usd ? ` · 未达止盈门槛不平${tpTxt}` : '');
     $('atSl').style.color = 'var(--warn)';
@@ -1655,7 +2112,7 @@ function renderAutoTrade(a) {
   // 最近 10 笔多空分布：只看盈亏发现不了"只会做多"这种偏置，必须单独显示。
   const dr = a.dir_recent || {};
   if (dr.n) {
-    $('atDir').textContent = `　·　最近 ${dr.n} 笔：多 ${dr.long} / 空 ${dr.short}`
+    $('atDir').textContent = `最近 ${dr.n} 笔：多 ${dr.long} / 空 ${dr.short}`
       + (dr.skew ? '（⚠ 方向偏斜，检查是不是被教训锁死了）' : '');
     $('atDir').style.color = dr.skew ? 'var(--warn)' : '';
   } else {
@@ -1668,8 +2125,8 @@ function renderAutoTrade(a) {
   if (pend && a.next_review_ts) {
     const left = Math.max(0, Math.ceil((a.next_review_ts - Date.now() / 1000) / 60));
     $('atPending').textContent = left
-      ? `　·　待复盘 ${pend} 笔（最早再走 ${left} 根 K 线）`
-      : `　·　待复盘 ${pend} 笔（下一轮就复盘）`;
+      ? `待复盘 ${pend} 笔（最早再走 ${left} 根 K 线）`
+      : `待复盘 ${pend} 笔（下一轮就复盘）`;
   } else {
     $('atPending').textContent = '';
   }
@@ -1678,11 +2135,11 @@ function renderAutoTrade(a) {
   // 拿不到服务端计量时就不显示百分比，别编。
   const ck = a.cache || {};
   $('atCache').textContent = ck.hit_rate == null ? ''
-    : `　·　缓存命中 ${fmt(ck.hit_rate * 100, 1)}%（命中 ${ck.hit_tokens} / 未命中 ${ck.miss_tokens} tokens）`;
+    : `缓存命中 ${fmt(ck.hit_rate * 100, 1)}%（命中 ${ck.hit_tokens} / 未命中 ${ck.miss_tokens} tokens）`;
 
   // 用的是哪个模型。换供应商（DeepSeek → 智谱免费档）后必须看得见，
   // 否则 401/404 的时候分不清是 key 没换还是模型名写错。
-  $('atModel').textContent = a.model ? `　·　模型 ${a.model}` : '';
+  $('atModel').textContent = a.model ? `模型 ${a.model}` : '';
 
   // 幕布上的状态跟着刷新：它每 1 秒拿到的就是这份数据，不用另开请求
   lastAutoData = a;
@@ -1709,11 +2166,25 @@ function renderAutoTrade(a) {
     updateModeHint();
   }
 
-  const rows = (a.recent || []).slice().reverse();
+  // 默认只显示真执行过的行。60 秒一轮 = 一小时 60 条，其中绝大多数是
+  // 「跳过 / 继续持有」——它们把真正的平仓行冲掉了，等于没得看。
+  const allRows = (a.recent || []).slice().reverse();
+  const showSkip = !!($('atShowSkip') && $('atShowSkip').checked);
+  const EXEC_KINDS = ['open', 'close', 'review', 'open_failed', 'stop', 'error'];
+  const rows = showSkip ? allRows : allRows.filter(r => EXEC_KINDS.includes(r.kind));
+  if ($('atRowsHint')) {
+    $('atRowsHint').textContent = allRows.length
+      ? `共 ${allRows.length} 条 · 显示 ${rows.length} 条` : '';
+  }
   $('rowsAuto').innerHTML = rows.length ? rows.map(r => {
     const dir = r.direction ? (r.direction > 0 ? '多' : '空') : '—';
     const pUp = r.p_up == null ? '—' : fmt(r.p_up * 100, 0) + '%';
     const pnl = r.pnl == null ? '—' : money(r.pnl);
+    // 峰值浮盈跟实际盈亏放同一格：这两数只有并排看才有意义。
+    // 「实际 −3.77 / 峰 +2.20」= 摸到了又吐回去；「实际 −3.77 / 峰 −0.4」= 一路没回头。
+    // 前者要改出场，后者要改进场，混在一列里分不出来。
+    const peakLine = (r.peak_pnl == null || r.peak_pnl === undefined) ? ''
+      : `<div class="mini" style="opacity:.7;margin-top:2px">峰 ${money(r.peak_pnl)}</div>`;
     const src = r.source === 'llm' ? '模型'
       : r.source === 'fallback' ? '规则兜底'
       : r.source === 'external' ? '终端外平仓'
@@ -1727,18 +2198,22 @@ function renderAutoTrade(a) {
       : (r.kind === 'review' ? ('💡 ' + (r.lesson || r.error || '')) : '');
     const isSkip = r.kind === 'skip' || r.kind === 'hold';
     return `<tr${isSkip ? ' class="at-skip"' : ''}>
-      <td class="mono">${ts2str(r.ts).slice(11)}</td>
+      <td class="mono">${hhmmss(r.ts)}</td>
       <td>${AT_KIND[r.kind] || r.kind || '—'}</td>
       <td class="${r.direction > 0 ? 'pos-long' : (r.direction < 0 ? 'pos-short' : '')}">${dir}</td>
       <td class="mono">${pUp}</td>
-      <td class="mono ${r.pnl == null ? '' : signClass(r.pnl)}">${pnl}</td>
+      <td class="mono ${r.pnl == null ? '' : signClass(r.pnl)}">${pnl}${peakLine}</td>
       <td class="mini">${esc(src)}</td>
       <td class="mini">${esc(String(whyIn).slice(0, 80))}${r.error ? `<div class="red">${esc(String(r.error).slice(0, 60))}</div>` : ''}</td>
       <td class="mini">${esc(String(whyOut).slice(0, 80))}</td>
       <td>${r.ticket && (r.kind === 'open' || r.kind === 'close')
             ? `<button class="link-btn" onclick="tradeDetailShow(${r.ticket})">详情</button>` : ''}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="9" class="empty">还没有决策记录。点「开始做单」，或先跑 <code>python -m live.autotrade --once</code> 试一轮。</td></tr>';
+  }).join('') : `<tr><td colspan="9" class="empty">${
+    allRows.length
+      ? '这段记录里没有执行过的单。勾上「显示跳过 / 继续持有」可以看完整决策流水。'
+      : '还没有决策记录。点「开始做单」，或先跑 <code>python -m live.autotrade --once</code> 试一轮。'
+  }</td></tr>`;
 }
 
 /* 开始 / 关闭。
@@ -1885,20 +2360,22 @@ async function startAutoTrade() {
   }
 }
 
-// 重置：清空 AI 自己攒的教训和战绩。
-// 为什么需要它：教训和战绩都拼进提示词，之前的亏损样本会让它越来越保守
+// 重置：清空战绩。经验（教训库）**默认保留**——它存在 lessons.jsonl 里，
+// 不随流水归档。清经验是旁边那个按钮的活。
+// 为什么需要重置：战绩会拼进提示词，之前的亏损样本会让它越来越保守
 // （实测空单 1 胜 8 负 → 两条铁律 → 干脆不做空）。换参数前要个干净起点。
 // 旧流水不是删除，是改名归档，随时能翻。
 async function resetAutoTrade() {
   let ok = false;
   try {
     ok = await confirmApiCall({
-      title: '清空教训和战绩？',
-      desc: '会停掉 AI，把「复盘教训 / 战绩统计 / 待复盘队列」全部清零，'
-        + '新流水从零开始。旧流水改名成 autotrade_log.<时间戳>.jsonl 留在账户目录里，不删除。'
+      title: '清空战绩（经验保留）？',
+      desc: '会停掉 AI，把「战绩统计 / 待复盘队列」清零，新流水从零开始。'
+        + '旧流水改名成 autotrade_log.<时间戳>.jsonl 留在账户目录里，不删除。'
+        + 'AI 攒的复盘教训**不受影响**（要清经验用旁边的「清空经验」）。'
         + '已经平掉的仓位记录不受影响。',
       cost: '会停掉 AI（不平仓）',
-      okText: '重置',
+      okText: '重置战绩',
     });
   } catch (e) {
     atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
@@ -1917,9 +2394,9 @@ async function resetAutoTrade() {
     if (j.ok) {
       const c = j.cleared || {};
       const a = j.archived || {};
-      atSay(`<b>已重置</b>：清掉 ${c.rows || 0} 条流水（含 ${c.reviews || 0} 条教训、`
-        + `${c.closes || 0} 笔平仓记录）。旧文件已归档：`
-        + `${esc(a.log || '—')} / ${esc(a.state || '—')}。下一笔决策就是干净的起点。`, 'ok');
+      atSay(`<b>战绩已重置</b>：清掉 ${c.rows || 0} 条流水（含 ${c.closes || 0} 笔平仓记录）。`
+        + `旧文件已归档：${esc(a.log || '—')} / ${esc(a.state || '—')}。`
+        + `经验保留 ${j.lessons || 0} 条，下一笔决策就是干净的起点。`, 'ok');
     } else {
       atSay('<b>重置失败：</b>' + esc(j.error || '未知错误'), 'err');
     }
@@ -1928,6 +2405,74 @@ async function resetAutoTrade() {
   } finally {
     $('atReset').disabled = false;
     loadAutoTrade();
+  }
+}
+
+// 只清经验：教训库里一条不留，战绩和持仓都不动。
+// 单独一个按钮的理由：清战绩只损失统计样本，清经验丢掉的是模型唯一的历史，
+// 代价差一个量级，不能绑在一起误触。
+async function resetLessons() {
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: '清空 AI 攒的经验？',
+      desc: '会把教训库里所有复盘教训归档清空（改名成 lessons.<时间戳>.jsonl，不删除）。'
+        + '战绩、持仓、流水一律不动，AI 可以继续跑。'
+        + '清空后注入的会变成「暂无复盘笔记」，直到攒出新教训。',
+      cost: '不花钱、不下单',
+      okText: '清空经验',
+    });
+  } catch (e) {
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!ok) return;
+
+  atSay('');
+  $('atResetLessons').disabled = true;
+  try {
+    const r = await fetch('/api/autotrade/reset_lessons', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      atSay(`<b>经验已清空</b>：归档 ${j.cleared || 0} 条教训`
+        + (j.archived ? `（${esc(j.archived)}）` : '') + '。战绩不受影响。', 'ok');
+    } else {
+      atSay('<b>清空经验失败：</b>' + esc(j.error || '未知错误'), 'err');
+    }
+  } catch (e) {
+    atSay('<b>清空经验请求失败：</b>' + esc(String(e)), 'err');
+  } finally {
+    $('atResetLessons').disabled = false;
+    loadAutoTrade();
+  }
+}
+
+/* ==================== 教训库（跨场次） ====================
+   为什么要它：`recent_lessons()` 只回答"现在塞哪几条进提示词"，
+   不回答"经验到底有没有用"。后者只能看同一主题在不同场次里的复发次数：
+   首场 8 次、次场 3 次 = 在收敛；一直每场 6~8 次 = 提示词没压住。
+   默认收起 + 点开才拉：这个接口要扫所有归档流水数平仓笔，比状态查询重。 */
+async function loadLessons() {
+  const box = $('atLessonsText');
+  const hint = $('atLessonsHint');
+  if (!box) return;
+  box.textContent = '加载中…';
+  try {
+    const r = await fetch('/api/lessons?account=' + encodeURIComponent(curLogin || ''));
+    const j = await r.json();
+    if (!j.ok) {
+      box.textContent = '读取失败：' + (j.error || '未知错误');
+      return;
+    }
+    box.textContent = j.text || '（教训库是空的）';
+    const rep = j.report || {};
+    hint.textContent = `${rep.lessons || 0} 条 · ${(rep.sessions || []).length} 场`
+      + '（每次点开都重新扫一遍）';
+  } catch (e) {
+    box.textContent = '请求失败：' + String(e);
   }
 }
 
@@ -2083,23 +2628,75 @@ function exitTradingFullscreen() {
   }
 }
 
-// 幕布上的状态是「顺便有用」：不显示的话它就是一块纯红字，看不出 AI 死没死
+/* 幕布的更新逻辑。只摆三个数 + 一句状态，别把分析塞进来。
+ * 每个元素都判空：轮询还没拿到数据时 updateCurtain 会被调用，
+ * 少一个 id 就整块不刷新，那才是最糟的情况（幕布上写着上一分钟的状态）。 */
+function curCard(label, value, sub, cls) {
+  return `<div class="cur-card"><i>${esc(label)}</i>`
+    + `<b class="${cls || ''}">${value}</b>`
+    + (sub ? `<s>${esc(sub)}</s>` : '') + `</div>`;
+}
+
 function updateCurtain(a) {
-  const el = $('atCurtainStat');
-  if (!el || !a || !a.ok) return;
+  const root = $('atCurtain');
+  if (!root) return;
+  const ok = !!(a && a.ok);
+  const running = !!(ok && a.running);
+  const stopped = !!ok && !running;
+
+  // 停止 = 出事了，整块屏转红。这是这块屏上红色唯一的含义。
+  root.classList.toggle('is-stopped', stopped);
+
+  const set = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
+
+  set('atCurtainState', !ok ? '状态未知'
+    : running ? (a.dry_run ? '运行中 · 纸面' : '运行中 · 真实')
+    : (a.stale ? '已停止（面板重启过）' : 'AI 已停止'));
+  set('atCurtainSym', (a && a.symbol) || 'XAUUSD · M1');
+  set('atCurtainClock', new Date().toLocaleTimeString('zh-CN', { hour12: false }));
+
+  // 三种状态三句话。停着还写「请勿操作」是骗人；读不到后端也不是「已停止」。
+  if (!ok) {
+    set('atCurtainTitle', '状态未知');
+    set('atCurtainLead', '连不上面板后端，无法确认它是否还在跑。请回面板看一眼再动。');
+    set('atCurtainStat', '—');
+    return;
+  }
+  set('atCurtainTitle', running ? '请勿操作这台电脑' : 'AI 已停止');
+  set('atCurtainLead', running
+    ? '手动开平仓、切走终端、让电脑睡眠，都会打乱它正在做的事。'
+    : '可以正常使用这台电脑了。仓位不会自己动，请回终端确认。');
+
   const p = a.position;
-  const posText = p
-    ? `${p.direction > 0 ? '多' : '空'} ${p.lots} 手 @ ${fmt(p.price_open, 3)}`
-    : '空仓（等下一次信号）';
-  const d = a.last_decision || {};
-  const call = d.reason ? `${d.kind === 'exit' ? '平仓判断' : '进场判断'}：${d.reason}` : '—';
-  const stopped = a.running ? '' : '<div style="color:#f0b429;margin-top:10px">⚠ AI 已停止，可以按 Esc 退出了</div>';
-  el.innerHTML = `<div>当前持仓　<b>${esc(posText)}</b></div>
-    <div>最近判断　${esc(call)}</div>
-    <div>已平仓 ${a.closed || 0} 笔　累计
-      <span class="${signClass(a.pnl || 0)}">${money(a.pnl || 0)}</span>
-      　·　${new Date().toLocaleTimeString('zh-CN')}</div>
-    ${stopped}`;
+  const cards = [];
+  if (p) {
+    const dir = p.direction > 0 ? '多' : '空';
+    cards.push(curCard('当前持仓', `${dir} ${p.lots} 手`, `@ ${fmt(p.price_open, 3)}`,
+      p.direction > 0 ? 'pos-long' : 'pos-short'));
+    if (a.float_pnl != null) {
+      const pk = (p.peak_pnl == null) ? ''
+        : `峰值 ${money(Number(p.peak_pnl))}`
+          + (a.tp_min_usd ? ` / ${fmt(a.tp_min_usd, 2)}` : '');
+      cards.push(curCard('浮动盈亏', money(a.float_pnl), pk, signClass(a.float_pnl)));
+    } else {
+      cards.push(curCard('浮动盈亏', '—', '报价读取中'));
+    }
+  } else {
+    cards.push(curCard('当前持仓', '空仓', '等下一次信号', 'idle'));
+  }
+  // **不显示命中率**。这个数在这套架构下是失真的：分母只算「模型自己平的」，
+  // 硬止损平掉的那笔不进分母。实测 15:15:58 那笔 -3.42 是 sl 平的，于是
+  // 3 胜 0 负显示成 100%，真实胜率是 3/4=75%。给路过的人看一个剔除了亏损的
+  // 百分比，比什么都不显示更糟。改成「W 胜 L 负」——样本量自己会说话。
+  const cToday = (a.closed_today == null) ? (a.closed || 0) : a.closed_today;
+  const pnlToday = (a.pnl_today == null) ? (a.pnl || 0) : a.pnl_today;
+  const tally = (a.wins_today == null || a.losses_today == null)
+    ? `已平 ${cToday} 笔`
+    : `已平 ${cToday} 笔 · ${a.wins_today} 胜 ${a.losses_today} 负`;
+  cards.push(curCard('今日累计', money(pnlToday), tally, signClass(pnlToday)));
+
+  const el = $('atCurtainStat');
+  if (el) el.innerHTML = `<div class="cur-cards">${cards.join('')}</div>`;
 }
 
 /* ==================== 单笔交易溯源 ====================
@@ -3030,6 +3627,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     tab.classList.add('active');
     const v = tab.dataset.view;
+    // 顶部 pill 里「轮次/阶段/耗时」只属于实时迭代页，靠这个属性在实盘页隐藏
+    document.body.dataset.view = v;
     $('view-live').classList.toggle('hidden', v !== 'live');
     $('view-iter').classList.toggle('hidden', v !== 'iter');
     $('view-eval').classList.toggle('hidden', v !== 'eval');
@@ -3042,6 +3641,15 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 $('evalSelect').addEventListener('change', e => loadEvalDetail(e.target.value));
 
+// 流水过滤开关：勾上立刻重渲染，不用等下一轮轮询
+if ($('atShowSkip')) {
+  $('atShowSkip').addEventListener('change', () => {
+    if (lastAutoData) renderAutoTrade(lastAutoData);
+  });
+}
+
+// 初始视图是实盘：先把 dataset.view 打上，否则首屏会把实时迭代的 pill 也显示出来
+document.body.dataset.view = 'live';
 pollState();
 setInterval(pollState, 1500);
 
@@ -3059,6 +3667,12 @@ refreshLive();
 loadAutoTrade();
 loadLlm();
 updateModeHint();
+
+// 教训库：点开才拉（每次打开都重新扫，数据本来就该是最新的）
+(() => {
+  const lb = $('atLessons');
+  if (lb) lb.addEventListener('toggle', () => { if (lb.open) loadLessons(); });
+})();
 
 setInterval(() => {
   if (pollVisible()) loadAutoTrade();
@@ -3091,16 +3705,31 @@ loadEvalList().then(() => loadStrategies());
 </script>
 
 <!-- 全屏提醒幕布：默认隐藏，点「全屏提醒」才出来。
-     字是给"路过的人"看的，所以只有三层：正在做什么 / 别碰什么 / 怎么退出。 -->
+     读者是**路过这台电脑的人**（家人、室友、回来的自己），不是看盘的人。
+     所以只有三个问题：这屏是活的吗 / 别做什么 / 现在什么状况。
+     任何分析性内容（最近判断的完整理由）都不该出现在这里。 -->
 <div class="curtain hidden" id="atCurtain">
-  <div>
-    <div class="curtain-kicker">XAUUSD · M1 · 超短线</div>
-    <div class="curtain-title">AI 交易员正在交易</div>
-    <div class="curtain-sub">请勿操作这台电脑</div>
-    <div class="curtain-stat" id="atCurtainStat">—</div>
-    <div class="curtain-hint">
-      别手动开平仓 · 别让电脑睡眠 · 别切走 MT5 终端　·　按 <b>Esc</b> 退出
+  <div class="cur-top">
+    <span class="cur-state"><span class="cur-dot"></span><b id="atCurtainState">运行中</b></span>
+    <span class="cur-sep"></span>
+    <span id="atCurtainSym">XAUUSD · M1</span>
+    <span class="cur-grow"></span>
+    <span class="cur-clock" id="atCurtainClock">--:--:--</span>
+  </div>
+
+  <div class="cur-mid">
+    <h1 class="cur-title" id="atCurtainTitle">请勿操作这台电脑</h1>
+    <div class="cur-lead" id="atCurtainLead">
+      手动开平仓、切走终端、让电脑睡眠，都会打乱它正在做的事。
     </div>
+    <div class="cur-stat" id="atCurtainStat">—</div>
+  </div>
+
+  <div class="cur-bot">
+    <div class="cur-rules">
+      <span>别手动开平仓</span><span>别让电脑睡眠</span><span>别切走 MT5 终端</span>
+    </div>
+    <div class="cur-exit">要退出就按 <kbd>Esc</kbd></div>
   </div>
 </div>
 </body>

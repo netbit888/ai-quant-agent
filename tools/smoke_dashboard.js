@@ -56,6 +56,9 @@ global.document = {
   querySelectorAll: () => [],
   createElementNS: () => makeEl('svg' + Math.random()),
   createElement: tag => makeEl('created_' + tag + '_' + Math.random()),
+  // body 必须存在：切换标签页会写 document.body.dataset.view（用来控制
+  // 只属于某一页的顶部 pill），没有 body 整段脚本会在这里炸。
+  body: makeEl('body'),
   hidden: false,
   addEventListener() {},
 };
@@ -69,6 +72,14 @@ global.fetch = async (url, opts) => {
     return { json: async () => ({ ok: true, model: 'deepseek-chat', reply: '可用', elapsed: 1.5 }) };
   }
   if (u.includes('/api/llm')) return { json: async () => llmJson || { ok: false } };
+  // 教训库：跨场次统计。返回一段真实形状的文本，用来断言面板把它渲染出来了。
+  if (u.includes('/api/lessons')) {
+    return { json: async () => ({
+      ok: true,
+      report: { lessons: 3, sessions: [{ start: 'a', end: 'b', n: 2, closes: 5 }] },
+      text: '教训库 3 条 · 1 个场次\n场 1: a → b  平仓 5 笔  教训 2 条',
+    }) };
+  }
   return { json: async () => liveJson };
 };
 global.setInterval = () => 0;
@@ -78,7 +89,7 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, enterTradingFullscreen, exitTradingFullscreen, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -173,11 +184,16 @@ try {
       { symbol: 'XAUUSDm', label: '黄金 XAUUSD', point: 0.001, contract: 100.0, spread: 240, digits: 3 },
       { symbol: 'BTCUSDm', label: '比特币 BTCUSD', point: 0.01, contract: 1.0, spread: 640, digits: 2 },
     ],
-    position: { direction: 1, lots: 0.01, price_open: 4000.5, p_up: 0.62 },
+    position: { direction: 1, lots: 0.01, price_open: 4000.5, p_up: 0.62, peak_pnl: 2.2 },
+    float_pnl: 1.23,
     last_decision: { ts: 1790000000, kind: 'entry', p_up: 0.62, direction: 1, act: false },
     trades: 2, closed: 1, wins: 1, pnl: 0.88,
+    // 今日口径：4 笔里 1 笔硬止损，真实 3 胜 1 负。命中率是 100%（分母剔了止损），
+    // 这两个数放在一起就是为了断言「界面不许只显示那个 100%」。
+    closed_today: 4, wins_today: 3, losses_today: 1, pnl_today: 7.86,
     llm_closes: 1, llm_hit_rate: 1.0,
     sl_closes: 2, sl_usd: 3.0, tp_min_usd: 3.25,
+    max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60 },
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
@@ -185,16 +201,29 @@ try {
       { ts: 1790000000, kind: 'open', ticket: 1001, direction: 1, p_up: 0.62,
         reason: '近 5 根连阳', source: 'llm' },
       { ts: 1790000060, kind: 'close', ticket: 1001, direction: 1, pnl: 0.88,
-        entry_reason: '近 5 根连阳', reason: '动能衰竭', source: 'llm' },
+        peak_pnl: 2.2, entry_reason: '近 5 根连阳', reason: '动能衰竭', source: 'llm' },
       { ts: 1790000120, kind: 'skip', reason: '平仓后冷却中，还需 20 秒' },
       { ts: 1790000180, kind: 'review', direction: 1, pnl: 0.88,
         lesson: '第一根大阳线后追多容易吃回撤' },
     ],
   };
   api.renderAutoTrade(atSample);
+  // 默认过滤掉「跳过 / 继续持有」：样例 4 行里有 1 行 skip，所以只该剩 3 行。
+  // 这条钉住的是「一小时的流水里 90% 是 ski p行、会把平仓行冲掉」这个教训。
   const atRows = (made.rowsAuto.innerHTML.match(/<tr/g) || []).length;
-  console.log(`\nAI 做单表 ${atRows} 行 ${atRows === 4 ? '✓' : '✗'}`);
-  if (atRows !== 4) failed = true;
+  console.log(`\nAI 做单表默认 ${atRows} 行 ${atRows === 3 ? '✓' : '✗'}（跳过被过滤）`);
+  if (atRows !== 3) failed = true;
+  const hintTxt = String(made.atRowsHint.textContent || '');
+  console.log(`  计数提示 ${hintTxt.includes('共 4 条') && hintTxt.includes('显示 3 条') ? '✓' : '✗'} (${hintTxt})`);
+  if (!(hintTxt.includes('共 4 条') && hintTxt.includes('显示 3 条'))) failed = true;
+  // 勾上开关必须能看到全量
+  made.atShowSkip.checked = true;
+  api.renderAutoTrade(atSample);
+  const atRowsAll = (made.rowsAuto.innerHTML.match(/<tr/g) || []).length;
+  console.log(`  勾选后显示全量 ${atRowsAll} 行 ${atRowsAll === 4 ? '✓' : '✗'}`);
+  if (atRowsAll !== 4) failed = true;
+  made.atShowSkip.checked = false;
+  api.renderAutoTrade(atSample);
   const atCols = (made.rowsAuto.innerHTML.match(/<td/g) || []).length / Math.max(atRows, 1);
   console.log(`  每行 ${atCols} 列 ${atCols === 9 ? '✓' : '✗'}（开仓理由 / 平仓理由 / 详情 分列）`);
   if (atCols !== 9) failed = true;
@@ -311,6 +340,76 @@ try {
   console.log(`  程序止损提示 ${slOk ? '✓' : '✗'} (${slTxt.trim() || '空'})`);
   if (!slOk) failed = true;
 
+  // 出场闸门胶囊：数字必须来自实际 cfg。页面写 3.25 而实际跑 0（关掉）
+  // 是最坏的一种谎——用户会以为有保护，其实没有。
+  const gSl = String(made.atGateSlV.textContent || '');
+  const gTp = String(made.atGateTpV.textContent || '');
+  const gGuard = String(made.atGateGuardV.textContent || '');
+  const gHold = String(made.atGateHoldV.textContent || '');
+  const gateOk = gSl.includes('3.00') && gTp.includes('3.25')
+    && gGuard.includes('5') && gHold.includes('60');
+  console.log(`  出场闸门胶囊 ${gateOk ? '✓' : '✗'} (止损 ${gSl} / 快查 ${gGuard} / 止盈 ${gTp} / 上限 ${gHold})`);
+  if (!gateOk) failed = true;
+
+  // 关掉的规则必须标 off 并显示「关闭」，不能留着一个不存在的数字
+  const savedAt = { ...atSample };
+  api.renderAutoTrade({ ...atSample, sl_usd: 0, guard_sec: 0, tp_min_usd: 0 });
+  const offOk = String(made.atGateSlV.textContent).includes('关闭')
+    && String(made.atGateGuardV.textContent).includes('关闭')
+    && String(made.atGateTpV.textContent).includes('关闭')
+    && String(made.atGateSl.className).includes('off')
+    && String(made.atGateGuard.className).includes('off');
+  console.log(`  闸门关闭时显示「关闭」 ${offOk ? '✓' : '✗'}`);
+  if (!offOk) failed = true;
+
+  // 快查间隔 ≥ 决策间隔等于没开（_wait_next 会夹到 interval_sec），也要标关闭
+  api.renderAutoTrade({ ...atSample, guard_sec: 90, cfg: { interval_sec: 60 } });
+  const clampOk = String(made.atGateGuardV.textContent).includes('关闭');
+  console.log(`  快查间隔不小于决策间隔时标关闭 ${clampOk ? '✓' : '✗'}`);
+  if (!clampOk) failed = true;
+  api.renderAutoTrade(savedAt);
+
+  // 峰值浮盈：持仓卡和流水行都要有。跟实际盈亏并排看才分得清
+  // 「摸到了又吐回去」和「一路没回头」——两者要改的地方完全相反。
+  const posSub = String(made.atPosSub.textContent || '');
+  const peakOk = posSub.includes('峰值') && posSub.includes('2.20');
+  console.log(`  持仓显示峰值浮盈 ${peakOk ? '✓' : '✗'} (${posSub})`);
+  if (!peakOk) failed = true;
+  const peakRowOk = String(made.rowsAuto.innerHTML).includes('峰 +2.20');
+  console.log(`  流水行显示峰值 ${peakRowOk ? '✓' : '✗'}`);
+  if (!peakRowOk) failed = true;
+
+  // 常驻状态带：三件事——在不在跑 / 有没有仓 / 现在多少。
+  // 这条是给「瞄一眼」服务的，所以任何一处写错都等于整个面板失去意义。
+  const sbState = String(made.atBarState.textContent || '');
+  const sbPos = String(made.atBarPos.innerHTML || '');
+  const sbStat = String(made.atBarStat.innerHTML || '');
+  const sbStateOk = sbState.includes('运行中') && sbState.includes('纸面')
+    && String(made.atBar.className).includes('on');
+  console.log(`  状态带·运行状态 ${sbStateOk ? '✓' : '✗'} (${sbState})`);
+  if (!sbStateOk) failed = true;
+  const sbPosOk = sbPos.includes('多') && sbPos.includes('4000.500')
+    && sbPos.includes('+1.23') && sbPos.includes('+2.20');
+  console.log(`  状态带·持仓与浮盈 ${sbPosOk ? '✓' : '✗'}`);
+  if (!sbPosOk) failed = true;
+  const sbStatOk = sbStat.includes('已平') && sbStat.includes('累计')
+    && sbStat.includes('3 胜 1 负') && !sbStat.includes('命中');
+  console.log(`  状态带·战绩 ${sbStatOk ? '✓' : '✗'}`);
+  if (!sbStatOk) failed = true;
+  console.log(`  运行中「关闭并清仓」可用 ${made.atBarStop.disabled === false ? '✓' : '✗'}`);
+  if (made.atBarStop.disabled !== false) failed = true;
+
+  // 空仓 + 未运行：状态带不能还显示持仓，按钮必须禁用
+  api.renderAutoTrade({ ...atSample, running: false, position: null, float_pnl: null });
+  const sbIdle = String(made.atBarPos.innerHTML || '');
+  const sbIdleState = String(made.atBarState.textContent || '');
+  const sbIdleOk = sbIdle.includes('空仓')
+    && !sbIdleState.includes('运行中')
+    && made.atBarStop.disabled === true;
+  console.log(`  状态带·未运行时空仓且禁用按钮 ${sbIdleOk ? '✓' : '✗'}`);
+  if (!sbIdleOk) failed = true;
+  api.renderAutoTrade(savedAt);
+
   // 全屏提醒幕布：按钮点了要能盖上、要显示当前持仓，Esc/退出全屏要能收掉
   api.enterTradingFullscreen();
   const curtainUp = !made.atCurtain.classList.contains('hidden');
@@ -319,6 +418,49 @@ try {
   const curtTxt = String(made.atCurtainStat.innerHTML || '');
   console.log(`  幕布显示当前状态 ${curtTxt.includes('当前持仓') ? '✓' : '✗'}`);
   if (!curtTxt.includes('当前持仓')) failed = true;
+
+  // 三种状态的标题必须各不相同。这块屏是「路人第一眼看到的东西」，
+  // 停着还写「请勿操作」、或者读不到后端就断言「AI 已停止」，都是撒谎。
+  const curtTitle = () => String(made.atCurtainTitle.textContent || '');
+  api.updateCurtain(atSample);
+  const cRun = curtTitle().includes('请勿操作')
+    && String(made.atCurtainState.textContent).includes('运行中')
+    && !made.atCurtain.classList.contains('is-stopped');
+  console.log(`  幕布·运行中 ${cRun ? '✓' : '✗'} (${curtTitle()})`);
+  if (!cRun) failed = true;
+
+  // 幕布上的「今日累计」必须带胜负笔数，**不许写命中率**：
+  // 那个百分比的分母剔掉了硬止损，4 笔里 1 笔止损会显示成 100%。
+  const curtStatHtml = String(made.atCurtainStat.innerHTML || '');
+  const cTally = curtStatHtml.includes('3 胜 1 负')
+    && curtStatHtml.includes('今日累计')
+    && !curtStatHtml.includes('命中');
+  console.log(`  幕布·今日累计写胜负不写命中率 ${cTally ? '✓' : '✗'}`);
+  if (!cTally) failed = true;
+  const cTodayMoney = curtStatHtml.includes('+7.86');
+  console.log(`  幕布·今日累计用今日口径 ${cTodayMoney ? '✓' : '✗'}`);
+  if (!cTodayMoney) failed = true;
+
+  api.updateCurtain({ ...atSample, running: false, position: null, float_pnl: null });
+  const cStop = curtTitle().includes('已停止')
+    && made.atCurtain.classList.contains('is-stopped');
+  console.log(`  幕布·已停止转红 ${cStop ? '✓' : '✗'} (${curtTitle()})`);
+  if (!cStop) failed = true;
+
+  api.updateCurtain({ ok: false });
+  const cUnknown = curtTitle().includes('状态未知')
+    && !made.atCurtain.classList.contains('is-stopped');
+  console.log(`  幕布·读不到后端不冒充已停止 ${cUnknown ? '✓' : '✗'} (${curtTitle()})`);
+  if (!cUnknown) failed = true;
+
+  // 空仓时不摆一张空的「浮动盈亏」卡
+  api.updateCurtain({ ...atSample, position: null, float_pnl: null });
+  const curtIdle = String(made.atCurtainStat.innerHTML || '');
+  const cIdle = curtIdle.includes('空仓') && !curtIdle.includes('浮动盈亏');
+  console.log(`  幕布·空仓不摆浮动卡 ${cIdle ? '✓' : '✗'}`);
+  if (!cIdle) failed = true;
+  api.updateCurtain(atSample);
+
   api.exitTradingFullscreen();
   if (!made.atCurtain.classList.contains('hidden')) {
     console.log('  ✗ 幕布收不起来（按 Esc 也没用）');
@@ -355,15 +497,28 @@ try {
   const wired = src.includes('onclick="startAutoTrade()"') &&
                 src.includes('onclick="stopAutoTrade()"') &&
                 src.includes('onclick="resetAutoTrade()"') &&
+                src.includes('onclick="resetLessons()"') &&
                 src.includes('onclick="enterTradingFullscreen()"') &&
                 typeof api.startAutoTrade === 'function' &&
                 typeof api.stopAutoTrade === 'function' &&
                 typeof api.resetAutoTrade === 'function' &&
+                typeof api.resetLessons === 'function' &&
                 typeof api.enterTradingFullscreen === 'function';
-  console.log(`  开始/关闭/重置/全屏按钮已接 handler ${wired ? '✓' : '✗'}`);
+  console.log(`  开始/关闭/重置战绩/清空经验/全屏按钮已接 handler ${wired ? '✓' : '✗'}`);
   if (!wired) failed = true;
   console.log(`  弹窗可用 ${typeof api.closeModal === 'function' ? '✓' : '✗'}`);
   if (typeof api.closeModal !== 'function') failed = true;
+
+  // ---- 教训库（跨场次）----
+  // 钉两件：折叠块真的存在、点开能拉到数据并渲染出「N 条 · M 场」。
+  // 这一块要扫归档流水数平仓笔，绝不能塞进 1 秒轮询里，所以只在用户点开时请求。
+  const lessonsWired = src.includes('id="atLessons"') && typeof api.loadLessons === 'function';
+  await api.loadLessons();
+  const lessonsText = String((made.atLessonsText || {}).textContent || '');
+  const lessonsHint = String((made.atLessonsHint || {}).textContent || '');
+  const lessonsOk = lessonsText.includes('教训库 3 条') && lessonsHint.includes('3 条');
+  console.log(`  教训库面板点开可渲染跨场次统计 ${lessonsWired && lessonsOk ? '✓' : '✗'}`);
+  if (!(lessonsWired && lessonsOk)) failed = true;
 
   // ---- 模型切换条 ----
   // 这块最容易出「看着切了、其实没生效」：界面显示新模型，实际还在调老的。

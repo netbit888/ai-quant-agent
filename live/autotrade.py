@@ -97,8 +97,10 @@ class Cfg:
     # 平均波动从 1.02 变成 3.1（点差占比 23.5% → 7.7%）。
     #
     # 硬止损：浮亏到这个额度**由程序直接市价平**，不问模型。
-    # 为什么不信模型：前四大亏（-6.08/-3.51/-2.70/-2.49）全是 p_up=0.0 的单子，
-    # 它最自信的时候亏得最多，指望它自己认错不现实。
+    # 为什么不信模型：前四大亏（-6.08/-3.51/-2.70/-2.49）全是 p_up=0.0 的单子。
+    # 但注意 p_up=0.0 当时被 confidence=max(p_up,1-p_up)=1.0 记成"最自信"，
+    # 实际那是输出示例的占位值被照抄，不是自信（见 clamp_p_up）。所以这条教训
+    # 的真实含义是"模型给的数会骗人，不能让它单独管出场"，不是"它自信时必亏"。
     # 注意这不是给订单挂 SL——账本里仍然是「手动平仓」，只是触发者是代码。
     # 这样复盘口径、K 线判定都不用改。
     sl_usd: float = 3.0
@@ -110,6 +112,21 @@ class Cfg:
     # 再不封顶就成隔夜了——1 分钟周期的策略持有到隔夜已经不是同一个策略。
     # 到点无条件市价平，盈亏都平。
     max_hold_sec: int = 3600
+    # 持仓期间的硬止损快查间隔（秒）。0 = 关，回到「每 interval_sec 才看一次止损」。
+    #
+    # 为什么必须有：决策间隔是 60 秒，而 XAUUSD M1 的单根 K 线振幅中位就有 1.51
+    # USD、P90 2.99。止损 3.00 只在每 60 秒那一格被检查一次，意味着价格在两次
+    # 检查之间可以跑完整根 K 线——**止损永远不是按 3.00 成交的**。
+    # 实测证据（2026-10-26 13:13 那笔）：13:42:42 浮亏 -2.06，13:43:42 以 -3.77
+    # 平掉，超调 0.77 = 把 3.00 的止损放大 26%。227 笔反事实回放里所有规则都按
+    # -3.00 精确成交算，等于给了自己一个乐观假设。
+    #
+    # 这个快查**只读一个 tick、只判 sl_usd 一条、不调模型**：过线就提前结束等待，
+    # 让下一轮 tick() 照常走 _exit_gate→send_close 的老路平仓。
+    # 刻意不在这里直接下单——复制一份平仓逻辑就等于有两个账本口径。
+    # 5 秒的依据：一次 tick 读取的成本可以忽略；模型单次调用实测 2.6 秒，但这个
+    # 循环不碰模型，所以不受它限制。
+    guard_sec: float = 5.0
     # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
@@ -136,6 +153,16 @@ def state_path(login: int | str | None = None) -> Path:
 
 def log_path(login: int | str | None = None) -> Path:
     return paths.account_file(paths.resolve_login(login), "autotrade_log.jsonl")
+
+
+def lessons_path(login: int | str | None = None) -> Path:
+    """教训库单独存一份，**不跟决策流水一起归档**。
+
+    以前教训只能从流水里读，而「重置」会把流水改名归档 → 教训跟着一起消失：
+    实测 2026-10-26 13:55 一次重置，188 条教训全变成不可见，注入的变成
+    「暂无复盘笔记」。经验要跨场次才有意义，就不能挂在会被清空的文件上。
+    """
+    return paths.account_file(paths.resolve_login(login), "lessons.jsonl")
 
 
 def _empty_state() -> dict:
@@ -228,6 +255,86 @@ def read_log(login: int | str | None = None, limit: int | None = None) -> list[d
     return out[-limit:] if limit else out
 
 
+def append_lesson(row: dict, login: int | str | None = None) -> None:
+    p = lessons_path(login)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+
+def _read_jsonl(p: Path) -> list[dict]:
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def lesson_rows(login: int | str | None = None) -> list[dict]:
+    """教训库的全部行。**不受 400 行窗口限制**（以前踩过）。
+
+    `lesson_clusters` 原来走 `read_log(limit=400)`：日志写到 808 行时，
+    188 条复盘只有 86 条进库，而且随着日志变长不断往后滚——次数永远涨不到
+    HARD_RULE_MIN=5，铁律机制自动失效。教训库现在是独立文件、全量读。
+
+    兼容：`lessons.jsonl` 还不存在时（老账户、老测试），退回从**当前日志**的
+    review 行里取（只看当前日志，不看归档——否则"清空经验"永远清不干净）。
+    文件存在但为空 = 已经被清空，不再回退，这是有意的。
+    """
+    if lessons_path(login).exists():
+        return _read_jsonl(lessons_path(login))
+    return [r for r in read_log(login) if r.get("kind") == "review" and r.get("lesson")]
+
+
+def migrate_lessons(login: int | str | None = None) -> dict:
+    """一次性把历史流水里的复盘搬进 `lessons.jsonl`（含归档文件）。
+
+    只在升级时跑一次。dedupe 用 (ts, ticket, lesson)：重复跑不会翻倍。
+    老数据没有 theme/scope，用词典 + 关键词推断，**推断结果如实标注**
+    (source="migrated")，不假装是模型自己标的。
+    """
+    p = lessons_path(login)
+    if p.exists() and _read_jsonl(p):
+        return {"ok": False, "error": "lessons.jsonl 已有内容，不覆盖"}
+    acc = paths.account_dir(paths.resolve_login(login))
+    seen: set[tuple] = set()
+    rows: list[dict] = []
+    for f in sorted(acc.glob("autotrade_log*.jsonl")):
+        for r in _read_jsonl(f):
+            if r.get("kind") != "review" or not r.get("lesson"):
+                continue
+            key = (r.get("ts"), r.get("ticket"), r["lesson"])
+            if key in seen:
+                continue
+            seen.add(key)
+            lesson = _unwrap_lesson(r["lesson"])
+            theme = r.get("theme") if r.get("theme") in LESSON_THEME_ENUM else ""
+            if not theme or theme == "其他":
+                theme = lesson_theme(lesson)
+            scope = r.get("scope") if r.get("scope") in LESSON_SCOPES else ""
+            if not scope:
+                scope = infer_scope(lesson)
+            rows.append({
+                "ts": int(r.get("ts") or 0), "ticket": r.get("ticket"),
+                "lesson": lesson, "theme": theme, "scope": scope,
+                "regime": r.get("regime") or "", "pnl": r.get("pnl"),
+                "direction": r.get("direction"), "source": "migrated",
+            })
+    rows.sort(key=lambda r: r["ts"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    return {"ok": True, "migrated": len(rows), "files": len(list(acc.glob("autotrade_log*.jsonl")))}
+
+
 # ------------------------------------------------------------------ 解析模型输出
 #
 # 模型不保证严格 JSON，所以解析必须是「宽进严出」：能从各种烂格式里抠出数字，
@@ -260,10 +367,15 @@ P_UP_FLOOR, P_UP_CEIL = 0.20, 0.80
 def clamp_p_up(p: float) -> float:
     """把 p_up 压回 [0.20, 0.80]。
 
-    实测 46% 的 p_up 精确等于 0.0（标定崩坏），|p_up-0.5|≥min_edge 的闸门
-    对它们形同虚设。0/1 是伪精确，不是概率估计；截断后摆烂值和中等置信
-    都落在有效区间里，min_edge 才有意义。system 已同步要求模型只在这个
-    区间输出，这里是代码层兜底——模型守不守规矩不该靠它自觉。
+    实测 46% 的 p_up 精确等于 0.0，|p_up-0.5|≥min_edge 的闸门对它们完全
+    无效（偏离 0.5 达 0.5，比任何正常估计都"强"）。根因已查明：ENTRY_SYSTEM
+    的输出示例原来写着 `"p_up": 0.00`，模型照抄这个占位值，程序按
+    `p_up > 0.5 else -1` 读成"最强看空"→ 89 笔清一色空单。示例已改。
+
+    注意 clamp **替代不了修示例**：0.0 被压成 0.20 之后仍然是"最强看空"
+    （|0.20-0.5|=0.30 照样过闸门），还是开空单，只是日志里再也看不到 0.0
+    ——等于把 bug 藏起来。所以判断 p_up 是否真的散开，要看 0.20 / 0.80
+    这两个边界值的出现频率，它们等价于旧的 0.0 / 1.0。
     """
     return max(P_UP_FLOOR, min(P_UP_CEIL, float(p)))
 
@@ -361,6 +473,71 @@ def parse_exit(text: str) -> dict | None:
     return None
 
 
+def _unwrap_lesson(text: str) -> str:
+    """拆掉没解包的 JSON。
+
+    历史 bug：早期复盘调用 JSON mode 时，`lesson` 直接存成了整段
+    `{"answer":"..."}`（实测 224 条里有 10 条）。注入提示词时它既难读、
+    又让关键词归类和去重全部失效，所以在入口处统一拆一次。
+    """
+    raw = " ".join((text or "").split())
+    if not raw.startswith("{"):
+        return raw
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if isinstance(obj, dict):
+        for k in ("lesson", "answer", "复盘", "reason", "text"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return " ".join(v.split())
+    return raw
+
+
+def parse_review(text: str) -> dict | None:
+    """从复盘回复里抠出 {scope, theme, lesson}。空回复返回 None。
+
+    **宽进**：模型可能给 JSON、可能给纯文本、也可能 JSON 里缺字段。
+      - JSON 齐全 → 直接用；theme 不在枚举里（或给了"其他"）→ 用关键词再试一次；
+      - scope 不合法 / 缺 → 关键词推断（infer_scope）；
+      - 根本没有 JSON → 整段当 lesson，主题和端都靠关键词推断。
+    宁可归错一个桶，也不能因为格式不对就把这条教训丢掉——以前
+    `_chat` 的 json_mode 会被一次 429 永久关掉，复盘现场本来就是纯文本返回。
+    """
+    raw = " ".join((text or "").split())
+    if not raw:
+        return None
+
+    data: dict | None = None
+    m = _JSON_RE.search(raw)
+    if m:
+        try:
+            loaded = json.loads(m.group(0))
+            if isinstance(loaded, dict):
+                data = loaded
+        except json.JSONDecodeError:
+            data = None
+
+    lesson = raw
+    theme = ""
+    scope = ""
+    if data is not None:
+        got = str(data.get("lesson") or data.get("复盘") or data.get("answer") or "").strip()
+        lesson = " ".join(got.split()) or raw
+        theme = str(data.get("theme") or data.get("主题") or "").strip()
+        scope = str(data.get("scope") or data.get("端") or "").strip().lower()
+    lesson = _unwrap_lesson(lesson)
+
+    if theme not in LESSON_THEME_ENUM or theme == "其他":
+        # 模型没给 / 给了枚举外的词 / 偷懒写"其他" → 关键词再试一次；
+        # 还是归不进去就明确标"其他"，落盘能看出"这条没归类"。
+        theme = lesson_theme(lesson) or "其他"
+    if scope not in LESSON_SCOPES:
+        scope = infer_scope(lesson)
+    return {"theme": theme, "scope": scope, "lesson": lesson[:120]}
+
+
 # ------------------------------------------------------------------ 规则兜底
 #
 # 模型挂了 / 没配 key / 输出没法解析时用。存在的意义不是"替代 AI"，
@@ -379,9 +556,14 @@ def parse_exit(text: str) -> dict | None:
 # 用户要的是「市场报价」里那两根线背后的原始数据：逐笔 bid/ask 变化。
 # 但黄金 1 分钟就有几十到几百个 tick，14 分钟几千笔——原始流直接塞给模型
 # 既贵又没用（它读不出规律，只会稀释注意力）。所以：
-#   1. 按分钟聚合成表：tick 数 / 买价区间 / 卖价区间 / 点差均值与最宽；
+#   1. 按分钟聚合成表：tick 数 / 买价区间 / 点差（只在偏离基准时标）；
 #   2. 再附最后十几笔原始 tick，让它看见"刚刚这一下"。
 # 时间边界与 K 线**完全一致**：只用这 14 根覆盖的那段时间，不额外偷看未来。
+#
+# 2026-10-26 瘦身：原来每行还印"卖价区间"和"点差 均/最大"。实测这两段
+# 是纯重复——卖价恒等于买价 + 点差，点差在 Exness 上全窗口固定 240/240。
+# 占 tick 块 1/3、进场提示词 8.5%。现在卖价不再逐行印（用买价 + 末行的点差
+# 就能算出来），点差只在某一分钟跑偏时才标出来。
 
 TICK_RECENT = 10
 
@@ -462,12 +644,17 @@ def summarize_ticks(ticks: list[dict], bars: list[dict],
             jump = max(jump, abs(cur - prev) / point if point else 0.0)
         prev = cur
 
+    sp_sorted = sorted(spreads) if spreads else [0.0]
     return {
         "ok": True,
         "rows": rows,
         "total": len(ticks),
         "spread_avg": sum(spreads) / len(spreads) if spreads else 0.0,
         "spread_max": max(spreads) if spreads else 0.0,
+        "spread_min": min(spreads) if spreads else 0.0,
+        # 基准点差 = 中位数。渲染时只有偏离它的分钟才写点差——
+        # 固定点差券商（Exness 240/240）下等于每行都省掉一段。
+        "spread_base": sp_sorted[len(sp_sorted) // 2],
         "max_jump": jump,
         "recent": ticks[-recent:],
         "point": point,
@@ -475,38 +662,60 @@ def summarize_ticks(ticks: list[dict], bars: list[dict],
 
 
 def _fmt_tick_block(summary: dict, digits: int = 3) -> str:
+    """tick 块的文本形态。
+
+    **去掉了卖价区间和逐行点差**。原因不是"版面好看"，是实测重复：
+    卖价恒等于买价 + 点差、点差在固定点差券商上是全员同一个数
+    （Exness 全窗口 240/240）。实测这一段占了 tick 块的 1/3、
+    进场提示词的 8.5%，删掉不损失任何信息——点差仍然在汇总行里给
+    平均/最宽，某一分钟真跑偏了那一行会单独标出来。
+
+    "信息不丢"是这条改动的底线：省的是**重复**，不是**数据**。
+    """
     if not summary or not summary.get("ok"):
         return "（tick 数据暂不可用，只能依据上面的 K 线判断）"
 
     d = max(0, int(digits))
-    lines = ["分钟   tick数  买价区间                  卖价区间                  点差 均/最大"]
+    base = int(round(summary.get("spread_base") or summary.get("spread_avg") or 0))
+
+    def _sp_note(avg: float, mx: float) -> str:
+        """只在偏离基准点差时写出来。"""
+        a, m = int(round(avg)), int(round(mx))
+        if base and a == base and m == base:
+            return ""
+        return f"   点差 {a}/{m}"
+
+    lines = ["分钟   tick数  买价区间（卖价 = 买价 + 点差，见末行统计）"]
     for r in summary["rows"]:
         if not r.get("n"):
             lines.append(f"{r['tag']:<6} {0:>6}  —")
             continue
         lines.append(
-            f"{r['tag']:<6} {r['n']:>6}  "
-            f"{r['bid_lo']:.{d}f}-{r['bid_hi']:.{d}f}          "
-            f"{r['ask_lo']:.{d}f}-{r['ask_hi']:.{d}f}          "
-            f"{r['spread_avg']:.0f}/{r['spread_max']:.0f}"
+            f"{r['tag']:<6} {r['n']:>6}  {r['bid_lo']:.{d}f}-{r['bid_hi']:.{d}f}"
+            + _sp_note(r.get("spread_avg") or 0.0, r.get("spread_max") or 0.0)
         )
 
     recent = summary.get("recent") or []
     if recent:
         lines.append("")
-        lines.append(f"最近 {len(recent)} 笔 tick（时间 UTC，买价/卖价/点差）：")
+        lines.append(f"最近 {len(recent)} 笔 tick（时间 UTC，买价）")
         for t in recent:
             ts = int(t.get("time") or 0)
             clock = time.strftime("%H:%M:%S", time.gmtime(ts)) if ts else "--"
-            lines.append(
-                f"  {clock}  {float(t.get('bid') or 0):.{d}f}/{float(t.get('ask') or 0):.{d}f}"
-                f"  点差 {_spread_points(t, summary.get('point') or 0.001):.0f}"
-            )
+            sp = _spread_points(t, summary.get("point") or 0.001)
+            note = "" if (base and int(round(sp)) == base) else f"   点差 {int(round(sp))}"
+            lines.append(f"  {clock}  {float(t.get('bid') or 0):.{d}f}{note}")
 
+    s_min = int(round(summary.get("spread_min") or 0))
+    s_max = int(round(summary.get("spread_max") or 0))
+    s_avg = int(round(summary.get("spread_avg") or 0))
+    # 全程一个值就说"恒"——比"平均 240、最宽 240"少几个字，而且更准确
+    sp_text = (f"点差 恒 {s_avg} 点" if s_min == s_max
+               else f"点差 平均 {s_avg} 点、{s_min}~{s_max} 点")
     lines.append("")
     lines.append(
-        f"tick 合计 {summary['total']} 笔；点差 平均 {summary['spread_avg']:.0f} 点、"
-        f"最宽 {summary['spread_max']:.0f} 点；相邻 tick 最大单步跳动 {summary['max_jump']:.0f} 点。"
+        f"tick 合计 {summary['total']} 笔；{sp_text}；"
+        f"相邻 tick 最大单步跳动 {summary['max_jump']:.0f} 点。"
     )
     return "\n".join(lines)
 
@@ -607,7 +816,7 @@ tick 稀疏而安静 = 突破多半是假的。
   2) 【主】14 根 M1 K 线：序号（T-13…T-1、当前）/ 时间 / 开 / 高 / 低 / 收
   3) 【主】结构指标：ER、振幅与 ATR 倍数、收盘位置、连阳连阴、行情判定
   4) 【背景】M5 结构摘要（一行；程序拿不到时这一行不出现）
-  5) 【辅】tick 数据：每根内的笔数与买卖价区间、点差，以及最近若干笔原始 tick
+  5) 【辅】tick 数据：每根的笔数与买价区间，末行给全窗口点差与最大单步跳动
   6) 短周期变化与振幅
   7) 你的历史战绩与最近复盘
   8) 当前报价与来回成本
@@ -623,12 +832,15 @@ tick 稀疏而安静 = 突破多半是假的。
 
 【输出】
 只输出一个 JSON 对象，不要解释、不要 markdown 代码块、不要前后缀：
-{"act": true, "p_up": 0.00, "agree": true, "reason": ""}
+{"act": true, "p_up": 0.58, "agree": true, "reason": ""}
 act —— 这笔到底做不做。false 就是"不做"，这是允许的、也是常见的选择。
 p_up —— 未来 1~3 分钟内价格上涨的概率，0 到 1 之间的小数。
         即使 act=false 也要给，用来记录你当时的方向倾向。
         **只在 0.20 ~ 0.80 之间取值**：0/1 是伪精确（没人能百分百确定 1 分钟后
         的方向），写 0.20 就代表你最强的看空，0.80 代表最强的看多。
+        **上面示例里的 0.58 只是格式示范，不是建议值。** 每一次都要按当根
+        K 线重新估、写你自己的数；照着示例填等于没有判断，而且系统会把它
+        当成"极端确信"直接下单（历史上 46% 的单子就是这样变成了空单）。
 agree —— 你的方向判断是否与数据里「位置判定」的程序倾向一致。
         一致 true，不一致 false（此时 reason 必须给出你反对的依据）。
 reason —— 不超过 40 字的中文依据，必须引用输入里的具体数字。
@@ -734,7 +946,21 @@ REVIEW_SYSTEM = """你是一名 {SYMBOL_LABEL} 超短线交易员的复盘教练
   - 平完来回磨 → 无关紧要，重点看进场那一端。
 开仓和平仓是两个独立决策，哪个错就骂哪个，别混成一句"方向看错了"。
 
-只输出一句话，不超过 60 字，说清「主要因为什么赚/亏，下次同样情形该怎么做」。
+【最重要的判据：错在哪一端】
+这条教训会被注入到**下一次进场**或**下一次出场**的判断里，注错地方就是噪音，
+所以你必须先回答"错的是哪一端"，再从固定清单里选一个主题：
+  scope = "entry" → 进场这一端错了（方向看反、位置不对、该等没等、追了/接了刀）
+  scope = "exit"  → 出场这一端错了（平太早、平太晚、该走没走、拿着不放）
+  scope = "both"  → 两端都错，或者这笔纯粹是行情不给、说不出错在哪
+
+  theme 只能从这 8 个里选一个，照抄原文，不许自己造词：
+  方向与依据矛盾 / 逆势抢反弹/接刀 / 追破位/假突破 / 进场时点不对 /
+  止盈太早 / 止损太晚 / 出场时点不对 / 其他
+  "其他"只在确实归不进上面 7 类时用；拿不准时宁可归到最接近的那一类。
+
+只输出一个 JSON 对象，不要解释、不要 markdown 代码块、不要前后缀：
+{"scope": "exit", "theme": "止盈太早", "lesson": ""}
+lesson —— 一句话，不超过 60 字，说清「主要因为什么赚/亏，下次同样情形该怎么做」。
 不要客套，不要复述数字以外的事实。"""
 
 REVIEW_PROMPT = """这一笔刚平掉。
@@ -747,7 +973,7 @@ REVIEW_PROMPT = """这一笔刚平掉。
 序号  时间(UTC)      开      高      低      收
 {bars}
 
-只输出一句复盘结论。"""
+只输出那个 JSON 对象（scope / theme / lesson 三个字段），复盘内容全写在 lesson 里。"""
 
 
 # 行情状态分桶阈值。_structure_text 的「行情判定」和教训的 regime 标签
@@ -861,8 +1087,9 @@ def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
     「追破位」铁律按住。结果 18 笔里最近 4 笔全做多，而且全是在跌势里买跌。
 
     2026-10-25 话术降级：从「不许/唯一合法方向」改成「程序建议」。
-    旧话术把模型逼成二选一（顺从→p_up 钉死 0.0/1.0，反抗→也是极端值，
-    实测 46% 的 p_up 精确等于 0.0，30% 的单方向与理由矛盾）。
+    旧话术把模型逼成二选一：顺从时它直接复述程序结论（reason 里出现最多的
+    就是"贴下沿，可考虑做多，阈值35%"这种），反抗时给极端值。实测 46% 的
+    p_up 精确等于 0.0——那是输出示例的占位值被照抄，不是判断（见 clamp_p_up）。
     现在给方向倾向但明确告知可以不同意——中间概率才有机制上的存在空间。
     判定本身（ER+drift 的组合）不变，变的是语气和权限。
     """
@@ -1338,14 +1565,15 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     _log_call(True, usage, login=login, purpose="autotrade_review")
-    lesson = " ".join((text or "").split())[:120]
-    if not lesson:
+    parsed = parse_review(text)
+    if parsed is None:
         return {"ok": False, "error": "模型复盘返回空"}
     # 给这条教训打上「当时是什么行情」的标签：震荡里攒的教训，
     # 下次震荡时优先拿出来。**只用平仓前那一段算 ER**——平仓后的 7 根
     # 是给复盘判断用的，不属于这笔单子进场时面对的行情，混进来会串味。
     pre_close = [r for r in window if int(r.get("time") or 0) <= int(closed_at)]
-    return {"ok": True, "lesson": lesson, "bars": len(window),
+    return {"ok": True, "lesson": parsed["lesson"], "theme": parsed["theme"],
+            "scope": parsed["scope"], "bars": len(window),
             "regime": regime_of(pre_close)}
 
 
@@ -1357,6 +1585,22 @@ def _norm_lesson(text: str) -> str:
     """
     return re.sub(r"[^\u4e00-\u9fa5a-zA-Z]", "", text or "")
 
+
+# 主题枚举。新数据由复盘模型**直接给标签**（parse_review），下面那套词典只做两件事：
+#   1) 老数据（没有 theme 字段）兜底归类；
+#   2) 模型给的标签不在枚举里 / 给了"其他"时，再试一次关键词。
+# 为什么改成模型给标签：实测 188 条老教训里 167 条（89%）落进"其他"单例桶，
+# 因为模型的措辞是浮动的（"耐心等待反抽""等确认再进""方向不明确"），
+# 5 个固定关键词根本追不上，次数永远涨不到 5，铁律机制整场只触发过 1 次。
+LESSON_THEME_ENUM: tuple[str, ...] = (
+    "方向与依据矛盾", "逆势抢反弹/接刀", "追破位/假突破", "进场时点不对",
+    "止盈太早", "止损太晚", "出场时点不对", "点差/成本过高", "其他",
+)
+
+# 这条教训该注入到哪一端的提示词。注错端 = 纯噪音。
+# 实测：188 条老教训里 143 条（76%）讲的是平仓时机，但它们原来被同时注入
+# 进场提示词——进场决策读到"平仓别太早"，等于每轮都喂一遍无关信息。
+LESSON_SCOPES = ("entry", "exit", "both")
 
 # 教训的主题词典。按「特征词特异性」从强到弱排，一条教训只归第一个匹配上的主题。
 #
@@ -1370,9 +1614,35 @@ LESSON_THEMES: list[tuple[str, tuple[str, ...]]] = [
     ("方向与依据矛盾", ("自相矛盾", "依据相", "说不通")),
     ("逆势抢反弹/接刀", ("逆势", "接刀", "抄底", "摸顶", "抢反")),
     ("追破位/假突破", ("追破", "追空", "追多", "追单", "追高", "假突破", "插针")),
-    ("进场时点不对", ("太晚", "太早", "止跌", "确认再", "等回踩", "等反抽", "等确认")),
+    ("止盈太早", ("止盈太早", "平得太早", "平早了", "止盈过早", "卖早了", "离场太早")),
+    ("止损太晚", ("止损太晚", "扛单", "死扛", "没止损", "不止损", "舍不得砍")),
+    # 「出场」排在「进场时点」前面是有意的：像"等确认再平仓"这种句子，
+    # 同时含进场的"确认再"和出场的"平仓"，按关键词顺序会先命中进场——
+    # 实测就把一条平仓教训归成了进场教训，然后注入到进场提示词里。
+    # 出场词更具体，先匹配它。
+    ("出场时点不对", ("出场", "离场", "平仓", "过早", "拿太久", "拿不住", "持有太久")),
+    ("进场时点不对", ("太晚", "太早", "确认再", "等回踩", "等反抽", "等确认")),
     ("点差/成本过高", ("点差", "成本", "吃掉", "吃光", "吞掉")),
 ]
+
+# 推断 scope 用的词表。只用于**没有 scope 字段**的行（老数据 / 模型没答），
+# 属于启发式，不是精确分类：两个词表都命中就归 "both"。
+_EXIT_WORDS = ("平仓", "止盈", "止损", "离场", "持仓", "拿着", "拿住", "落袋",
+               "平掉", "平得", "太早", "过早", "太晚", "持有", "走")
+_ENTRY_WORDS = ("开仓", "进场", "入场", "接刀", "追多", "追空", "追破", "位置",
+                "区间", "回踩", "反抽", "突破", "下沿", "上沿")
+
+
+def infer_scope(text: str) -> str:
+    """猜一条教训讲的是进场还是出场。两条都没提或都提到 → "both"。"""
+    t = text or ""
+    ex = any(k in t for k in _EXIT_WORDS)
+    en = any(k in t for k in _ENTRY_WORDS)
+    if ex and not en:
+        return "exit"
+    if en and not ex:
+        return "entry"
+    return "both"
 
 
 def lesson_theme(text: str) -> str:
@@ -1383,25 +1653,50 @@ def lesson_theme(text: str) -> str:
     return ""
 
 
-def lesson_clusters(login=None, limit: int = 400) -> list[dict]:
-    """把复盘教训按主题归档并计次，按出现次数排序。
+def row_theme(r: dict) -> str:
+    """一条复盘行的主题：模型标的优先，标不了再退回关键词词典。"""
+    t = r.get("theme") or ""
+    if t in LESSON_THEME_ENUM and t != "其他":
+        return t
+    return lesson_theme(r.get("lesson") or "")
 
-    每个桶额外记 `regimes`：这条教训分别是在哪种行情状态下犯的
-    （"range"/"trend"/"mid"，旧数据没有标签归 ""=通用）。
+
+def row_scope(r: dict) -> str:
+    """一条复盘行该注入哪一端。字段缺失（老数据）→ 关键词推断，不丢数据。"""
+    s = r.get("scope") or ""
+    if s in LESSON_SCOPES:
+        return s
+    return infer_scope(r.get("lesson") or "")
+
+
+def lesson_clusters(login=None) -> list[dict]:
+    """把复盘教训按（主题 × 端）归档并计次，按出现次数排序。
+
+    数据源是 `lesson_rows()`（独立教训库、全量），**不再受 400 行窗口限制**。
+
+    **为什么桶要带上"端"**：只按主题分桶时，一个桶里既有进场教训也有出场教训，
+    注入哪一端都会把另一端的代表句带过去——实测第一次分域后，"平仓太早"
+    仍然出现在进场提示词里，因为同主题里混着 scope=both 的行。
+    按 (主题, 端) 分桶后，进场的桶只装进场的行，代表句不会串味；
+    scope=both 的桶按定义两端都该看，它两头都进。
+
+    每个桶额外记 `regimes`：这条教训分别是在哪种行情状态下犯的（""=旧数据没标签）。
     """
-    rows = [r for r in read_log(login, limit=limit)
-            if r.get("kind") == "review" and r.get("lesson")]
+    rows = lesson_rows(login)
 
     buckets: dict[str, dict] = {}
     for r in rows:
-        text = r["lesson"]
+        text = r.get("lesson") or ""
+        if not text:
+            continue
         ts = int(r.get("ts") or 0)
-        name = lesson_theme(text)
-        key = name or ("其他:" + _norm_lesson(text)[:24])
+        name = row_theme(r)
+        sc = row_scope(r)
+        key = (name or ("其他:" + _norm_lesson(text)[:24])) + "|" + sc
         b = buckets.get(key)
         if b is None:
-            b = buckets[key] = {"name": name, "count": 0, "lesson": text,
-                                "ts": ts, "regimes": {}}
+            b = buckets[key] = {"name": name, "domain": sc, "count": 0,
+                                "lesson": text, "ts": ts, "regimes": {}}
         b["count"] += 1
         rg = r.get("regime") or ""
         b["regimes"][rg] = b["regimes"].get(rg, 0) + 1
@@ -1416,6 +1711,36 @@ def lesson_clusters(login=None, limit: int = 400) -> list[dict]:
     return out
 
 
+# 桶的 domain 在提示词里的叫法。不写这一格，模型看不出这条是进场教训还是出场教训。
+_DOMAIN_TEXT = {"entry": "进场端", "exit": "出场端", "both": "两端"}
+
+# 主题自带的端属性。有些主题本身就是"某一端"的错误（追破位只可能是进场错、
+# 止盈太早只可能是出场错），这时标签里的 scope 说成"两端"也不能信——
+# 实测出现过「出场时点不对 · 两端 · 已犯 35 次」被塞进进场提示词。
+# 两道闸取交集：主题端 + 标签端都要过。
+THEME_DOMAIN = {
+    "追破位/假突破": "entry",
+    "逆势抢反弹/接刀": "entry",
+    "进场时点不对": "entry",
+    "止盈太早": "exit",
+    "止损太晚": "exit",
+    "出场时点不对": "exit",
+}
+
+
+def _scope_ok(c: dict, scope: str) -> bool:
+    """这个桶能不能注入到 `scope` 这一端。
+
+    `scope=""` = 不分域（老调用方、汇总渲染）。
+    """
+    if not scope:
+        return True
+    td = THEME_DOMAIN.get(c.get("name") or "", "")
+    if td and td != scope:        # 主题本身就是另一端的错，直接拦掉
+        return False
+    return c.get("domain") in ("both", scope)
+
+
 # 出现次数达到这个值的主题升级为「铁律」：从"参考教训"变成"先自查再动手"的禁令。
 # 定 5 的依据：实测 16 笔里「追破位」犯了 7 次还在犯——到 5 次说明提示词里
 # 普通一行字的剂量已经压不住这个错误，必须换更重的说法。
@@ -1423,8 +1748,8 @@ HARD_RULE_MIN = 5
 
 
 def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
-                   regime: str = "") -> str:
-    """取最反复出现的几条教训，塞进提示词（进场和出场都用）。
+                   regime: str = "", scope: str = "") -> str:
+    """取最反复出现的几条教训，塞进提示词。
 
     为什么按次数排序而不是按时间：
     复盘写了 14 条、多数在说"别逆势抢反弹"，那它就是真规律；
@@ -1441,6 +1766,10 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
     几条，硬排除会经常没东西可注。没打标签的旧教训（regime=""）任何
     状态都参与排序。
 
+    `scope` 是这一端（"entry"/"exit"），**硬过滤**，和 regime 的软匹配相反：
+    实测 76% 的教训讲的是平仓时机，把它们注进进场提示词是纯噪音，
+    宁可这一端暂时没经验可用，也不要错位。`scope=""` = 不分域（老调用方）。
+
     count >= HARD_RULE_MIN 的主题升级为「铁律」，单独成块放最前面，
     不占 n 个普通名额。
     """
@@ -1448,6 +1777,8 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
     if ignore_cost:
         clusters = [c for c in clusters
                     if not any(k in (c.get("name") or "") for k in ("点差", "成本"))]
+    if scope:
+        clusters = [c for c in clusters if _scope_ok(c, scope)]
     if not clusters:
         return "暂无复盘笔记。"
 
@@ -1466,7 +1797,9 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
         lines = []
         for c in hard:
             name = c["name"] or "反复犯的错误"
-            lines.append(f"- 【铁律 · 已犯 {c['count']} 次】{name}：{c['lesson']}")
+            dom = _DOMAIN_TEXT.get(c.get("domain") or "", "")
+            tail = f" · {dom}" if dom else ""
+            lines.append(f"- 【铁律 · 已犯 {c['count']} 次{tail}】{name}：{c['lesson']}")
         blocks.append("铁律（以下错误你已各犯多次，先自查这一笔是不是又要犯，"
                       "是就直接不做/立刻平，再考虑别的）：\n"
                       # 教训文本是模型自己写的，天然偏空（空单亏得多），
@@ -1479,12 +1812,14 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
         for c in soft:
             same = c["regimes"].get(regime, 0) if regime else 0
             tag = f"，本状态 {same} 次" if same else ""
+            dom = _DOMAIN_TEXT.get(c.get("domain") or "", "")
+            dtag = f" · {dom}" if dom else ""
             if c["count"] >= 2:
-                head = (f"[{c['name']} · 已出现 {c['count']} 次{tag}]" if c["name"]
-                        else f"[已出现 {c['count']} 次{tag}]")
+                head = (f"[{c['name']} · 已出现 {c['count']} 次{dtag}{tag}]" if c["name"]
+                        else f"[已出现 {c['count']} 次{dtag}{tag}]")
             else:
-                head = (f"[{c['name']} · 只出现 1 次，证据弱]" if c["name"]
-                        else "[只出现 1 次，证据弱]")
+                head = (f"[{c['name']}{dtag} · 只出现 1 次，证据弱]" if c["name"]
+                        else f"[只出现 1 次，证据弱{dtag}]")
             lines.append(f"- {head} {c['lesson']}")
         blocks.append("你从自己的交易里总结出的教训，按重复次数排序（次数越多越可能是"
                       "真规律，只出现一次的别当铁律）：\n" + "\n".join(lines))
@@ -1517,9 +1852,24 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
         row["lesson"] = res.get("lesson")
         row["bars"] = res.get("bars")
         row["regime"] = res.get("regime") or ""
+        # 主题与端：ask_review 正常会给；测试桩 / 老式返回只给 lesson 时在这里兜底，
+        # 保证落盘的行永远带这两个字段，注入端不用再猜。
+        row["theme"] = res.get("theme") or row_theme(row)
+        sc = res.get("scope") or ""
+        row["scope"] = sc if sc in LESSON_SCOPES else row_scope(row)
     else:
         row["error"] = res.get("error")
     append_log(row, login)
+    # 教训同时进独立教训库：它不随流水归档，重置战绩不会把经验一起清掉。
+    # 失败行（error）不进库——那不是经验，是"这次没复盘成功"。
+    if row.get("lesson"):
+        append_lesson({
+            "ts": row["ts"], "ticket": row.get("ticket"), "lesson": row["lesson"],
+            "theme": row["theme"], "scope": row["scope"],
+            "regime": row.get("regime") or "", "pnl": row.get("pnl"),
+            "direction": row.get("direction"), "source": "live",
+            "closed_at": closed_at,
+        }, login)
     return row
 
 
@@ -1594,16 +1944,34 @@ def process_due_reviews(cfg: Cfg, now: int, login=None) -> list[dict]:
 _JSON_MODE_OK = True
 
 
+# JSON mode 只该因为「这个模型/供应商根本不认这个参数」而永久关闭。
+# 以前把任何异常都当成"不支持"：一次 429 或超时就把 JSON mode 关掉不再打开，
+# 之后整条链路（进场/出场/复盘）都在用纯文本——实测 10-23 有 70 次 429/超时，
+# 等于那一天基本没吃到 JSON mode。临时错误现在只抛给调用方，不动开关。
+_JSON_OFF_HINTS = ("response_format", "json_object", "not support", "unsupported",
+                   "unknown parameter", "unrecognized", "unexpected keyword")
+
+
+def _json_mode_unsupported(exc: BaseException) -> bool:
+    if isinstance(exc, TypeError):
+        return True
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    return any(h in msg for h in _JSON_OFF_HINTS)
+
+
 def _chat(prompt: str, system: str):
     """调模型。优先要求 JSON mode（省输出 token、免解析失败），不支持就退回。"""
     global _JSON_MODE_OK
     if _JSON_MODE_OK:
         try:
             return _llm().chat_ex(prompt, system=system, json_mode=True)
-        except TypeError:
-            _JSON_MODE_OK = False       # 老版本 chat_ex 没这个参数
-        except Exception:  # noqa: BLE001
-            _JSON_MODE_OK = False       # 模型不支持 response_format
+        except Exception as exc:  # noqa: BLE001
+            if not _json_mode_unsupported(exc):
+                # 429 / 超时 / 网络 / 模型名写错：和 JSON mode 无关。
+                # 不关开关、也不在这里重试——重试只会再烧一次配额，
+                # 调用方本来就有"这一轮不做/继续持有"的失败处理。
+                raise
+            _JSON_MODE_OK = False       # 真不支持，记住，别每轮白试
     return _llm().chat_ex(prompt, system=system)
 
 
@@ -1635,7 +2003,7 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                 lots=cfg.lots,
                                 lessons=recent_lessons(
                                     login, ignore_cost=cfg.ignore_spread,
-                                    regime=regime_of(rows)),
+                                    regime=regime_of(rows), scope="entry"),
                                 zone_edge=cfg.zone_edge,
                                 ticks_text=ticks_text,
                                 mtf_text=mtf_text)
@@ -1672,7 +2040,7 @@ def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
                                ticks_text=ticks_text, symbol=cfg.symbol,
                                lessons=recent_lessons(
                                    login, ignore_cost=cfg.ignore_spread,
-                                   regime=regime_of(rows)),
+                                   regime=regime_of(rows), scope="exit"),
                                zone_edge=cfg.zone_edge,
                                mtf_text=mtf_text)
     held = int(time.time()) - int(position.get("opened_at") or time.time())
@@ -2054,13 +2422,26 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         held_sec = now - int(pos.get("opened_at") or now)
         float_pnl = _realized_pnl(cfg, pos, bid, ask)
 
+        # 峰值浮盈：这一笔从开仓到现在，浮盈最高摸到过多少（USD）。
+        #
+        # 存在的唯一目的是**用实测数据回答「3.25 到底几次能到」**。现在所有
+        # 「MFE 分布 / 3.25 可达率 59%」都只能靠 tools/replay_exit.py 反事实
+        # 回放 K 线，被问起来只能说「这是外推」。有了这个字段，下个交易日直接
+        # 数 close 行里 peak_pnl ≥ 3.25 的比例就是实测。
+        #
+        # 注意别写成 `pos.get("peak_pnl") or float_pnl`：peak_pnl 恰好是 0.0
+        # 时 `or` 会退回 float_pnl，把已经摸到的正峰值抹掉。
+        prev_peak = pos.get("peak_pnl")
+        peak = max(float(prev_peak if prev_peak is not None else float_pnl), float_pnl)
+        pos["peak_pnl"] = round(peak, 2)
+
         gate = _exit_gate(cfg, held_sec, float_pnl)
 
         # 闸门说不平：直接记 hold，不调模型（省 token，也断了"每轮问一次要不要跑"）
         if gate is not None and not gate.get("close"):
             row = {"ts": now, "kind": "hold", "reason": gate["reason"],
                    "source": gate["source"], "held_sec": held_sec,
-                   "float_pnl": round(float_pnl, 2)}
+                   "float_pnl": round(float_pnl, 2), "peak_pnl": pos["peak_pnl"]}
             state["last_decision"] = {
                 "ts": now, "kind": "exit", "close": False,
                 "reason": gate["reason"], "source": gate["source"],
@@ -2136,6 +2517,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             "direction": pos.get("direction"), "pnl": round(pnl, 2),
             "p_up": pos.get("p_up"), "hit": pnl > 0,
             "held_sec": held_sec,
+            "peak_pnl": pos.get("peak_pnl"),
             "entry_reason": pos.get("entry_reason"),
             "reason": decision.get("reason"), "source": decision.get("source"),
             "dry_run": cfg.dry_run,
@@ -2271,7 +2653,8 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float) -> dict | None:
     三条规则的来源（2026-10-23 第 3 场 191 笔的账）：
       · 60 秒中位持仓 = min_hold 从下限变成了目标，150 笔 ≤90 秒平仓吃掉 90% 的亏损；
       · avgW 1.011 / avgL 1.026 → 盈亏比 0.99，扣掉每笔 0.24 点差和 35.6% 胜率，必亏；
-      · 最大单笔 -6.08 是平均亏损的 5.9 倍，且它的 p_up=0.0（它最自信时亏最多）。
+      · 最大单笔 -6.08 是平均亏损的 5.9 倍，且它的 p_up=0.0（示例占位值被照抄，
+        又被 confidence 记成 1.0 的"最自信"，实际是没做判断）。
     """
     if cfg.sl_usd > 0 and float_pnl <= -abs(cfg.sl_usd):
         return {"close": True, "source": "sl",
@@ -2398,6 +2781,15 @@ def validate_cfg(cfg: Cfg) -> list[str]:
             f"止盈门槛 {cfg.tp_min_usd:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
             "盈亏比仍 ≤ 1，这套参数没解决必亏问题"
         )
+    # 止损快查的间隔只有下限有意义：< 2 秒时 MT5 tick 读取的抖动开始比价格
+    # 变化本身大，白白空转。**上界不在这里拦**——配得比决策间隔大也不报错，
+    # _wait_next 会把它夹到 interval_sec（等于没开）。理由：这是个纯粹的
+    # 安全网参数，配歪了最坏结果是"回到旧行为"，不该让人启动不了。
+    # 0 是合法的「关掉」。
+    if getattr(cfg, "guard_sec", 0.0) and cfg.guard_sec > 0 and cfg.guard_sec < 2:
+        issues.append(
+            f"止损快查间隔 {cfg.guard_sec:.1f} 秒太短（tick 读取抖动比价差还大），最小 2 秒"
+        )
     return issues
 
 
@@ -2413,6 +2805,65 @@ def next_wait_sec(row: dict, cfg: Cfg) -> float:
     if row.get("kind") == "close":
         return max(1.0, min(float(cfg.cooldown_sec + 1), float(cfg.interval_sec)))
     return float(cfg.interval_sec)
+
+
+def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float) -> str:
+    """持仓期间的硬止损快查。返回 '' = 没触发。
+
+    **只看 sl_usd 一条**，故意不看止盈门槛、也不看持仓上限：
+      · 止盈门槛一旦到线就该让模型说话，那是 tick() 里 _exit_gate 的活；
+      · 持仓上限是分钟级的粗规则，拿 5 秒的节拍去看它是浪费。
+
+    这里是纯读，不下单、不写流水、不调模型。开销就是一次 symbol_info_tick。
+    """
+    if cfg.sl_usd <= 0:
+        return ""
+    fp = _realized_pnl(cfg, pos, bid, ask)
+    if fp <= -abs(cfg.sl_usd):
+        return f"浮亏 {fp:+.2f} 触及 -{abs(cfg.sl_usd):.2f}"
+    return ""
+
+
+def _nap(sec: float, stop_wait=None, sleeper=None) -> bool:
+    """睡一段。传了 stop_wait（面板线程的 Event.wait）时返回是否收到停止信号。"""
+    sec = max(0.0, sec)
+    if stop_wait is not None:
+        return bool(stop_wait(sec))
+    (sleeper or time.sleep)(sec)
+    return False
+
+
+def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
+               stop_wait=None, sleeper=None, quote_fn=None) -> bool:
+    """等下一轮决策。有仓时把长睡切成 guard_sec 一格，硬止损过线就提前返回。
+
+    返回 True = 收到停止信号（只有面板线程会传 stop_wait，CLI 永远是 False）。
+
+    为什么是「提前返回」而不是「在这里平仓」：平仓要走 tick() 里的
+    _exit_gate → send_close → append_log → queue_review 整条链。在这里复制一份
+    就等于给同一件事留两个实现，迟早对不上账。这里只负责**把最坏 60 秒的
+    无人看守缩到 guard_sec**，剩下的原样交给下一轮。
+    """
+    deadline = started + next_wait_sec(row, cfg)
+    # 夹一道：配得比决策间隔大就等于没开，不如直接退回旧行为，别让短周期
+    # 配置（interval_sec=3）里一个默认的 5 秒快查把节奏搅乱。
+    guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
+
+    # 无仓 / 平仓轮 / 刚停：不需要快查，睡满一整轮（也省掉每格的报价读取）
+    pos = load_state(login).get("position") if guard > 0 else None
+    if not pos or row.get("kind") in ("close", "stop"):
+        return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
+
+    quote_fn = quote_fn or _quote
+    while deadline - time.time() > 1.0:
+        step = min(guard, deadline - time.time())
+        if _nap(step, stop_wait, sleeper):
+            return True
+        q = quote_fn(cfg.symbol)
+        if q and _guard_hit(cfg, pos, q[0], q[1]):
+            return False       # 剩下的时间不要了，立刻进下一轮去平仓
+    # 尾段不足 1 秒（或已经超时）：保底睡 1 秒，别空转
+    return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
 
 
 def run(cfg: Cfg, login=None) -> None:
@@ -2437,7 +2888,7 @@ def run(cfg: Cfg, login=None) -> None:
             print(_fmt(row), flush=True)
             if row.get("stop"):
                 break
-            time.sleep(max(1.0, started + next_wait_sec(row, cfg) - time.time()))
+            _wait_next(started, row, cfg, login)
     except KeyboardInterrupt:
         print("\n已手动中断。")
     finally:
@@ -2611,7 +3062,7 @@ class Worker:
                 row = {}
             if row.get("stop"):
                 break
-            self._stop.wait(max(1.0, started + next_wait_sec(row, cfg) - time.time()))
+            _wait_next(started, row, cfg, login, stop_wait=self._stop.wait)
 
         state = load_state(login)
         state["running"] = False
@@ -2643,16 +3094,21 @@ WORKER = Worker()
 # ------------------------------------------------------------------ 面板数据
 
 
-def reset_history(login: int | str | None = None) -> dict:
-    """清空「教训 + 战绩」：把决策流水和 state 归档，然后从零开始。
+def reset_history(login: int | str | None = None,
+                  clear_lessons: bool = False) -> dict:
+    """清空「战绩」：把决策流水和 state 归档，然后从零开始。
 
-    为什么要清：教训和战绩都会被拼进提示词。之前的亏损样本会让它越来越保守
-    （实测空单 1 胜 8 负 → 复盘攒出两条铁律 → 干脆不做空），换参数或换思路
-    之前必须有一个干净起点，否则新策略永远背着旧样本的包袱。
+    为什么要清：战绩会被拼进提示词（样本数、命中率），旧样本会让它越来越保守。
+    换参数或换思路之前必须有一个干净起点，否则新策略永远背着旧样本的包袱。
 
     为什么是「归档」不是「删除」：流水是唯一能回答「当时为什么这么判断」的
     东西，删掉就再也说不清。改名成 `autotrade_log.<时间戳>.jsonl` 留在同目录，
     面板只读不带时间戳的那两个文件名，所以等于从零开始，人随时还能翻旧账。
+
+    **教训默认保留**（`clear_lessons=False`）：教训在 `lessons.jsonl` 里，
+    和流水解耦。2026-10-26 之前它挂在流水上，一次重置就等于把经验清零——
+    实测 13:55 那次重置让 188 条教训全部不可见，注入变成「暂无复盘笔记」。
+    经验要跨场次才有意义，所以清经验必须是单独的动作（见 `reset_lessons`）。
     """
     state = load_state(login)
     if state.get("position"):
@@ -2673,7 +3129,10 @@ def reset_history(login: int | str | None = None) -> dict:
 
     tag = time.strftime("%Y%m%d-%H%M%S")
     archived: dict[str, str] = {}
-    for p, key in ((log_path(login), "log"), (state_path(login), "state")):
+    targets = [(log_path(login), "log"), (state_path(login), "state")]
+    if clear_lessons:
+        targets.append((lessons_path(login), "lessons"))
+    for p, key in targets:
         if p.exists():
             dst = p.with_name(f"{p.stem}.{tag}{p.suffix}")
             try:
@@ -2682,12 +3141,40 @@ def reset_history(login: int | str | None = None) -> dict:
             except OSError as exc:
                 return {"ok": False,
                         "error": f"归档失败（{key}）：{exc}。没有删除任何东西。"}
+            if key == "lessons":
+                # 留一个空文件 = 已清空的状态标记。没有它，lesson_rows() 会
+                # 退回去读归档流水，清完立刻又"长"出来。
+                p.write_text("", encoding="utf-8")
 
     save_state(_empty_state(), login)
     # 新流水第一行记一笔重置，之后翻日志能看出「这里换了个起点」
     append_log({"ts": int(time.time()), "kind": "reset", "cleared": cleared,
                 "archived": archived}, login)
-    return {"ok": True, "archived": archived, "cleared": cleared}
+    return {"ok": True, "archived": archived, "cleared": cleared,
+            "lessons_kept": not clear_lessons, "lessons": len(lesson_rows(login))}
+
+
+def reset_lessons(login: int | str | None = None) -> dict:
+    """只清经验：教训库里的一条不留，战绩（流水/state）原样保留。
+
+    什么时候用：旧教训本身就是错的（比如某条铁律是拿坏数据攒的），
+    或者换了打法、旧经验成了包袱。和「重置」分开，是因为这两件事的代价
+    完全不对称——清战绩只损失统计样本，清经验丢掉的是模型唯一的历史。
+    """
+    p = lessons_path(login)
+    if not p.exists():
+        return {"ok": True, "cleared": 0, "archived": None,
+                "note": "教训库本来就不存在"}
+    rows = _read_jsonl(p)
+    if not rows:
+        return {"ok": True, "cleared": 0, "archived": None, "note": "教训库已经是空的"}
+    dst = p.with_name(f"{p.stem}.{time.strftime('%Y%m%d-%H%M%S')}{p.suffix}")
+    try:
+        p.replace(dst)
+    except OSError as exc:
+        return {"ok": False, "error": f"归档失败：{exc}。没有删除任何东西。"}
+    p.write_text("", encoding="utf-8")     # 空文件 = 已清空，禁止回退读归档
+    return {"ok": True, "cleared": len(rows), "archived": dst.name}
 
 
 def cache_stats(login: int | str | None = None) -> dict:
@@ -2760,6 +3247,34 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 旧 state 里没有新加的字段，缺的时候要回退到当前默认值
     _defaults = Cfg()
 
+    # 今日口径：按平仓行的本地日期算。**不能拿 state["pnl"] 冒充「今日」**——
+    # 那个数是本进程累计，点一次「重置战绩」就归零，跨午夜也不会归零。
+    # 卡片上写「今日累计」就必须真的是今天。
+    today_str = time.strftime("%Y-%m-%d")
+    closes_today = [r for r in closes
+                    if time.strftime("%Y-%m-%d",
+                                     time.localtime(int(r.get("ts") or 0))) == today_str]
+    wins_today = sum(1 for r in closes_today if float(r.get("pnl") or 0) > 0)
+    pnl_today = round(sum(float(r.get("pnl") or 0) for r in closes_today), 2)
+
+    # 持仓浮动盈亏：面板顶部的常驻状态带要显示「这笔单现在赚还是亏」。
+    # 不在这里算的话，用户得滚回页面最上面看，或者去看券商的浮动（那是整个
+    # 账户的，含手动单，和这一笔对不上）。
+    # 代价是每次 summary 多读一次报价——面板 1 秒轮询一次，一次
+    # symbol_info_tick，和机器人自己每 5 秒读一次是同一个量级。
+    # 拿不到报价就给 None，让前端显示「—」，绝不猜一个数出来。
+    float_pnl = None
+    pos_now = state.get("position")
+    if pos_now:
+        try:
+            cfg_now = Cfg(**{k: v for k, v in saved_cfg.items()
+                             if k in Cfg.__dataclass_fields__})
+        except (TypeError, ValueError):
+            cfg_now = _defaults
+        q = _quote(cfg_now.symbol)
+        if q:
+            float_pnl = _realized_pnl(cfg_now, pos_now, q[0], q[1])
+
     # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
     # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。
     try:
@@ -2781,12 +3296,21 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "started_at": state.get("started_at"),
         "last_tick_ts": state.get("last_tick_ts"),
         "position": state.get("position"),
+        # 持仓浮动盈亏（USD）。None = 没仓或拿不到报价。状态带用它显示实时盈亏，
+        # 和峰值 peak_pnl 一起看就能当场判断「是不是摸到过门槛又吐回去」。
+        "float_pnl": float_pnl,
         "last_decision": state.get("last_decision"),
         "trades": len(opens),
         "closed": closed,
         "wins": wins,
         "hit_rate": round(wins / closed, 4) if closed else None,
         "pnl": state.get("pnl", 0.0),
+        # 今日口径（按平仓行本地日期）。面板和幕布上写「今日」的地方都用这组，
+        # 别再用 state["pnl"]——那个会随「重置战绩」归零，不是自然日。
+        "closed_today": len(closes_today),
+        "wins_today": wins_today,
+        "losses_today": len(closes_today) - wins_today,
+        "pnl_today": pnl_today,
         "llm_decisions": len(llm_decisions),
         "llm_closes": len(llm_closes),
         "llm_hit_rate": round(llm_wins / len(llm_closes), 4) if llm_closes else None,
@@ -2800,8 +3324,14 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "sl_usd": saved_cfg.get("sl_usd", _defaults.sl_usd),
         "tp_min_usd": saved_cfg.get("tp_min_usd", _defaults.tp_min_usd),
         "max_hold_sec": saved_cfg.get("max_hold_sec", _defaults.max_hold_sec),
+        # 止损快查间隔。0 = 关（每 interval_sec 才看一次止损）。面板要显示，
+        # 否则用户没法判断「止损会不会超调」这件事现在到底有没有生效。
+        "guard_sec": saved_cfg.get("guard_sec", _defaults.guard_sec),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
+        # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：
+        # 「重置」之后这里不清零，才说明经验真的留住了。
+        "lessons": len(lesson_rows(login)),
         # 已平仓但还没到复盘时机的单子：面板据此显示「还要等几根」，
         # 否则用户会以为复盘坏了。
         "pending_reviews": len(pending),

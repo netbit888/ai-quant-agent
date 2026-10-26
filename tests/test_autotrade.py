@@ -233,6 +233,196 @@ class TestNextWait(unittest.TestCase):
         self.assertEqual(autotrade.next_wait_sec({"kind": "close"}, cfg), 60)
 
 
+# ------------------------------------------------------------------ 止损快查
+
+
+class TestGuardFastCheck(TempLedger):
+    """持仓期的硬止损快查（guard_sec）。
+
+    动机是能算出来的：决策间隔 60 秒，而 XAUUSD M1 单根 K 线振幅中位 1.51 USD。
+    止损只在每 60 秒那一格被看一眼，意味着价格能在两次检查之间跑完整根 K 线，
+    止损**永远不是按 3.00 成交的**。实测 2026-10-26 13:13 那笔：13:42:42 浮亏
+    -2.06，13:43:42 以 -3.77 平掉，超调 0.77（把止损放大 26%）。
+
+    快查只做一件事：提前结束等待，让下一轮 tick() 走老路去平仓。
+    """
+
+    class _Clock:
+        """假时钟。sleep 推进时间，这样测「等了多久」不用真等。"""
+
+        def __init__(self, t: float = 1_000_000.0):
+            self.t = t
+            self.sleeps: list[float] = []
+
+        def time(self) -> float:
+            return self.t
+
+        def sleep(self, sec: float) -> None:
+            self.sleeps.append(round(sec, 2))
+            self.t += sec
+
+    def _position(self, price_open=4000.0, direction=1, peak=None,
+                  opened_at=NOW - 60) -> dict:
+        state = autotrade._empty_state()
+        pos = {"ticket": -1, "direction": direction, "lots": 0.01,
+               "price_open": price_open, "opened_at": opened_at,
+               "p_up": 0.6, "entry_reason": "突破", "dry_run": True}
+        if peak is not None:
+            pos["peak_pnl"] = peak
+        state["position"] = pos
+        autotrade.save_state(state)
+        return pos
+
+    # --- 快查本身 -------------------------------------------------------
+
+    def test_guard_only_cares_about_stop_loss(self):
+        """止盈到没到、持仓多久，都不归快查管——那些是 _exit_gate 的活。"""
+        cfg = autotrade.Cfg(sl_usd=3.0, tp_min_usd=3.25)
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0}
+        self.assertEqual(autotrade._guard_hit(cfg, pos, 4000.5, 4000.74), "")
+        self.assertEqual(autotrade._guard_hit(cfg, pos, 3998.0, 3998.24), "")
+        self.assertIn("触及", autotrade._guard_hit(cfg, pos, 3996.5, 3996.74))
+
+    def test_short_side_stop_uses_ask(self):
+        """空单平在 ask，快查不能拿 bid 算，否则点差会吃掉 0.24 的判定余量。"""
+        cfg = autotrade.Cfg(sl_usd=3.0)
+        pos = {"direction": -1, "lots": 0.01, "price_open": 4000.0}
+        self.assertEqual(autotrade._guard_hit(cfg, pos, 4002.66, 4002.90), "")
+        self.assertIn("触及", autotrade._guard_hit(cfg, pos, 4003.0, 4003.24))
+
+    def test_zero_stop_disables_guard(self):
+        cfg = autotrade.Cfg(sl_usd=0)
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0}
+        self.assertEqual(autotrade._guard_hit(cfg, pos, 3900.0, 3900.24), "")
+
+    # --- 等待时序 -------------------------------------------------------
+
+    def test_stop_hit_wakes_up_before_the_round_ends(self):
+        """这条是整个改动的目的：浮亏过线时不等满 60 秒。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            woke = autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg,
+                sleeper=clock.sleep, quote_fn=lambda s: (3996.5, 3996.74))
+        self.assertFalse(woke)
+        self.assertLess(clock.t - 1_000_000.0, 60)      # 没等满一轮
+        self.assertLessEqual(clock.t - 1_000_000.0, 5)  # 第一格就发现
+
+    def test_no_stop_still_waits_the_full_round(self):
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg,
+                sleeper=clock.sleep, quote_fn=lambda s: (4000.2, 4000.44))
+        self.assertGreaterEqual(clock.t - 1_000_000.0, 60)
+        self.assertLessEqual(len(clock.sleeps), 14)     # 每 5 秒一格，不是死循环
+
+    def test_flat_round_never_reads_quotes(self):
+        """空仓时决策轮本来就是 60 秒，多读 12 次报价纯属浪费。"""
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5)
+        clock = self._Clock()
+        calls: list[str] = []
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "skip"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (calls.append(s), (4000.0, 4000.24))[1])
+        self.assertEqual(calls, [])
+        self.assertEqual(len(clock.sleeps), 1)
+
+    def test_close_round_never_reads_quotes(self):
+        """平仓轮按 cooldown+1 唤醒，那时候手上已经没有仓了。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=30, guard_sec=5)
+        clock = self._Clock()
+        calls: list[str] = []
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "close"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (calls.append(s), (4000.0, 4000.24))[1])
+        self.assertEqual(calls, [])
+        self.assertEqual(clock.sleeps, [31.0])
+
+    def test_guard_zero_falls_back_to_plain_sleep(self):
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=0)
+        clock = self._Clock()
+        calls: list[str] = []
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (calls.append(s), (3996.5, 3996.74))[1])
+        self.assertEqual(calls, [])
+        self.assertEqual(clock.sleeps, [60.0])
+
+    def test_stop_signal_breaks_the_wait(self):
+        """面板线程的停止事件要能打断快查循环，否则停机要等一整格。"""
+        self._position()
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5)
+        self.assertTrue(autotrade._wait_next(
+            1_000_000.0, {"kind": "hold"}, cfg,
+            stop_wait=lambda sec: True, quote_fn=lambda s: (4000.0, 4000.24)))
+
+    def test_guard_bounds_are_validated(self):
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(guard_sec=5)), [])
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(guard_sec=0)), [])
+        self.assertTrue(any("太短" in x
+                            for x in autotrade.validate_cfg(autotrade.Cfg(guard_sec=1))))
+        # 配得比决策间隔大不算错：_wait_next 会夹到 interval_sec
+        self.assertEqual(
+            autotrade.validate_cfg(autotrade.Cfg(interval_sec=60, guard_sec=90)), [])
+
+    # --- 峰值浮盈埋点 ---------------------------------------------------
+
+    def test_peak_pnl_is_recorded_on_hold_and_close(self):
+        """peak_pnl 的唯一用途：用实测数据回答「3.25 几次能到」。
+
+        没有它只能靠 replay_exit 反事实回放 K 线，被问起来只能说「这是外推」。
+        """
+        self._position()
+        cfg = autotrade.Cfg(dry_run=True, sl_usd=3.0, tp_min_usd=3.25)
+        # 第一轮浮盈 +2.0 → 记下 2.0
+        with mock.patch.object(autotrade, "ask_exit") as m_exit:
+            row1 = autotrade.tick(cfg, now=NOW, quote=(4002.0, 4002.24),
+                                  rows=bars_up(), positions=[])
+        self.assertEqual(row1["kind"], "hold")
+        self.assertEqual(row1["peak_pnl"], 2.0)
+        m_exit.assert_not_called()
+
+        # 第二轮回落到 +0.5 → 峰值必须留在 2.0，不能被 `or` 抹掉
+        with mock.patch.object(autotrade, "ask_exit") as m_exit:
+            row2 = autotrade.tick(cfg, now=NOW + 60, quote=(4000.5, 4000.74),
+                                  rows=bars_up(), positions=[])
+        self.assertEqual(row2["float_pnl"], 0.5)
+        self.assertEqual(row2["peak_pnl"], 2.0)
+        m_exit.assert_not_called()
+
+        # 峰值正好是 0.0：不能因为 `or` 把 0.0 当假值退回当前浮盈
+        self._position(peak=0.0)
+        with mock.patch.object(autotrade, "ask_exit"):
+            row3 = autotrade.tick(cfg, now=NOW, quote=(3999.5, 3999.74),
+                                  rows=bars_up(), positions=[])
+        self.assertEqual(row3["float_pnl"], -0.5)
+        self.assertEqual(row3["peak_pnl"], 0.0)
+
+    def test_peak_pnl_reaches_close_row(self):
+        """止损平仓时也要带上峰值，否则「摸到过多少才被止损」数不出来。"""
+        self._position()
+        cfg = autotrade.Cfg(dry_run=True, sl_usd=3.0, tp_min_usd=3.25)
+        with mock.patch.object(autotrade, "ask_exit"):
+            autotrade.tick(cfg, now=NOW, quote=(4002.0, 4002.24),
+                           rows=bars_up(), positions=[])
+        row = autotrade.tick(cfg, now=NOW + 60, quote=(3996.5, 3996.74),
+                             rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "close")
+        self.assertEqual(row["source"], "sl")
+        self.assertEqual(row["peak_pnl"], 2.0)
+        self.assertLess(row["pnl"], -3.0)   # 止损按市价成交，超调是真实存在的
+
+
 # ------------------------------------------------------------------ 开仓闸门
 
 
@@ -906,6 +1096,53 @@ class TestTickSummary(unittest.TestCase):
         self.assertIn("最近", text)
         self.assertIn("当前", text)
 
+    # ---- 2026-10-26 瘦身：卖价区间逐行重复、点差固定时每行都印一遍 ----
+    #
+    # 实测原格式占 tick 块 1/3、进场提示词 8.5%，而这两段信息是**可推算的**：
+    # 卖价 = 买价 + 点差，点差在 Exness 上全窗口固定 240/240。
+    # 省的是重复，不是数据——「点差有没有异常」必须还能看出来。
+
+    def test_sell_range_is_not_repeated_per_row(self):
+        bars = bars_down(20)
+        s = autotrade.summarize_ticks(ticks_for(bars), bars, point=0.001)
+        text = autotrade._fmt_tick_block(s)
+        self.assertNotIn("卖价区间", text)     # 列没了
+        self.assertIn("卖价 = 买价 + 点差", text)  # 但换算法要在表头讲清
+        self.assertEqual(text.count("点差"), 2)  # 表头一次 + 汇总行一次
+
+    def test_fixed_spread_is_stated_once(self):
+        """固定点差说「恒」，比「平均 240、最宽 240」更短也更准。"""
+        bars = bars_down(20)
+        s = autotrade.summarize_ticks(ticks_for(bars), bars, point=0.001)
+        self.assertIn("点差 恒 240 点", autotrade._fmt_tick_block(s))
+
+    def test_abnormal_spread_is_still_flagged(self):
+        """点差某分钟放大时那一行必须标出来，否则等于把风控信息删了。"""
+        bars = bars_down(20)
+        w = autotrade.visible_bars(bars)
+        ticks = ticks_for(bars, per_bar=2)
+        # 把最后一根里的 tick 点差拉宽到 0.7（700 点）
+        last_t = int(w[-1]["time"])
+        for t in ticks:
+            if t["time"] >= last_t:
+                t["ask"] = t["bid"] + 0.7
+        s = autotrade.summarize_ticks(ticks, bars, point=0.001)
+        text = autotrade._fmt_tick_block(s)
+        self.assertIn("点差 700/700", text)
+        # 基准（中位数）仍是 240，其他行不该跟着印，也不再宣称「恒」
+        self.assertNotIn("点差 恒", text)
+        self.assertEqual(text.count("240/240"), 0)
+
+    def test_block_is_materially_shorter(self):
+        """回归护栏：瘦身后长度不能反弹。原格式在这组数据上是 1612 字符量级。"""
+        bars = bars_down(20)
+        s = autotrade.summarize_ticks(ticks_for(bars, per_bar=20), bars, point=0.001)
+        text = autotrade._fmt_tick_block(s)
+        self.assertLess(len(text.split("\n")[0]), 60)   # 表头不许再胖回去
+        for line in text.split("\n")[1:15]:
+            if line.strip() and line[0] in "T当":
+                self.assertLess(len(line), 45, f"每分钟行太宽: {line!r}")
+
     def test_unavailable_block_is_explicit(self):
         text = autotrade._fmt_tick_block({"ok": False})
         self.assertIn("不可用", text)
@@ -1062,6 +1299,29 @@ class TestJsonMode(TempLedger):
         with mock.patch("agent.llm.chat_ex", fake):
             autotrade.ask_entry(bars_up(20), 4040.0, 4040.24, autotrade.Cfg())
         self.assertEqual(calls, [False])
+
+    def test_transient_error_does_not_disqualify_json_mode(self):
+        """429 / 超时跟 JSON mode 无关，不许因此把它永久关掉。
+
+        实测 10-23 一天有 70 次 429/超时：旧逻辑第一次撞上就把开关关死，
+        之后所有调用（含复盘）都在跑纯文本，而且从日志里看不出来。
+        """
+        for boom in ("429 Too Many Requests", "timeout", "Connection reset by peer"):
+            autotrade._JSON_MODE_OK = True
+            calls = []
+
+            def fake(prompt, system=None, json_mode=False, _e=boom):
+                calls.append(json_mode)
+                if json_mode:
+                    raise RuntimeError(_e)
+                return '{"p_up": 0.4, "reason": "弱"}', {}
+
+            with mock.patch("agent.llm.chat_ex", fake):
+                got = autotrade.ask_entry(bars_up(20), 4040.0, 4040.24, autotrade.Cfg())
+
+            self.assertEqual(calls, [True], boom)          # 不重试，省一次配额
+            self.assertTrue(autotrade._JSON_MODE_OK, boom)  # 开关不动
+            self.assertEqual(got["source"], "error", boom)  # 这一轮不做
 
 
 # ------------------------------------------------------------------ 行情结构 ER
@@ -1930,6 +2190,237 @@ class TestLessons(TempLedger):
         self.assertLess(p.index("追破位"), p.index("区间中间"))
 
 
+# ---------------------------------------------------------------- 复盘结构化输出
+
+
+class TestParseReview(unittest.TestCase):
+    """复盘输出是 {scope, theme, lesson}。宽进：JSON / 纯文本都要能吃。"""
+
+    def test_clean_json(self):
+        got = autotrade.parse_review(
+            '{"scope": "exit", "theme": "止盈太早", "lesson": "平早了，该等结构走完"}')
+        self.assertEqual(got["scope"], "exit")
+        self.assertEqual(got["theme"], "止盈太早")
+        self.assertEqual(got["lesson"], "平早了，该等结构走完")
+
+    def test_plain_prose_still_usable(self):
+        """json_mode 会被一次 429 永久关掉，现场基本是纯文本返回——不能不认。"""
+        got = autotrade.parse_review("主要因为追破位被假突破打掉，下次等真跌破再进。")
+        self.assertEqual(got["theme"], "追破位/假突破")
+        self.assertEqual(got["scope"], "entry")
+        self.assertIn("追破位", got["lesson"])
+
+    def test_other_theme_falls_back_to_keywords(self):
+        """模型偷懒写"其他"时，关键词还能救一次。"""
+        got = autotrade.parse_review(
+            '{"scope": "exit", "theme": "其他", "lesson": "止盈太早，该多拿一会儿"}')
+        self.assertEqual(got["theme"], "止盈太早")
+
+    def test_illegal_scope_is_inferred(self):
+        got = autotrade.parse_review(
+            '{"scope": "???", "theme": "追破位/假突破", "lesson": "追破位被扫"}')
+        self.assertEqual(got["scope"], "entry")
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(autotrade.parse_review("   "))
+
+    def test_theme_enum_is_closed(self):
+        """枚举之外的主题不许自由生长，否则聚类的老毛病（一桶一条）会回来。"""
+        got = autotrade.parse_review(
+            '{"scope": "entry", "theme": "手痒了", "lesson": "手痒开了一笔"}')
+        self.assertIn(got["theme"], autotrade.LESSON_THEME_ENUM)
+
+
+class TestAskReview(unittest.TestCase):
+    """ask_review 端到端：模型回 JSON 时，theme/scope 要一起带出来。"""
+
+    def _rows(self):
+        return [bar(4000 + i, 4001 + i, 3999 + i, 4000.0 + i, NOW + i * 60)
+                for i in range(60)]
+
+    def _pos(self):
+        return {"direction": 1, "lots": 0.01, "price_open": 4000.0,
+                "entry_reason": "突破", "exit_reason": "动能衰竭",
+                "opened_at": NOW}
+
+    def _run(self, reply):
+        with mock.patch.object(autotrade, "_bars", return_value=self._rows()), \
+             mock.patch("agent.llm.chat_ex", return_value=(reply, {})):
+            return autotrade.ask_review(autotrade.Cfg(review=True), self._pos(),
+                                        4005.0, 5.0, NOW, NOW + 20 * 60)
+
+    def test_json_reply_parsed(self):
+        res = self._run('{"scope": "exit", "theme": "止盈太早", "lesson": "平早了，结构没走完"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["theme"], "止盈太早")
+        self.assertEqual(res["scope"], "exit")
+        self.assertEqual(res["lesson"], "平早了，结构没走完")
+        # regime 由程序按平仓前那一段算，不许为空壳（bars 够时必须打上）
+        self.assertIn(res["regime"], ("range", "trend", "mid"))
+
+    def test_prose_reply_still_works(self):
+        """json_mode 掉了也照样能用——现场多数时候是纯文本。"""
+        res = self._run("主要因为追破位被假突破打掉，下次等真跌破再进。")
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["theme"], "追破位/假突破")
+        self.assertEqual(res["scope"], "entry")
+
+
+class TestLessonScope(TempLedger):
+    """教训分域：写偏一端，整端都别用。
+
+    实测 188 条老教训里 143 条（76%）讲的是平仓时机，原来它们被同时注入
+    进场提示词——进场决策读到"平仓别太早"，等于每轮都喂一遍无关信息。
+    """
+
+    def _add(self, lesson, ts, scope=None):
+        row = {"ts": ts, "kind": "review", "lesson": lesson}
+        if scope:
+            row["scope"] = scope
+        autotrade.append_log(row)
+
+    def test_exit_lesson_not_injected_into_entry(self):
+        self._add("止盈太早，结构没走完就平了", NOW, scope="exit")
+        self.assertIn("暂无", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("止盈太早", autotrade.recent_lessons(scope="exit"))
+
+    def test_entry_lesson_not_injected_into_exit(self):
+        self._add("逆势接刀，等止跌阳线再进", NOW, scope="entry")
+        self.assertIn("逆势接刀", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("暂无", autotrade.recent_lessons(scope="exit"))
+
+    def test_both_reaches_both_ends(self):
+        self._add("方向与依据矛盾，两端都没想清楚", NOW, scope="both")
+        self.assertIn("方向与依据", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("方向与依据", autotrade.recent_lessons(scope="exit"))
+
+    def test_legacy_rows_get_inferred_scope(self):
+        """老数据没有 scope 字段：靠关键词推断，不许直接丢掉。"""
+        self._add("平仓太早，该等结构走完", NOW)
+        self.assertIn("平仓太早", autotrade.recent_lessons(scope="exit"))
+        self.assertIn("暂无", autotrade.recent_lessons(scope="entry"))
+
+    def test_no_scope_means_no_filter(self):
+        self._add("平仓太早，该等结构走完", NOW, scope="exit")
+        self._add("逆势接刀，等止跌再进", NOW + 1, scope="entry")
+        s = autotrade.recent_lessons()
+        self.assertIn("平仓太早", s)
+        self.assertIn("逆势接刀", s)
+
+    def test_theme_domain_beats_scope_label(self):
+        """主题本身就是某一端的错，标签写"两端"也不许跨端注入。
+
+        实测：老数据被标成 scope=both 的「出场时点不对」共 35 条，
+        分域后仍然整块进了进场提示词——等于白分。
+        """
+        self._add("平仓时机过早，应等待突破后确认再平仓", NOW, scope="both")
+        self.assertIn("暂无", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("平仓时机", autotrade.recent_lessons(scope="exit"))
+
+    def test_entry_and_exit_use_their_own_pool(self):
+        """端到端：进场问模型时提示词里不许出现出场教训，反之亦然。"""
+        self._add("止盈太早，结构没走完就平了", NOW, scope="exit")
+        seen = {}
+
+        def fake(prompt, system=None, json_mode=False):
+            seen["entry"] = prompt
+            return '{"act": false, "p_up": 0.5, "reason": "观望"}', {}
+
+        with mock.patch("agent.llm.chat_ex", fake):
+            autotrade.ask_entry(bars_up(20), 4040.0, 4040.24, autotrade.Cfg())
+        self.assertNotIn("止盈太早", seen["entry"])
+
+
+class TestLessonStore(TempLedger):
+    """教训库独立于流水：重置战绩不清经验，清经验不动战绩。"""
+
+    def _review(self, lesson, ts, ticket=1, theme="", scope=""):
+        with mock.patch.object(autotrade, "ask_review",
+                               return_value={"ok": True, "lesson": lesson, "bars": 15,
+                                             "regime": "range", "theme": theme,
+                                             "scope": scope}):
+            pos = {"ticket": ticket, "direction": 1, "lots": 0.01,
+                   "price_open": 4000.0, "opened_at": ts - 120}
+            return autotrade._do_review(autotrade.Cfg(review=True), pos, 4005.0, 5.0, ts)
+
+    def test_review_lands_in_own_file(self):
+        row = self._review("追破位被扫", NOW, theme="追破位/假突破", scope="entry")
+        self.assertEqual(row["theme"], "追破位/假突破")
+        self.assertEqual(row["scope"], "entry")
+        p = autotrade.lessons_path()
+        self.assertTrue(p.exists())
+        lines = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["theme"], "追破位/假突破")
+        self.assertEqual(lines[0]["scope"], "entry")
+        self.assertEqual(lines[0]["source"], "live")
+
+    def test_missing_theme_is_filled_by_keywords(self):
+        """测试桩/老调用只给 lesson 时，落盘也必须带 theme+scope。"""
+        row = self._review("逆势接刀，等止跌再进", NOW)
+        self.assertEqual(row["theme"], "逆势抢反弹/接刀")
+        self.assertEqual(row["scope"], "entry")
+
+    def test_reset_keeps_lessons(self):
+        """这是本次改动的核心：重置战绩不许把经验一起清掉。"""
+        self._review("追破位被扫，等确认再进", NOW, theme="追破位/假突破", scope="entry")
+        autotrade.append_log({"ts": NOW + 60, "kind": "open", "direction": 1, "p_up": 0.7})
+        res = autotrade.reset_history()
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertTrue(res["lessons_kept"])
+        self.assertEqual(len(autotrade.lesson_rows()), 1)
+        self.assertIn("追破位", autotrade.recent_lessons(scope="entry"))
+        # 战绩确实清了
+        self.assertEqual([r.get("kind") for r in autotrade.read_log()], ["reset"])
+
+    def test_reset_lessons_clears_only_lessons(self):
+        self._review("追破位被扫", NOW, theme="追破位/假突破", scope="entry")
+        autotrade.append_log({"ts": NOW + 60, "kind": "open", "direction": 1, "p_up": 0.7})
+        res = autotrade.reset_lessons()
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["cleared"], 1)
+        self.assertEqual(autotrade.lesson_rows(), [])
+        # 清完不许回退去读归档流水，否则"清空"立刻又长回来
+        self.assertEqual(len(autotrade.read_log()), 2)
+        self.assertIn("暂无", autotrade.recent_lessons())
+        self.assertTrue(list(autotrade.lessons_path().parent.glob("lessons.*.jsonl")))
+
+    def test_no_400_row_window(self):
+        """教训库必须全量：以前 read_log(limit=400) 让 188 条复盘只剩 86 条进库。"""
+        for i in range(420):
+            autotrade.append_log({"ts": NOW + i, "kind": "skip", "reason": "冷却中"})
+        for i in range(3):
+            autotrade.append_log({"ts": NOW + 500 + i, "kind": "review",
+                                  "lesson": f"在{4030 + i}追破位被假突破打掉，等确认再进"})
+        self.assertIn("已出现 3 次", autotrade.recent_lessons())
+
+    def test_lesson_file_makes_log_fallback_irrelevant(self):
+        """有教训库之后，即使流水被清空，经验也还在。"""
+        self._review("逆势接刀，等止跌再进", NOW, theme="逆势抢反弹/接刀", scope="entry")
+        autotrade.reset_history()                 # 流水归档
+        autotrade.append_log({"ts": NOW + 90, "kind": "reset"})
+        self.assertIn("逆势接刀", autotrade.recent_lessons(scope="entry"))
+
+    def test_migrate_pulls_archived_lessons_back(self):
+        """升级时把历史流水里的复盘搬进教训库：含归档文件，重复跑不翻倍。"""
+        autotrade.append_log({"ts": NOW, "kind": "review", "ticket": 1,
+                              "lesson": "追破位被扫，等确认再进", "regime": "trend"})
+        autotrade.append_log({"ts": NOW + 60, "kind": "review", "ticket": 2,
+                              "lesson": "止盈太早，该多拿一会儿", "regime": "range"})
+        autotrade.reset_history()                 # 流水变成归档文件
+        res = autotrade.migrate_lessons()
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["migrated"], 2)
+        rows = autotrade.lesson_rows()
+        self.assertEqual(len(rows), 2)
+        got = {r["lesson"][:4]: r for r in rows}
+        self.assertEqual(got["追破位被"]["theme"], "追破位/假突破")
+        self.assertEqual(got["止盈太早"]["scope"], "exit")
+        self.assertEqual(got["追破位被"]["source"], "migrated")
+        # 重复跑不覆盖
+        self.assertFalse(autotrade.migrate_lessons()["ok"])
+
+
 
 # ------------------------------------------------------------------ 汇总
 
@@ -2252,6 +2743,140 @@ class TestSystemFollowsCfg(unittest.TestCase):
         text = autotrade.system_for(autotrade.ENTRY_SYSTEM,
                                     autotrade.Cfg(symbol="WHATEVER"))
         self.assertIn("WHATEVER", text)
+
+
+class TestEntrySystemExample(unittest.TestCase):
+    """输出示例里的 p_up 不能是会被模型照抄的占位值。
+
+    实测 193 笔里 89 笔（46.1%）的 p_up 精确等于 0.0，**且这 89 笔全是空单**
+    —— 根因是 ENTRY_SYSTEM 的 JSON 示例写着 `"p_up": 0.00`，与正文
+    「只在 0.20 ~ 0.80 之间取值」直接冲突。模型按示例填，程序按
+    `p_up > 0.5 else -1` 读成「最强看空」，于是开空单。
+    clamp_p_up 只是把它压成 0.20（仍是极端看空），日志里再也看不到 0.0，
+    等于把 bug 藏起来了 —— 所以这里必须直接断言**示例原文**，不能经 clamp。
+    """
+
+    def _example(self):
+        m = re.search(r'\{"act".*?\}', autotrade.ENTRY_SYSTEM)
+        self.assertIsNotNone(m, "ENTRY_SYSTEM 里找不到 JSON 输出示例")
+        return json.loads(m.group(0))
+
+    def test_example_p_up_inside_stated_range(self):
+        """示例值必须落在正文声明的区间里（不走 parse_p_up，否则会被 clamp 洗白）。"""
+        v = float(self._example()["p_up"])
+        self.assertGreaterEqual(v, autotrade.P_UP_FLOOR)
+        self.assertLessEqual(v, autotrade.P_UP_CEIL)
+
+    def test_example_p_up_is_not_a_template_value(self):
+        """0 / 0.5 / 1 都不该做示例：要么会被照抄，要么示例本身就在示范弃权。"""
+        self.assertNotIn(float(self._example()["p_up"]), (0.0, 0.5, 1.0))
+
+    def test_example_tells_model_not_to_copy(self):
+        self.assertIn("只是格式示范", autotrade.ENTRY_SYSTEM)
+
+    def test_stated_range_matches_clamp(self):
+        """正文写的区间必须和 clamp_p_up 的常量同源，否则又是一处自相矛盾。"""
+        self.assertIn(f"{autotrade.P_UP_FLOOR:.2f} ~ {autotrade.P_UP_CEIL:.2f}",
+                      autotrade.ENTRY_SYSTEM)
+
+
+class TestSummaryFloatPnl(TempLedger):
+    """面板顶部常驻状态带要显示「这笔单现在赚还是亏」，数据来自 summary。
+
+    为什么必须由后端算：券商的浮动盈亏是整个账户的（含手动单），
+    和 AI 这一笔对不上；前端又拿不到合约乘数，自己算必然错。
+    """
+
+    def _open(self, price_open=4000.0, direction=1):
+        state = autotrade._empty_state()
+        state["cfg"] = {"symbol": "XAUUSDm", "dry_run": True}
+        state["position"] = {"ticket": -1, "direction": direction, "lots": 0.01,
+                             "price_open": price_open, "opened_at": NOW - 30,
+                             "p_up": 0.6, "entry_reason": "突破", "dry_run": True}
+        autotrade.save_state(state)
+
+    def test_float_pnl_is_computed_from_live_quote(self):
+        self._open(direction=1)
+        with mock.patch.object(autotrade, "_quote", return_value=(4001.5, 4001.74)):
+            s = autotrade.summary()
+        self.assertEqual(s["float_pnl"], 1.5)      # (4001.5-4000)*100*0.01
+
+    def test_short_uses_ask(self):
+        """空单平在 ask：拿 bid 算会白送 0.24 的点差利润（-1.26 而不是 -1.50）。"""
+        self._open(direction=-1)
+        with mock.patch.object(autotrade, "_quote", return_value=(4001.26, 4001.5)):
+            s = autotrade.summary()
+        self.assertEqual(s["float_pnl"], -1.5)     # -(4001.5-4000)*1.0
+
+    def test_no_quote_means_none_not_zero(self):
+        """拿不到报价就给 None。返回 0.0 会被当成「正好保本」，那是假数据。"""
+        self._open()
+        with mock.patch.object(autotrade, "_quote", return_value=None):
+            s = autotrade.summary()
+        self.assertIsNone(s["float_pnl"])
+
+    def test_flat_account_has_no_float_pnl(self):
+        autotrade.save_state(autotrade._empty_state())
+        with mock.patch.object(autotrade, "_quote", return_value=(4000.0, 4000.24)):
+            self.assertIsNone(autotrade.summary()["float_pnl"])
+
+    def test_summary_exposes_guard_sec(self):
+        """面板靠这个字段决定「止损快查」胶囊显示「每 N 秒」还是「关闭」。"""
+        state = autotrade._empty_state()
+        state["cfg"] = {"guard_sec": 7.5}
+        autotrade.save_state(state)
+        self.assertEqual(autotrade.summary()["guard_sec"], 7.5)
+        # 旧 state 没有这个字段 → 回退到当前默认值，不能是 None
+        state["cfg"] = {}
+        autotrade.save_state(state)
+        self.assertEqual(autotrade.summary()["guard_sec"], autotrade.Cfg().guard_sec)
+
+
+class TestSummaryTodayScope(TempLedger):
+    """「今日累计」必须真的是今天。
+
+    踩过的坑：面板和幕布原来用 `state["pnl"]` 当"今日"，那是**本进程累计**——
+    点一次「重置战绩」就归零，跨午夜也不会归零。标题写"今日"就得按自然日算。
+    """
+
+    def _close(self, ts, pnl, source="llm"):
+        autotrade.append_log({"ts": ts, "kind": "close", "ticket": 1,
+                              "direction": 1, "pnl": pnl, "source": source,
+                              "held_sec": 60})
+
+    def test_today_scope_is_local_date_not_process_total(self):
+        now = int(autotrade.time.time())
+        self._close(now, 3.0)
+        self._close(now + 1, -3.42, source="sl")
+        self._close(now - 86400, 5.0)          # 昨天那笔不该算进今日
+
+        s = autotrade.summary()
+        self.assertEqual(s["closed"], 3)       # 全量仍是 3 笔
+        self.assertEqual(s["closed_today"], 2)
+        self.assertEqual(s["wins_today"], 1)
+        self.assertEqual(s["losses_today"], 1)
+        self.assertAlmostEqual(s["pnl_today"], -0.42, places=2)
+
+    def test_wins_plus_losses_equals_closed_today(self):
+        now = int(autotrade.time.time())
+        for i, pnl in enumerate([1.0, -1.0, 2.0, -3.0]):
+            self._close(now + i, pnl)
+        s = autotrade.summary()
+        self.assertEqual(s["wins_today"] + s["losses_today"], s["closed_today"])
+        self.assertEqual(s["wins_today"], 2)
+
+    def test_hit_rate_excludes_stop_losses(self):
+        """命中率的分母不含硬止损——这正是它天生接近 100% 的原因。
+
+        界面必须把这条写出来（幕布干脆不显示命中率，改写胜/负）。
+        """
+        now = int(autotrade.time.time())
+        self._close(now, 3.0)
+        self._close(now + 1, -3.42, source="sl")
+        s = autotrade.summary()
+        self.assertEqual(s["llm_closes"], 1)
+        self.assertEqual(s["llm_hit_rate"], 1.0)   # 100%，但真实胜率是 50%
+        self.assertEqual(s["hit_rate"], 0.5)
 
 
 if __name__ == "__main__":

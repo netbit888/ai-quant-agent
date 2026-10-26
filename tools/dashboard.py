@@ -13,7 +13,8 @@
     /api/session_advice    生成场次级 AI 复盘（花钱）
     /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
     /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
-    /api/autotrade/reset   清空教训与战绩（旧流水归档，不删除；会停掉 AI）
+    /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
+    /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
 
 只读接口里要留意的两个：
@@ -212,6 +213,24 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/lessons":
+            # 教训库（跨场次）：只读，不花钱。为什么单独一个接口而不是塞进
+            # /api/autotrade —— 它要扫所有归档流水数平仓笔，比状态查询重，
+            # 面板轮询不该每 15 秒跑一次，改成用户点开时才拉。
+            qs = parse_qs(parsed.query)
+            want = (qs.get("account") or [""])[0].strip()
+            try:
+                from tools import lesson_stats
+
+                rep = lesson_stats.build_report(want or None)
+                payload = {"ok": True, "report": rep,
+                           "text": lesson_stats.render(rep)}
+            except Exception as exc:  # noqa: BLE001
+                payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
+                       "application/json; charset=utf-8")
+            return
+
         if parsed.path == "/api/trade":
             # 单笔交易溯源：原料（K线/tick）→ 结构（ER/位置判定）→
             # 程序建议 vs 模型判断 → 执行结果 → 复盘。只读日志，
@@ -377,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/autotrade/start": self._post_autotrade_start,
             "/api/autotrade/stop": self._post_autotrade_stop,
             "/api/autotrade/reset": self._post_autotrade_reset,
+            "/api/autotrade/reset_lessons": self._post_autotrade_reset_lessons,
             "/api/llm/switch": self._post_llm_switch,
         }
         handler = routes.get(parsed.path)
@@ -495,7 +515,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     def _post_autotrade_reset(self, body: dict) -> None:
-        """清空教训和战绩（归档旧文件，不删）。会停掉 AI，所以必须带 confirm。"""
+        """重置战绩（归档旧流水，不删）。**经验默认保留**，所以必须带 confirm。
+
+        以前这里连经验一起清：教训挂在流水上，一归档就跟着消失。现在教训
+        独立存 lessons.jsonl，清经验是另一个动作（`/reset_lessons`）。
+        想连经验一起清，显式传 clear_lessons=true。
+        """
         if not body.get("confirm"):
             self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝重置"})
             return
@@ -511,7 +536,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False,
                                  "error": "只能重置终端当前登录账户的 AI 流水"})
                 return
-            result = autotrade.reset_history(login=login)
+            result = autotrade.reset_history(
+                login=login, clear_lessons=bool(body.get("clear_lessons")))
+            result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_autotrade_reset_lessons(self, body: dict) -> None:
+        """只清 AI 攒的经验（教训库），战绩和持仓一律不动。
+
+        为什么要单独一个入口：清战绩只损失统计样本，清经验丢掉的是模型
+        唯一的历史。两件事代价差一个量级，不能绑在同一个按钮上。
+        """
+        if not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝清空经验"})
+            return
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is not None:
+                paths.set_login(login)
+            result = autotrade.reset_lessons(login=login)
             result["login"] = login
             self._json(200, result)
         except Exception as exc:  # noqa: BLE001

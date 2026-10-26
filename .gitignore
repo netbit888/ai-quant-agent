@@ -18,6 +18,10 @@ live_probe.json
 
 # 密钥（永远不要提交）
 .env
+# .env.bak / .env.local 这类备份曾经真的混进来过一次（里面是真实 key），
+# 堵死整类：只放行 .env.example 这个空模板。
+.env.*
+!.env.example
 *.key
 
 # 系统垃圾
