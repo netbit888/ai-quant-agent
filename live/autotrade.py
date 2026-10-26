@@ -1497,6 +1497,73 @@ def review_window(rows: list[dict], close_ts: int, tf_sec: int = 60,
     return [r for r in rows if start <= int(r.get("time") or 0) <= end]
 
 
+def _sl_price_for(cfg, pos: dict) -> float:
+    """这笔单子的**硬止损价**。0 表示没有止损线。
+
+    `cfg.sl_usd` 是美元金额，必须按 `contract × lots` 换成价格距离，
+    不能直接当价格用：0.01 手黄金时 1 美元价格 = 1 USD，0.05 手就是 5 USD。
+    """
+    if not cfg.sl_usd or float(cfg.sl_usd) <= 0:
+        return 0.0
+    try:
+        lots = float(pos.get("lots") or 0.0)
+        entry = float(pos.get("price_open") or 0.0)
+        if lots <= 0 or entry <= 0:
+            return 0.0
+        unit = float(_symbol_contract(cfg.symbol)) * lots
+        if unit <= 0:
+            return 0.0
+        dist = abs(float(cfg.sl_usd)) / unit
+        d = 1 if int(pos.get("direction") or 1) > 0 else -1
+        return entry - d * dist
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def exit_counterfact(post_bars: list[dict], direction: int, sl_price: float,
+                     exit_price: float = 0.0, dd_limit: float = 0.0) -> str:
+    """平仓后那几根里，「多拿一会儿」到底划不划算。返回否决理由或空串。
+
+    两条否决线，任一命中就不该记成「止盈太早」：
+      · "sl_hit" —— 平后跌回硬止损线。继续持有 = 亏 -sl_usd 出局，比落袋差。
+      · "dd_risk" —— 平后回撤超过 `dd_limit`。多拿的代价已经和一次止盈同量级，
+        这时候"平太早"是把运气当判断。
+
+    为什么必须有这个对照：现在的复盘只看到"平仓后涨没涨"，涨了一根就判
+    「止盈太早」。但复盘窗口是 7 根，上涨行情里任何平仓点事后看都太早。
+    实测今天 4 笔盈利单平后最低价都没破止损线（于是全部"平太早"成立），
+    可它们的平后回撤是 2.90 / 2.30 / 0.97 / 2.46 —— 三笔的多拿代价已经
+    超过半个止盈门槛。**只看平后最高价的复盘，天生偏袒"再拿一会儿"。**
+
+    而 227 笔真实入场点的反事实回放早就证明：所有放松出场的版本都更差
+    （tp2.50 -0.141/笔、峰2.0回撤1.0 -0.114/笔）。
+
+    `sl_price` 必须是**已换算好的价格**（见 `_sl_price_for`），不是美元。
+    """
+    if not post_bars:
+        return ""
+    try:
+        d = int(direction or 1)
+        lows = [float(r.get("low")) for r in post_bars if r.get("low") is not None]
+        highs = [float(r.get("high")) for r in post_bars if r.get("high") is not None]
+        if not lows or not highs:
+            return ""
+        if sl_price and float(sl_price) > 0:
+            sl = float(sl_price)
+            if d > 0 and min(lows) <= sl:
+                return "sl_hit"
+            if d < 0 and max(highs) >= sl:
+                return "sl_hit"
+        if exit_price and float(exit_price) > 0 and dd_limit and float(dd_limit) > 0:
+            ex = float(exit_price)
+            dd = (ex - min(lows)) if d > 0 else (max(highs) - ex)
+            if dd >= float(dd_limit):
+                return "dd_risk"
+        return ""
+    except (TypeError, ValueError):
+        return ""
+
+
 def _fmt_review_bars(window: list[dict], close_ts: int, digits: int = 3) -> str:
     """复盘用的 K 线表，额外标出「哪根是平仓那根」。
 
@@ -1572,8 +1639,31 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
     # 下次震荡时优先拿出来。**只用平仓前那一段算 ER**——平仓后的 7 根
     # 是给复盘判断用的，不属于这笔单子进场时面对的行情，混进来会串味。
     pre_close = [r for r in window if int(r.get("time") or 0) <= int(closed_at)]
-    return {"ok": True, "lesson": parsed["lesson"], "theme": parsed["theme"],
+    post_close = [r for r in window if int(r.get("time") or 0) > int(closed_at)]
+
+    # 出场类的复盘要过一道反事实：模型说"平太早"，但平后的 7 根里行情
+    # 要么先跌回止损线、要么先回撤掉半个止盈门槛——两种情况继续持有都比落袋差，
+    # 这笔其实平得对。两条判据见 exit_counterfact。
+    theme = parsed["theme"]
+    verdict = verdict_for(theme, parsed["lesson"])
+    cf = ""
+    if theme in ("止盈太早", "止损太晚", "出场时点不对") or verdict:
+        # 回撤线取「半个止盈门槛」：多拿的代价到这个量级，
+        # 收益和风险就是同一枚硬币，"平太早"不能算教训。
+        cf = exit_counterfact(post_close, int(position.get("direction") or 1),
+                              _sl_price_for(cfg, position), exit_price,
+                              dd_limit=float(cfg.tp_min_usd or 0.0) / 2.0)
+    if verdict == VERDICT_EARLY and cf:
+        verdict = VERDICT_OK
+        theme = "离场正确"
+        reason = "平仓后行情先回撤到止损线" if cf == "sl_hit" else "平仓后回撤已超过半个止盈门槛"
+        lesson_extra = f"（反事实校正：{reason}，继续持有会更差）"
+    else:
+        lesson_extra = ""
+
+    return {"ok": True, "lesson": parsed["lesson"], "theme": theme,
             "scope": parsed["scope"], "bars": len(window),
+            "verdict": verdict, "counterfact": cf, "lesson_extra": lesson_extra,
             "regime": regime_of(pre_close)}
 
 
@@ -1594,7 +1684,8 @@ def _norm_lesson(text: str) -> str:
 # 5 个固定关键词根本追不上，次数永远涨不到 5，铁律机制整场只触发过 1 次。
 LESSON_THEME_ENUM: tuple[str, ...] = (
     "方向与依据矛盾", "逆势抢反弹/接刀", "追破位/假突破", "进场时点不对",
-    "止盈太早", "止损太晚", "出场时点不对", "点差/成本过高", "其他",
+    "止盈太早", "止损太晚", "出场时点不对", "点差/成本过高",
+    "离场正确", "其他",
 )
 
 # 这条教训该注入到哪一端的提示词。注错端 = 纯噪音。
@@ -1661,12 +1752,116 @@ def row_theme(r: dict) -> str:
     return lesson_theme(r.get("lesson") or "")
 
 
+# 「出场时点不对」这个主题名是个垃圾桶：它把方向完全相反的两类教训装在一起。
+# 实测 102 条铁律桶里，59 条在说「平太早」、10 条在说「平太晚」、4 条在说
+# 「平得对」，剩下 64 条啥也没说清。同一个铁律标签同时告诉模型「你急着平」
+# 和「你不及时平」，等于什么都没说，只剩焦虑——这是铁律机制测不出效果的主因。
+#
+# 所以聚类时要按**方向**把这个桶拆开，再分派回已有的真主题：
+#   early → 「止盈太早」   late → 「止损太晚」   ok → 「离场正确」（不算教训）
+# 复用这两个已存在的主题名而不是新造一个，是为了让老的「止盈太早」桶
+# 和从垃圾桶里拆出来的同向教训**自动合并**，不再各记各的次数。
+VERDICT_OK = "ok"          # 平得对：这不是教训，不该教模型任何东西
+VERDICT_EARLY = "early"    # 平太早
+VERDICT_LATE = "late"      # 平太晚 / 没及时
+
+# 顺序有意义：先判「平得对」，再判早/晚。
+# 「平得对：离场后先破位下探」这种句子同时含"下探"和"对"，先判 ok 才不会误判；
+# 而「平得对，但下次应该多拿一根」这种句子两个信号都有，按"明确表态优先"归 ok——
+# 模型自己都说这笔平得对了，再拿它去教「别急着平」是反着用。
+_VERDICT_OK_WORDS = (
+    "平得对", "平仓对", "离场对", "砍得对", "砍对", "平得没错", "平仓没错",
+    "离场没错", "止损没错", "止盈没错", "平掉没错", "该走", "平得正确",
+)
+_VERDICT_EARLY_WORDS = (
+    "太早", "过早", "早了", "多拿", "再拿", "续持", "拿住", "持有更久",
+    "拿多一", "别急着落袋", "别急平", "不该平",
+)
+_VERDICT_LATE_WORDS = (
+    "太晚", "未及时", "没及时", "扛单", "死扛", "舍不得砍", "拖到",
+    "拖延", "该更早平", "砍得太慢", "平得太慢", "止损太晚",
+)
+
+
+def exit_verdict(text: str) -> str:
+    """一条出场教训的方向：ok / early / late，判不出来返回空串。
+
+    只用于出场那几类主题（「出场时点不对」「止盈太早」「止损太晚」）。
+    判不出来不要硬猜——猜错方向比不分类更坏，等于把"平得对"喂成"平太早"。
+    """
+    t = text or ""
+    if any(k in t for k in _VERDICT_OK_WORDS):
+        return VERDICT_OK
+    if any(k in t for k in _VERDICT_LATE_WORDS):
+        return VERDICT_LATE
+    if any(k in t for k in _VERDICT_EARLY_WORDS):
+        return VERDICT_EARLY
+    return ""
+
+
+def verdict_for(theme: str, lesson: str) -> str:
+    """综合「模型给的主题标签」和「教训正文」判出场方向。
+
+    **必须先看标签再看正文**：实测 4 条「止盈太早」里有 2 条正文写的是
+    "贴上沿就慌着离场""遇 ER 回落就急平"，一个"太早"都没有——只靠关键词
+    会漏掉一半。模型已经把主题标成「止盈太早」了，那就是它的方向表态。
+    正文优先只在它给出更强的反向信号时才生效（比如标签「出场时点不对」、
+    正文写"平得对"）。
+    """
+    v = exit_verdict(lesson)
+    if v:
+        return v
+    if theme == "止盈太早":
+        return VERDICT_EARLY
+    if theme == "止损太晚":
+        return VERDICT_LATE
+    return ""
+
+
+def row_verdict(r: dict) -> str:
+    """一条复盘行的出场方向。
+
+    落盘时算过就信落盘值（含反事实推翻的结果），没有才现推。
+    老数据没有这个字段，靠主题标签 + 正文推断。
+    """
+    v = r.get("verdict") or ""
+    if v in (VERDICT_OK, VERDICT_EARLY, VERDICT_LATE):
+        return v
+    return verdict_for(r.get("theme") or "", r.get("lesson") or "")
+
+
 def row_scope(r: dict) -> str:
     """一条复盘行该注入哪一端。字段缺失（老数据）→ 关键词推断，不丢数据。"""
     s = r.get("scope") or ""
     if s in LESSON_SCOPES:
         return s
     return infer_scope(r.get("lesson") or "")
+
+
+def _refine_exit_theme(name: str, verdict: str) -> str:
+    """把出场类主题按方向分派到真主题，见上面 VERDICT_* 那段说明。
+
+    只在出场三兄弟之间搬运，别的主题原样放回。
+    """
+    if name not in ("出场时点不对", "止盈太早", "止损太晚"):
+        return name
+    if verdict == VERDICT_OK:
+        return "离场正确"
+    if verdict == VERDICT_LATE:
+        return "止损太晚"
+    if verdict == VERDICT_EARLY:
+        return "止盈太早"
+    return name                      # 判不出方向就不搬，宁可留在原桶
+
+
+def effective_theme(r: dict) -> str:
+    """一条复盘行**最终生效**的主题。
+
+    外部（面板统计、`tools/lesson_stats.py`、注入）都必须走这一格，
+    否则报表按「出场时点不对」算、注入按拆开后的「止盈太早」算，
+    两边看到一个库却报出两套数字。
+    """
+    return _refine_exit_theme(row_theme(r), row_verdict(r))
 
 
 def lesson_clusters(login=None) -> list[dict]:
@@ -1690,14 +1885,20 @@ def lesson_clusters(login=None) -> list[dict]:
         if not text:
             continue
         ts = int(r.get("ts") or 0)
-        name = row_theme(r)
+        name = effective_theme(r)     # 已含出场三兄弟的方向重分派
         sc = row_scope(r)
         key = (name or ("其他:" + _norm_lesson(text)[:24])) + "|" + sc
         b = buckets.get(key)
         if b is None:
             b = buckets[key] = {"name": name, "domain": sc, "count": 0,
-                                "lesson": text, "ts": ts, "regimes": {}}
+                                "lesson": text, "ts": ts, "regimes": {},
+                                "verified": 0}
         b["count"] += 1
+        # verified = 这条桶里有几条**过了反事实检验**。
+        # 只认落盘的 verdict 字段，不认 row_verdict 的文本推断——
+        # 推断出来的方向没有对照行情，不能当"已验证"。
+        if r.get("verdict"):
+            b["verified"] += 1
         rg = r.get("regime") or ""
         b["regimes"][rg] = b["regimes"].get(rg, 0) + 1
         if ts >= b["ts"]:          # 用最新的一条作为代表表述
@@ -1725,6 +1926,7 @@ THEME_DOMAIN = {
     "止盈太早": "exit",
     "止损太晚": "exit",
     "出场时点不对": "exit",
+    "离场正确": "exit",          # 不注入，但归类/统计时按出场算
 }
 
 
@@ -1745,6 +1947,33 @@ def _scope_ok(c: dict, scope: str) -> bool:
 # 定 5 的依据：实测 16 笔里「追破位」犯了 7 次还在犯——到 5 次说明提示词里
 # 普通一行字的剂量已经压不住这个错误，必须换更重的说法。
 HARD_RULE_MIN = 5
+
+
+def _can_be_hard(c: dict) -> bool:
+    """这个桶配不配升级成「铁律」。
+
+    规则：出场类的时机判断（止盈太早 / 止损太晚 / 出场时点不对）必须有
+    **至少一条过了反事实检验**才能当铁律。
+
+    理由：判断"该不该早平"必须知道**不平仓的结局**。现在的复盘只看到
+    平仓后涨没涨，这是单边证据——只要平后有一根更高就叫"太早"，永远成立。
+    结果是库攒出 67 条「止盈太早」、48 条「出场时点不对」，而 227 笔真实
+    入场点的反事实回放早就证明：所有放松出场的版本都比现在更差
+    （tp2.50 -0.141/笔、峰2.0回撤1.0 -0.114/笔）。
+
+    历史数据一条反事实记录都没有，所以这些桶只能降级为普通教训
+    （还留在库里、还能被看见，但不再以"已犯 N 次"的铁律口吻下命令）。
+    新数据带上 verdict 之后才重新有资格。
+    """
+    if c["count"] < HARD_RULE_MIN:
+        return False
+    if THEME_DOMAIN.get(c.get("name") or "") == "exit" and not c.get("verified"):
+        return False
+    return True
+
+
+# 只记录、绝不注入的主题。放在模块级是因为 lesson_stats / 面板也要能读到。
+_NO_INJECT_THEMES = ("离场正确", "出场时点不对")
 
 
 def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
@@ -1774,6 +2003,14 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
     不占 n 个普通名额。
     """
     clusters = lesson_clusters(login)
+    # 两个主题只记录、不注入：
+    #   「离场正确」——记的是"这笔平得对"，教不了任何东西；
+    #   「出场时点不对」——按定义就是**判不出方向**的那一批（说得清是早是晚的
+    #     都会被 _refine_exit_theme 分派走）。一条说不清"早了还是晚了"的教训
+    #     注入进去只剩焦虑，实测这桶的代表句是"未达做多阈值且浮亏平仓"，
+    #     连进场味都混进来了。留在库里是为了让方向分布看得见。
+    clusters = [c for c in clusters
+                if (c.get("name") or "") not in _NO_INJECT_THEMES]
     if ignore_cost:
         clusters = [c for c in clusters
                     if not any(k in (c.get("name") or "") for k in ("点差", "成本"))]
@@ -1789,8 +2026,11 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
         clusters = sorted(clusters, key=lambda c: c["count"], reverse=True)
         clusters.sort(key=lambda c: c["regimes"].get(regime, 0), reverse=True)
 
-    hard = [c for c in clusters if c["count"] >= HARD_RULE_MIN]
-    soft = [c for c in clusters if c["count"] < HARD_RULE_MIN][:n]
+    hard = [c for c in clusters if _can_be_hard(c)]
+    # 普通教训保持 clusters 的原有顺序（同状态优先 → 总次数），
+    # 不要在这里再按 verified 重排：那会把 regime 软匹配压掉，
+    # 实测会让"本状态犯过 1 次"输给"别的状态犯过 3 次"。
+    soft = [c for c in clusters if not _can_be_hard(c)][:n]
 
     blocks = []
     if hard:
@@ -1814,6 +2054,10 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
             tag = f"，本状态 {same} 次" if same else ""
             dom = _DOMAIN_TEXT.get(c.get("domain") or "", "")
             dtag = f" · {dom}" if dom else ""
+            # 出场类没有反事实记录的，明说一句：这条只有单边证据，
+            # 不能当"以后都别急着平"的硬结论用。
+            if THEME_DOMAIN.get(c.get("name") or "") == "exit" and not c.get("verified"):
+                dtag += " · 未过反事实检验，别当硬结论"
             if c["count"] >= 2:
                 head = (f"[{c['name']} · 已出现 {c['count']} 次{dtag}{tag}]" if c["name"]
                         else f"[已出现 {c['count']} 次{dtag}{tag}]")
@@ -1857,6 +2101,14 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
         row["theme"] = res.get("theme") or row_theme(row)
         sc = res.get("scope") or ""
         row["scope"] = sc if sc in LESSON_SCOPES else row_scope(row)
+        # 出场方向 + 反事实结论：聚类时按 verdict 重分派，counterfact 留作审计。
+        # 被反事实推翻的那条（模型说平太早、但平后先回撤到止损线）在正文后
+        # 追加一句校正，免得以后翻文本时又把它当成"该多拿"的证据。
+        row["verdict"] = res.get("verdict") or ""
+        row["counterfact"] = res.get("counterfact") or ""
+        extra = res.get("lesson_extra") or ""
+        if extra and row.get("lesson"):
+            row["lesson"] = f"{row['lesson']}{extra}"
     else:
         row["error"] = res.get("error")
     append_log(row, login)
@@ -1866,6 +2118,8 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
         append_lesson({
             "ts": row["ts"], "ticket": row.get("ticket"), "lesson": row["lesson"],
             "theme": row["theme"], "scope": row["scope"],
+            "verdict": row.get("verdict") or "",
+            "counterfact": row.get("counterfact") or "",
             "regime": row.get("regime") or "", "pnl": row.get("pnl"),
             "direction": row.get("direction"), "source": "live",
             "closed_at": closed_at,

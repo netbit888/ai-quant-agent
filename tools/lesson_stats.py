@@ -116,7 +116,9 @@ def build_report(login: str | None, gap_min: int = GAP_MIN_DEFAULT) -> dict:
                 "note": "教训库是空的（lessons.jsonl 不存在或已清空）"}
 
     for r in rows:
-        r["_theme"] = autotrade.row_theme(r) or "其他"
+        # 走 effective_theme：出场三兄弟要按方向拆（平太早/平太晚/平得对），
+        # 否则报表会把三种相反的东西报成同一个主题，和注入口径对不上。
+        r["_theme"] = autotrade.effective_theme(r) or "其他"
         r["_scope"] = autotrade.row_scope(r)
         r["_inferred"] = not (r.get("theme") in autotrade.LESSON_THEME_ENUM)
         r["_t"] = int(r.get("closed_at") or r.get("ts") or 0)

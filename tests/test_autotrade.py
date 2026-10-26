@@ -2266,6 +2266,97 @@ class TestAskReview(unittest.TestCase):
         self.assertEqual(res["scope"], "entry")
 
 
+class TestAskReviewCounterfact(TempLedger):
+    """模型说"平太早"，但平后行情先回到止损线 → 改判「离场正确」。
+
+    这是整条链最要紧的一环：不跑这个对照，复盘只看"平后涨没涨"，
+    「止盈太早」永远成立（实测攒到 67 条），而 227 笔反事实回放
+    早证明放松出场全部更差。
+    """
+
+    def _rows(self, post_low):
+        """平仓前一路涨到 4005；平仓后要么横盘（post_low 为 None），要么跌到 post_low。"""
+        out = []
+        for i in range(30):                      # 平仓前：稳步上行
+            p = 4000 + i * 0.2
+            out.append(bar(p, p + 0.5, p - 0.3, p, NOW + i * 60))
+        close_bar = NOW + 30 * 60
+        for i in range(8):                       # 平仓后
+            if post_low is None:                 # 横盘微涨：回撤仅 0.6，不该否决
+                p = 4005.0 + i * 0.1
+                lo = 4004.4
+            else:                                # 缓慢回落：回撤够大但没破止损线
+                p = 4005.0 - i * 0.4
+                lo = post_low if i == 5 else p - 0.3
+            out.append(bar(p, p + 0.3, lo, p, close_bar + i * 60))
+        return out
+
+    def _run(self, post_low, reply):
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0,
+               "entry_reason": "上沿突破", "exit_reason": "动能衰竭",
+               "opened_at": NOW}
+        with mock.patch.object(autotrade, "_bars", return_value=self._rows(post_low)), \
+             mock.patch("agent.llm.chat_ex", return_value=(reply, {})):
+            return autotrade.ask_review(autotrade.Cfg(review=True), pos,
+                                        4005.0, 3.3, NOW, NOW + 30 * 60)
+
+    def test_early_claim_overturned_when_price_falls_back_to_sl(self):
+        """开仓 4000、止损 3.0 → 线在 3997；平后跌到 3996.5，继续持有会更差。"""
+        res = self._run(3996.5, '{"scope":"exit","theme":"止盈太早",'
+                                '"lesson":"平早了，平后还在涨，该多拿一根"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["counterfact"], "sl_hit")
+        self.assertEqual(res["verdict"], autotrade.VERDICT_OK)
+        self.assertEqual(res["theme"], "离场正确")
+        self.assertIn("反事实校正", res["lesson_extra"])
+
+    def test_overturned_lesson_is_marked_on_disk(self):
+        """被推翻的那条落盘时要带校正说明，免得以后翻文本又拿它当"该多拿"的证据。"""
+        pos = {"ticket": 1, "direction": 1, "lots": 0.01, "price_open": 4000.0,
+               "entry_reason": "上沿突破", "exit_reason": "动能衰竭",
+               "opened_at": NOW}
+        fake = {"ok": True, "lesson": "平早了，该多拿", "theme": "离场正确",
+                "scope": "exit", "bars": 15, "regime": "range",
+                "verdict": autotrade.VERDICT_OK, "counterfact": "sl_hit",
+                "lesson_extra": "（反事实校正：平仓后行情先回撤到止损线）"}
+        with mock.patch.object(autotrade, "ask_review", return_value=fake):
+            autotrade._do_review(autotrade.Cfg(review=True), pos, 4005.0, 3.3,
+                                 NOW + 20 * 60)
+        stored = [r for r in autotrade.lesson_rows() if r.get("ticket") == 1]
+        self.assertEqual(len(stored), 1)
+        self.assertIn("反事实校正", stored[0]["lesson"])
+        self.assertEqual(stored[0]["verdict"], autotrade.VERDICT_OK)
+        self.assertEqual(stored[0]["counterfact"], "sl_hit")
+
+    def test_early_claim_stands_when_price_never_falls_back(self):
+        """平后横盘、回撤只有 0.6 —— 这才是真的平早了，不许否决。"""
+        res = self._run(None, '{"scope":"exit","theme":"止盈太早",'
+                              '"lesson":"平早了，平后还在涨，该多拿一根"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["counterfact"], "")
+        self.assertEqual(res["verdict"], autotrade.VERDICT_EARLY)
+        self.assertEqual(res["theme"], "止盈太早")
+
+    def test_drawdown_vetoes_even_without_sl_hit(self):
+        """回撤过半个止盈门槛但没到止损线 —— 也要否决。
+
+        实测今天 #2745576501：平后只多涨 0.35，先回撤 2.31。
+        """
+        res = self._run(4002.0, '{"scope":"exit","theme":"止盈太早",'
+                                '"lesson":"平早了，该多拿一根"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["counterfact"], "dd_risk")
+        self.assertEqual(res["theme"], "离场正确")
+
+    def test_entry_lesson_is_not_counterfact_checked(self):
+        """进场教训跟"平仓后走势"无关，不该被这套逻辑碰。"""
+        res = self._run(3996.5, '{"scope":"entry","theme":"逆势抢反弹/接刀",'
+                                '"lesson":"下跌途中接刀，等真阳确认再进"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["counterfact"], "")
+        self.assertEqual(res["theme"], "逆势抢反弹/接刀")
+
+
 class TestLessonScope(TempLedger):
     """教训分域：写偏一端，整端都别用。
 
@@ -2877,6 +2968,212 @@ class TestSummaryTodayScope(TempLedger):
         self.assertEqual(s["llm_closes"], 1)
         self.assertEqual(s["llm_hit_rate"], 1.0)   # 100%，但真实胜率是 50%
         self.assertEqual(s["hit_rate"], 0.5)
+
+
+class TestExitVerdict(unittest.TestCase):
+    """一条出场教训到底在说"平太早"还是"平太晚"。
+
+    实测最大铁律桶（「出场时点不对」102 条）里同时装着方向相反的教训：
+    59 条说平太早、10 条说平太晚、4 条说平得对。同一个「已犯 102 次」
+    同时命令模型"别急着平"和"要及时平"，等于什么都没说。
+    """
+
+    def test_ok_beats_early(self):
+        """「平得对，但下次应该多拿一根」——模型自己都说这笔平得对，归 ok。"""
+        self.assertEqual(
+            autotrade.exit_verdict("平得对：离场后先破位下探，下次应再等一根"),
+            autotrade.VERDICT_OK)
+
+    def test_early(self):
+        self.assertEqual(
+            autotrade.exit_verdict("多单因恐惧上沿而过早止盈，平后连拉5根到4018.9"),
+            autotrade.VERDICT_EARLY)
+
+    def test_late(self):
+        self.assertEqual(
+            autotrade.exit_verdict("没及时平仓，扛单拖到深亏才砍"),
+            autotrade.VERDICT_LATE)
+
+    def test_unclear_stays_empty(self):
+        """判不出就别猜：猜错方向等于把"平得对"喂成"平太早"。"""
+        self.assertEqual(
+            autotrade.exit_verdict("主要因为判断错误导致亏损，下次应更谨慎观察"),
+            "")
+
+    def test_committed_verdict_wins_over_text(self):
+        """反事实推翻后落盘的 verdict 优先，不再被文本拉回去。"""
+        row = {"lesson": "止盈太早，该多拿", "verdict": autotrade.VERDICT_OK}
+        self.assertEqual(autotrade.row_verdict(row), autotrade.VERDICT_OK)
+
+    def test_theme_label_drives_verdict_when_text_has_no_keyword(self):
+        """模型在主题里说了「止盈太早」，正文没有"太早"也要认。
+
+        实测今天的 4 条里有 2 条正文是"贴上沿就慌着离场""遇ER回落就急平"，
+        一个"太早"都没有——只靠关键词会漏掉一半。
+        """
+        self.assertEqual(
+            autotrade.verdict_for("止盈太早", "贴上沿就慌着离场，平后仍在高位磨盘"),
+            autotrade.VERDICT_EARLY)
+        self.assertEqual(
+            autotrade.verdict_for("止损太晚", "拖着没砍，最后深亏出局"),
+            autotrade.VERDICT_LATE)
+
+    def test_text_overrides_ambiguous_theme(self):
+        """主题是含糊的垃圾桶时，正文说"平得对"就归 ok。"""
+        self.assertEqual(
+            autotrade.verdict_for("出场时点不对", "平得对，离场后行情继续下探"),
+            autotrade.VERDICT_OK)
+
+    def test_ambiguous_theme_without_signal_stays_empty(self):
+        self.assertEqual(
+            autotrade.verdict_for("出场时点不对", "主要因为判断错误导致亏损"), "")
+
+
+class TestExitCounterfact(unittest.TestCase):
+    """反事实：平仓后行情有没有先回到止损线。
+
+    没有这个对照，复盘只看"平后涨没涨"，"止盈太早"永远成立——
+    这正是它攒到 67 条的原因。
+    """
+
+    @staticmethod
+    def _bars(pairs):
+        return [{"low": lo, "high": hi} for lo, hi in pairs]
+
+    def test_long_hit_when_falls_back_through_sl(self):
+        bars = self._bars([(3996.5, 4000.2), (3998.0, 4001.0)])
+        self.assertEqual(autotrade.exit_counterfact(bars, 1, 3997.0), "sl_hit")
+
+    def test_long_miss_when_price_holds(self):
+        bars = self._bars([(4002.0, 4005.0), (4003.0, 4006.0)])
+        self.assertEqual(autotrade.exit_counterfact(bars, 1, 3997.0), "")
+
+    def test_short_hit_when_rallies_through_sl(self):
+        bars = self._bars([(3999.0, 4003.5), (4000.0, 4002.0)])
+        self.assertEqual(autotrade.exit_counterfact(bars, -1, 4003.0), "sl_hit")
+
+    def test_no_sl_line_returns_empty(self):
+        """止损关掉时没有参照线，别硬算。"""
+        self.assertEqual(
+            autotrade.exit_counterfact(self._bars([(3900.0, 4000.0)]), 1, 0.0), "")
+
+    def test_drawdown_risk_vetoes_early_claim(self):
+        """平后没破止损线、但先回撤超过半个止盈门槛 → 多拿不划算。
+
+        实测今天 #2745401213：平后只多涨 0.03，却先回撤 2.90。
+        这种点记成"止盈太早"是把噪音当规律。
+        """
+        bars = self._bars([(4005.75, 4008.70)])       # 回撤 2.90
+        self.assertEqual(
+            autotrade.exit_counterfact(bars, 1, 4002.32, 4008.65, dd_limit=1.625),
+            "dd_risk")
+
+    def test_small_drawdown_does_not_veto(self):
+        """回撤没到线就别否决：这才是真的平早了。"""
+        bars = self._bars([(4011.75, 4016.91)])       # 回撤 0.97，之后又涨 4.19
+        self.assertEqual(
+            autotrade.exit_counterfact(bars, 1, 4005.54, 4012.72, dd_limit=1.625), "")
+
+    def test_sl_hit_takes_priority_over_drawdown(self):
+        bars = self._bars([(3996.0, 4000.0)])
+        self.assertEqual(
+            autotrade.exit_counterfact(bars, 1, 3997.0, 4005.0, dd_limit=1.625),
+            "sl_hit")
+
+    def test_empty_bars_safe(self):
+        self.assertEqual(autotrade.exit_counterfact([], 1, 3997.0), "")
+
+    def test_sl_price_converts_usd_by_lots(self):
+        """sl_usd 是美元，必须按手数换成价格距离。
+
+        0.01 手黄金 1 美元价格 = 1 USD，止损 3.0 美元 → 价格距离 3.0；
+        0.05 手时同样 3.0 美元只对应 0.6 的价格距离。写死 1:1 会差 5 倍。
+        """
+        cfg = autotrade.Cfg(symbol="XAUUSDm", sl_usd=3.0)
+        small = autotrade._sl_price_for(cfg, {"direction": 1, "lots": 0.01,
+                                              "price_open": 4000.0})
+        big = autotrade._sl_price_for(cfg, {"direction": 1, "lots": 0.05,
+                                            "price_open": 4000.0})
+        self.assertAlmostEqual(4000.0 - small, 3.0, places=3)
+        self.assertAlmostEqual(4000.0 - big, 0.6, places=3)
+        short = autotrade._sl_price_for(cfg, {"direction": -1, "lots": 0.01,
+                                              "price_open": 4000.0})
+        self.assertAlmostEqual(short - 4000.0, 3.0, places=3)
+
+
+class TestExitThemeSplit(TempLedger):
+    """「出场时点不对」这一桶要按方向拆开，不能再是一个垃圾桶。"""
+
+    def _lesson(self, lesson, ts, theme=None, scope="exit", verdict=None):
+        row = {"ts": ts, "kind": "review", "lesson": lesson, "scope": scope}
+        if theme:
+            row["theme"] = theme
+        if verdict:
+            row["verdict"] = verdict
+        autotrade.append_lesson(row)
+
+    def _bucket(self, name, domain=None):
+        for c in autotrade.lesson_clusters():
+            if c["name"] == name and (domain is None or c["domain"] == domain):
+                return c
+        return None
+
+    def test_trash_bucket_splits_by_direction(self):
+        self._lesson("平得太早，结构没走完", NOW, theme="出场时点不对")
+        self._lesson("没及时平仓，扛到深亏", NOW + 1, theme="出场时点不对")
+        self._lesson("平得对，离场后继续跌", NOW + 2, theme="出场时点不对")
+        self.assertIsNone(self._bucket("出场时点不对"))   # 垃圾桶已经不存在
+        self.assertEqual(self._bucket("止盈太早")["count"], 1)
+        self.assertEqual(self._bucket("止损太晚")["count"], 1)
+        self.assertEqual(self._bucket("离场正确")["count"], 1)
+
+    def test_unclear_direction_stays_in_place(self):
+        """判不出方向的不硬搬：留原桶，别猜错方向。"""
+        self._lesson("主要因为判断错误导致亏损，下次应更谨慎", NOW,
+                     theme="出场时点不对")
+        self.assertEqual(self._bucket("出场时点不对")["count"], 1)
+
+    def test_correct_exit_is_not_injected(self):
+        """「平得对」不是教训，绝不能注入——那等于告诉模型这没什么可学的。"""
+        self._lesson("平得对，离场后行情继续下探", NOW,
+                     theme="离场正确", verdict="ok")
+        self.assertIn("暂无", autotrade.recent_lessons(scope="exit"))
+
+
+class TestHardRuleGate(TempLedger):
+    """出场类教训没过反事实检验，不许升级成铁律。
+
+    实测：67 条「止盈太早」+ 48 条「出场时点不对」全部来自单边上涨的复盘，
+    而 227 笔真实入场点的反事实回放证明所有放松出场的版本都更差。
+    """
+
+    def _many(self, theme, n, verdict=None, ts0=NOW - 5000):
+        for i in range(n):
+            row = {"ts": ts0 + i, "kind": "review", "scope": "exit",
+                   "theme": theme, "lesson": "平在区间上沿就落袋，平后还在涨，该多拿"}
+            if verdict:
+                row["verdict"] = verdict
+            autotrade.append_lesson(row)
+
+    def test_unverified_exit_theme_cannot_be_hard_rule(self):
+        self._many("止盈太早", 12)
+        s = autotrade.recent_lessons(scope="exit")
+        self.assertNotIn("【铁律", s)          # 附录里那句"别当铁律"不算
+        self.assertIn("未过反事实检验", s)
+
+    def test_verified_exit_theme_can_be_hard_rule(self):
+        self._many("止盈太早", 12, verdict="early")
+        s = autotrade.recent_lessons(scope="exit")
+        self.assertIn("【铁律", s)
+        self.assertNotIn("未过反事实检验", s)
+
+    def test_entry_theme_unaffected_by_gate(self):
+        """进场类教训不受这道闸门管：它们的错误在开仓那一刻就定死了。"""
+        for i in range(8):
+            autotrade.append_lesson({
+                "ts": NOW - 100 + i, "kind": "review", "scope": "entry",
+                "theme": "逆势抢反弹/接刀", "lesson": "下跌途中接刀，等真阳确认再进"})
+        self.assertIn("【铁律", autotrade.recent_lessons(scope="entry"))
 
 
 if __name__ == "__main__":
