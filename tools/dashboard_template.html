@@ -529,6 +529,51 @@
 
   /* ---------------- 单笔交易溯源弹窗 ---------------- */
   .modal-wide { width: min(860px, calc(100vw - 40px)); max-height: calc(100vh - 60px); overflow-y: auto; }
+  /* ---------------- 应用内更新弹窗 ----------------
+     更新日志是 GitHub release body，一次发版两三千字很正常。原样式没有封顶，
+     弹窗高度跟着文字长——长到超过视口时，「下载并安装」被挤到屏幕外面，
+     用户点不到，等于更新通道被自己的更新日志堵死（2026-10-27 实测）。
+     所以这里必须做三件事：弹窗整体封顶、日志区自己滚、按钮区永远留在视口内。 */
+  .modal-update {
+    width: min(560px, calc(100vw - 40px));
+    max-height: calc(100vh - 60px);
+    display: flex; flex-direction: column;
+  }
+  .modal-update h4, .modal-update .mini { flex: none; }
+  /* 日志区外面套一层，用来放"下面还有内容"的渐隐提示。
+     WebView2 用的是悬浮滚动条（实测 offsetWidth-clientWidth = 0，样式改不动、
+     静止时看不见），光靠滚动条用户不知道还能往下翻，所以必须有这个暗示。 */
+  .modal-update .desc-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+  .modal-update .desc-wrap::after {
+    content: ''; position: absolute; left: 0; right: 10px; bottom: 0; height: 34px;
+    background: linear-gradient(180deg, rgba(13,20,28,0), rgba(13,20,28,.98));
+    pointer-events: none; opacity: 0; transition: opacity .15s;
+  }
+  .modal-update .desc-wrap::before {
+    content: '↓ 向下滚动查看全部'; position: absolute; right: 14px; bottom: 5px; z-index: 1;
+    font-size: 10.5px; color: var(--muted); letter-spacing: .3px;
+    pointer-events: none; opacity: 0; transition: opacity .15s;
+  }
+  .modal-update .desc-wrap.more::after { opacity: 1; }
+  .modal-update .desc-wrap.more::before { opacity: .85; }
+  .modal-update .desc {
+    flex: 1 1 auto; min-height: 0; max-height: 52vh;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding-right: 10px; margin-top: 4px;
+    /* 全局把滚动条藏了（*::-webkit-scrollbar width:0），这里要放回来：
+       没有滚动条用户就不知道下面还有内容（有经典滚动条的系统上会生效）。 */
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent;
+  }
+  .modal-update .desc::-webkit-scrollbar { width: 8px; height: 8px; }
+  .modal-update .desc::-webkit-scrollbar-track { background: transparent; }
+  .modal-update .desc::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.18); border-radius: 4px;
+  }
+  .modal-update .desc::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); }
+  .modal-update .actions {
+    flex: none; margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
   /* 图表最大化：占满视口留边距。svg 必须 1:1 映射（viewBox = 实际像素）再画，
      否则 preserveAspectRatio="none" 会把坐标轴文字拉花——这是本方案最大的坑 */
   .modal-chart {
@@ -971,10 +1016,10 @@
 <!-- 应用内更新：只在安装版（ui_mode==full）出现。检测/下载全走后端，
      前端只是状态机——mode 不是 full 时按钮直接隐藏。 -->
 <div class="modal-mask hidden" id="updateMask">
-  <div class="modal" role="dialog" aria-modal="true">
+  <div class="modal modal-update" role="dialog" aria-modal="true">
     <h4 id="updateTitle">发现新版本</h4>
     <div class="mini mono" id="updatePlan" style="margin-bottom:6px"></div>
-    <div class="desc" id="updateDesc"></div>
+    <div class="desc-wrap" id="updateDescWrap"><div class="desc" id="updateDesc"></div></div>
     <div class="mini" id="updateProgress" style="min-height:18px"></div>
     <div class="actions">
       <button class="btn-cancel" id="updateLater" onclick="updateLater()">暂不</button>
@@ -3284,11 +3329,41 @@ function updatePlanLine(c) {
   return `本次需下载完整安装包 ${mbText(c.full_size)} MB（当前版本没有匹配的增量包）`;
 }
 
+// release notes 是 markdown（GitHub release body 原文），这个弹窗用纯文本渲染，
+// 直接塞进去满屏都是 ** 和 | 表格线。这里做最轻量的降级：去掉装饰符、表格压成一行。
+// 只产出文本、不产生 HTML——远程内容一律不进 innerHTML。
+function notesPlain(md) {
+  const out = [];
+  for (const raw of String(md || '').replace(/\r/g, '').split('\n')) {
+    let s = raw.trim();
+    if (!s) { if (out.length && out[out.length - 1] !== '') out.push(''); continue; }
+    if (/^\|?[\s:|-]+\|[\s:|-]*$/.test(s)) continue;      // 表格分隔行
+    if (s.startsWith('|')) {                              // 表格数据行 → a · b · c
+      const cells = s.split('|').map(x => x.trim()).filter(Boolean);
+      if (cells.length) out.push(cells.join(' · '));
+      continue;
+    }
+    s = s.replace(/^#{1,6}\s*/, '')
+         .replace(/\*\*(.+?)\*\*/g, '$1')
+         .replace(/`([^`]+)`/g, '$1')
+         .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    out.push(s);
+  }
+  return out.join('\n').trim();
+}
+
 function updatePopup(j) {
   if (!j || !j.check || !j.check.newer) return;
   $('updateTitle').textContent = `发现新版本 v${j.check.latest}（当前 v${j.check.current}）`;
   $('updatePlan').textContent = updatePlanLine(j.check);
-  $('updateDesc').textContent = (j.check.notes || '').slice(0, 2000) || '无更新日志';
+  const notes = notesPlain(j.check.notes);
+  const desc = $('updateDesc'), wrap = $('updateDescWrap');
+  desc.textContent = (notes.length > 6000 ? notes.slice(0, 6000) + '\n……' : notes) || '无更新日志';
+  desc.scrollTop = 0;
+  const syncFade = () => wrap.classList.toggle(
+    'more', desc.scrollTop + desc.clientHeight < desc.scrollHeight - 4);
+  desc.onscroll = syncFade;          // 用 onscroll 而不是 addListener：反复弹只留一个
+  requestAnimationFrame(syncFade);   // 排版完才知道有没有溢出
   updateShow();
 }
 

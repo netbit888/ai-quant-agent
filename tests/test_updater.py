@@ -252,5 +252,47 @@ class TestStartupCheckNeverBlocks(unittest.TestCase):
         self.assertIn("boom", snap["check"]["error"])
 
 
+class TestUpdateDialogMarkup(unittest.TestCase):
+    """更新弹窗必须是「日志能滚、按钮常在」的结构。
+
+    2026-10-27 事故：release notes 写了两千多字，弹窗跟着内容长高，超过视口后
+    「下载并安装」被顶到屏幕外面，用户点不到——**更新通道被自己的更新日志堵死**。
+    这三个断言锁住修法，别让谁把 class 或滚动容器改回去。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        cls.html = (Path(__file__).resolve().parents[1]
+                    / "tools" / "dashboard_template.html").read_text(encoding="utf-8")
+
+    def _block(self, selector: str) -> str:
+        # 取某条 CSS 规则的声明块（够用即可，不引 CSS 解析器）
+        return self.html.split(selector + " {", 1)[1].split("}", 1)[0]
+
+    def test_dialog_is_capped_and_column(self):
+        box = self._block(".modal-update")
+        self.assertIn("max-height", box)
+        self.assertIn("flex-direction: column", box)
+
+    def test_notes_area_scrolls(self):
+        desc = self._block(".modal-update .desc")
+        self.assertIn("overflow-y: auto", desc)
+        self.assertIn("max-height", desc)     # 兜底：flex 失效也不会顶破弹窗
+
+    def test_actions_do_not_scroll(self):
+        act = self._block(".modal-update .actions")
+        self.assertIn("flex: none", act)
+
+    def test_markup_uses_the_class(self):
+        self.assertIn('class="modal modal-update"', self.html)
+
+    def test_notes_markdown_is_stripped(self):
+        """release notes 是 markdown，弹窗是纯文本——不降级会满屏 ** 和 | 。"""
+        self.assertIn("function notesPlain", self.html)
+        self.assertIn("notesPlain(j.check.notes)", self.html)
+
+
 if __name__ == "__main__":
     unittest.main()
