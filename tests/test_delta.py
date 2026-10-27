@@ -86,6 +86,16 @@ def _asset(name, size=100, url=None):
 CURRENT = updater.APP_VERSION  # 测试里的 delta base 永远用本机真实版本
 
 
+def _bump(ver: str) -> str:
+    """当前版本的下一个补丁号。用例里需要"确实比本机新"的 released 版本。"""
+    parts = [int(x) for x in str(ver).split(".")]
+    parts[-1] += 1
+    return ".".join(str(p) for p in parts)
+
+
+NEXT = _bump(CURRENT)   # 比本机新一档，永远成立
+
+
 class TestFetchLatestDelta(unittest.TestCase):
     def _fetch(self, assets):
         with mock.patch.object(updater.urllib.request, "urlopen",
@@ -164,7 +174,11 @@ class TestDoCheckWritesPlan(unittest.TestCase):
         updater._set("check", status="idle")
 
     def test_check_state_carries_plan_fields(self):
-        info = {"tag": "v1.5.0", "version": "1.5.0", "notes": "",
+        # 假 release 的版本必须**真的比当前版本新**，不能写死 1.5.0：
+        # 版本号一 bump（1.5.0 → 1.5.2），写死的那个就变成"旧版本"，
+        # 更新器按"不更新"处理、plan 强制 full，用例就莫名其妙地红了
+        # ——2026-10-27 发 1.5.2 之后它红了一整天。
+        info = {"tag": f"v{NEXT}", "version": NEXT, "notes": "",
                 "asset_url": "https://x/s.exe", "asset_size": 200,
                 "delta": {"base": CURRENT, "url": "https://x/d.exe", "size": 50}}
         with mock.patch.object(updater, "fetch_latest", return_value=info):

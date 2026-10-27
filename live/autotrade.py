@@ -148,6 +148,32 @@ class Cfg:
     # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
+    # ---------------------------------------------------------------
+    # 入场端的两个硬闸门（2026-10-27 复盘后加）。它们**不发明新规则**，
+    # 只是把提示词里早就写着、模型却会违反的两条约束交给代码执行。
+    #
+    # 那一轮（15:36 起 10 笔）的证据：
+    #   5 胜 5 负，净 +6.30；5 笔亏损全是硬止损，均值 -3.38。
+    #   贴在区间下沿（pos ≤ 0.35）的 6 笔：+12.86。
+    #   贴在区间上沿（pos ≥ 0.75）的 3 笔：0 胜，-10.27。
+    #   其中 17:07 与 18:45 两笔做多，入场分位 0.97 / 0.96、ER 0.71 / 0.61、
+    #   drift +8.4 / +13.7——正是提示词里那句"上涨趋势里贴上沿是不追多"
+    #   的场景，模型两次都写了 act=true。它们的 reason 还明写"回踩 3998-3996"、
+    #   "回踩 4004 挂多，不追高"，实际成交价 4000.403 / 4010.917——因为执行层
+    #   只有市价单，模型描述的"挂单/等回踩"物理上不存在，全变成"现在这一秒买"。
+    #
+    # 为什么不改出场（sl_usd/tp_min_usd）：227 笔反事实回放已经证明所有放松
+    # 版本都更差，根子在入场不在出场。这两条都只碰「开不开」，不碰「怎么走」。
+    #
+    # act_guard：reason 里出现"等确认/回踩再/挂多/不追"这类"我现在不进场"的
+    #   措辞，却给了 act=true —— 按 reason 处理，改判不做。提示词里「注意 act
+    #   和 reason 必须一致」那段本来就写着这条，实测违反率 3/10，且这 3 笔
+    #   亏掉当天亏损的 58%。
+    # top_long_ban：做多且收盘位置 ≥ 1-zone_edge（贴上沿）—— 直接拒。
+    #   `_zone_text` 在所有 regime 分支下都只会给出"做空 / 等回踩"，从来没有
+    #   "贴上沿做多"这一项，所以这不是新规矩，是让代码和位置判定对齐。
+    act_guard: bool = True
+    top_long_ban: bool = True
     # 是否把 tick 级（逐笔 bid/ask）数据喂给模型。关掉可省 token 和一次数据查询。
     ticks: bool = True
     # 信号强度门槛：|p_up - 0.5| 低于这个值就不开仓。
@@ -908,6 +934,21 @@ reason —— 不超过 40 字的中文依据，必须引用输入里的具体�
 注意 act 和 reason 必须一致：写了"不追""等确认"，act 就是 false。
 不要出现理由说不做、act 却给 true 的情况。
 
+【执行方式——写 reason 之前先读这一条】
+你只有两个选项：**现在按报价成交**，或者**这一轮不做**。没有中间档。
+- 系统只有市价单，没有挂单、没有限价、没有条件单。你写"回踩 3998 挂多"，
+  真实发生的是"以当前价立刻买入"——那个价位不会被执行，只会变成日志里
+  一句和成交价对不上的空话（实测有单子写"回踩 4004 挂多"，成交在 4010.9）。
+- 所以"想等回踩/等确认/等企稳"的唯一正确写法是 `"act": false`，
+  并在 reason 里写清等的是什么价位。60 秒后你会拿到新的 K 线，
+  那时候真到位了再开。
+- 代码会拦：reason 里出现"等确认""等企稳""等收阳""回踩再""挂多""挂空"
+  "不追"这类字眼，却给了 act=true，系统直接改判为不做。
+- 代码也会拦：做多时收盘位置 ≥ {ZONE_UP}%（贴上沿）。这个组合在任何
+  行情分类下都不成立——震荡市上沿是做空位，上涨趋势里贴上沿该等回踩
+  低吸，下跌趋势里更不该接多。想表达"看涨但位置太高"，正确写法是
+  act=false + reason 写"等回踩到下沿"。
+
 【判断原则】
 - **不做交易是允许的，而且经常是对的。** 给出 `"act": false` 即可，
   这是正常决策，不是失误，不需要找补。
@@ -1243,7 +1284,13 @@ def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
         return f"贴下沿（程序倾向：可考虑做多，阈值 {edge:.0%}）"
     if pos >= hi:
         if uptrend:
-            return ("贴上沿＋上涨趋势（程序倾向：强势延续，不是超买，倾向等回踩到下沿低吸）——"
+            # 2026-10-27 话术再收紧：原文是「倾向等回踩到下沿低吸」，模型把
+            # 「低吸」读成了「可以买」，当天在 94% / 91% 位置连追两笔多单
+            # （reason 原文写"等回踩 4017…不追高"，成交却在 4019.841）。
+            # 高位追多的亏法是硬止损，不是错过——所以这里不再留"倾向"二字，
+            # 直接说明此位置不是买点，并把"要等什么"写死。
+            return ("贴上沿＋上涨趋势（程序倾向：强势延续但已在窗口高位，**此处不是买点**——"
+                    "追高即接最后一棒；等回踩到前一根实体中位或下沿再考虑做多）——"
                     "你可以不同意，但理由里必须说清为什么")
         if downtrend:
             return "贴上沿＋下跌趋势（程序倾向：反抽到位，倾向做空，需滞涨确认）"
@@ -1256,8 +1303,9 @@ def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
 
     与 _zone_text 用同一套数（_structure + zone_edge），保证「模型看到的建议」
     和「落盘的 prog_dir」永远一致——各算各的必然漂移。
-    返回 0（中间地带）时模型任何方向都算"分歧"，这是设计使然：程序没建议，
-    模型自己选的方向就是纯模型判断，记账时单独看这一格的期望。
+    返回 0 有两处：中间地带，以及「涨势贴上沿」。后者见下面的注释——
+    那不是漏算，是 2026-10-27 特意改的。0 的语义是"程序这一格没有方向建议"，
+    模型选哪个方向都记为"程序无建议，模型自选"（见 trade_detail 的裁决）。
     """
     s = _structure(rows)
     if not s.get("ok"):
@@ -1274,7 +1322,13 @@ def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
         return 1               # 震荡或涨势贴下沿：倾向做多
     # pos >= 1-edge
     if uptrend:
-        return 1               # 涨势贴上沿：倾向等回踩低吸
+        # 这里原来返回 +1，注释写的是"涨势贴上沿：倾向等回踩低吸"。
+        # 问题在于 _zone_text 那句话里有两个成分——"做多"和"等回踩"——
+        # 折算成一个方向数时，条件被丢掉，只剩方向。后果是实测可见的：
+        # 模型在 94% / 91% 位置追多，面板「程序判断 vs 模型判断」裁决成
+        # "一致"，等于程序在给追高背书（20:27、20:37 两笔都是这样）。
+        # 现在返回 0：位置在高位，程序既不建议追多，也不建议逆势做空。
+        return 0
     return -1                  # 震荡或跌势贴上沿：倾向做空
 
 
@@ -1342,6 +1396,72 @@ def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
         out["ma28_atr"] = round(m["ratio"], 2)
         out["ma28_side"] = m["side"]        # +1 上方 / -1 下方 / 0 贴线
     return out
+
+
+# 模型在 reason 里"说我这一轮还不进场"的措辞。
+#
+# 只收「待办/未来时」的写法，**刻意不收裸的"企稳""止跌""回踩"**：
+# 实测赢单的 reason 里全是"收阳企稳""连阳止跌""回踩到位符合贴边做多"，
+# 把裸词收进来会把赚钱的单一起挡掉（10-27 那轮 +4.00 / +4.04 / +5.12 三笔
+# 的 reason 都含"企稳/止跌"，正好会被误伤）。
+_HESITATE_WORDS = (
+    "等确认", "等企稳", "等止跌", "等收阳", "等收阴", "等回踩", "等反抽",
+    "等回抽", "等放量", "等突破", "等信号",
+    "再进场", "再入场", "再进",
+    "挂多", "挂空", "挂单", "不追",
+)
+
+
+def _hesitation_word(reason: str) -> str | None:
+    """reason 里有没有"我现在先不进"的措辞。有就返回命中的那个词。
+
+    为什么按词匹配而不是让模型自己保证：提示词里「注意 act 和 reason
+    必须一致」那段已经写了
+    「写了'不追''等确认'，act 就是 false」，10-27 那轮 10 笔里违反 3 次，
+    这 3 笔合计 -9.75，占当天亏损 58%。规则写在提示词里只能"劝"，
+    写在代码里才能"拦"。
+    """
+    text = str(reason or "")
+    for w in _HESITATE_WORDS:
+        if w in text:
+            return w
+    return None
+
+
+def _entry_veto(cfg: Cfg, direction: int, feat: dict,
+                reason: str, act) -> tuple[str, str] | None:
+    """开仓前的两个硬闸门。返回 (闸门代号, 拦截原因)，None = 放行。
+
+    刻意做成纯函数：tick() 里那堆东西没法单测，而这两条规则恰恰是
+    "以后还会被人想改"的地方，必须能一个一个用例锁死。
+
+    两条都只在 act 不为 False 时才可能触发——模型自己说不做的时候，
+    走到这里之前就已经 return 了。
+    """
+    if act is False:
+        return None
+    # 闸门 1：理由与动作自相矛盾。
+    if cfg.act_guard:
+        w = _hesitation_word(reason)
+        if w:
+            return ("act_guard",
+                    f"理由自相矛盾：写了「{w}」（这是「先不进」的意思），"
+                    f"却给了 act=true。按理由处理——本轮不做，"
+                    f"等真的到位了再开")
+    # 闸门 2：贴上沿做多。
+    # `_zone_text` 在任何一个 regime 分支下都不会给出"贴上沿做多"
+    # （震荡→做空、上涨→等回踩低吸、下跌→做空），所以这条不是新规则，
+    # 是让代码和位置判定对齐。10-27 那轮两笔追多（分位 0.97 / 0.96）
+    # 合计 -6.26，全在这一条上。
+    if cfg.top_long_ban and direction > 0:
+        pos = feat.get("pos")
+        line = 1.0 - float(cfg.zone_edge)
+        if pos is not None and float(pos) >= line:
+            return ("top_long_ban",
+                    f"贴上沿做多：入场收盘位置 {float(pos):.2f} ≥ {line:.2f}，"
+                    f"买在窗口最高处。上涨趋势里贴上沿是强势延续不是超买，"
+                    f"此处追多＝接最后一棒；等回踩到下沿再低吸")
+    return None
 
 
 def _structure_text(rows: list[dict], zone_edge: float = 0.35,
@@ -2572,6 +2692,10 @@ def system_for(template: str, cfg: Cfg) -> str:
     out = out.replace("{SL_USD}", f"{float(cfg.sl_usd):g}")
     out = out.replace("{TP_MIN_USD}", f"{float(cfg.tp_min_usd):g}")
     out = out.replace("{MAX_HOLD_MIN}", f"{int(cfg.max_hold_sec) // 60}")
+    # 贴上沿做多的分位门槛（= 1 - zone_edge）。写成 100-... 而不是硬编码 65：
+    # 面板上一改 zone_edge，system 里那句话就必须跟着变，否则又是"说一套做一套"。
+    out = out.replace("{ZONE_UP}",
+                      f"{max(1, min(99, round((1 - float(cfg.zone_edge)) * 100)))}")
     return out
 
 
@@ -3058,6 +3182,20 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                "prog_dir": prog_dir, "agree": agree, "feat": feat,
                "reason": (f"信号不够强：p_up={p_up:.2f}，偏离 0.50 仅 {edge:.2f}，"
                           f"低于门槛 {cfg.min_edge:.2f}（开仓要先付点差）")}
+        state["last_tick_ts"] = now
+        append_log(row, login)
+        save_state(state, login)
+        return row
+
+    # 入场闸门（2026-10-27）。放在 min_edge 之后、send_open 之前：
+    # 前面的闸门判的是"信号够不够强"，这两条判的是"这个位置/这句话允不允许开"。
+    veto = _entry_veto(cfg, direction, feat, decision.get("reason"), act)
+    if veto:
+        code, why = veto
+        row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
+               "prog_dir": prog_dir, "agree": agree, "feat": feat,
+               "veto": code, "act": act,
+               "reason": f"{why}（入场闸门 {code} 拦下，模型原话：{decision.get('reason') or '无'}）"}
         state["last_tick_ts"] = now
         append_log(row, login)
         save_state(state, login)

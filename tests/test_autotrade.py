@@ -635,7 +635,13 @@ class TestTick(TempLedger):
         super().setUp()
         # 默认走真实路径（send_open / send_close 会被 mock 掉），
         # 纸面模式的两个用例自己显式传 dry_run=True。
-        self.cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False)
+        #
+        # 入场闸门在这里关掉：下面用的是 bars_up()，那是单调上涨序列，
+        # 收盘位置恒为 1.0，默认会撞上「贴上沿禁多」。这些用例验证的是
+        # 状态机与落盘（开仓记录、冷却、持仓互斥），不是入场规则；
+        # 闸门本身在 TestEntryVeto 里逐个用例锁死。
+        self.cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False,
+                                 act_guard=False, top_long_ban=False)
 
     def test_open_records_state_and_log(self):
         with mock.patch.object(autotrade, "ask_entry",
@@ -789,7 +795,7 @@ class TestTick(TempLedger):
 
     def test_paper_position_not_matched_against_terminal(self):
         """纸面仓位只存在于 state，券商那边没有，不能被判成「已平仓」。"""
-        cfg = autotrade.Cfg(dry_run=True)
+        cfg = autotrade.Cfg(dry_run=True, act_guard=False, top_long_ban=False)
         with mock.patch.object(autotrade, "ask_entry",
                               return_value={"p_up": 0.7, "reason": "突破", "source": "llm"}), \
              mock.patch.object(autotrade, "send_open",
@@ -833,7 +839,8 @@ class TestTick(TempLedger):
     def test_fallback_marked_in_log(self):
         """兜底决策必须标成 fallback，否则命中率统计会把规则的分算到模型头上。"""
         cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False,
-                            min_edge=0)  # 这里只验证来源标记，先关掉强度闸门
+                            min_edge=0, act_guard=False,  # 这里只验证来源标记，先关掉两道闸门
+                            top_long_ban=False)
         with mock.patch.object(autotrade, "ask_entry",
                               return_value={"p_up": 0.55, "reason": "规则兜底",
                                             "source": "fallback"}), \
@@ -866,7 +873,8 @@ class TestTick(TempLedger):
         self.assertEqual(row["kind"], "open")
 
     def test_gate_can_be_disabled(self):
-        cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False, min_edge=0)
+        cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False,
+                            min_edge=0, act_guard=False, top_long_ban=False)
         with mock.patch.object(autotrade, "ask_entry",
                               return_value={"p_up": 0.51, "reason": "微偏",
                                             "source": "llm"}), \
@@ -888,7 +896,9 @@ class TestFatalOrderFailure(TempLedger):
 
     def setUp(self):
         super().setUp()
-        self.cfg = autotrade.Cfg(dry_run=False, interval_sec=60, cooldown_sec=30)
+        # 这里只关心"券商拒绝后要不要自停"，入场闸门关掉免得挡在前面。
+        self.cfg = autotrade.Cfg(dry_run=False, interval_sec=60, cooldown_sec=30,
+                                 act_guard=False, top_long_ban=False)
 
     def test_retcode_10027_says_enable_autotrading(self):
         msg = autotrade.retcode_hint(10027)
@@ -1550,7 +1560,9 @@ class TestStructure(unittest.TestCase):
     def test_uptrend_upper_edge_forbids_chasing(self):
         rows = bars_from_closes([4000 + i for i in range(14)])
         text = autotrade._structure_text(rows)
-        self.assertIn("倾向等回踩到下沿低吸", text)
+        # 2026-10-27 起话术不再给"倾向等回踩低吸"——模型把它读成"可以买"，
+        # 当天在 94% 位置追了两笔。现在直接说此处不是买点。
+        self.assertIn("此处不是买点", text)
         self.assertIn("你可以不同意", text)
 
     def test_range_keeps_symmetric_edges(self):
@@ -1570,8 +1582,8 @@ class TestStructure(unittest.TestCase):
         self.assertIn("倾向等反抽到上沿做空", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
         # 涨势贴下沿 → 回踩到位倾向做多
         self.assertIn("倾向做多", autotrade._zone_text(0.10, 0.70, 5.0, 0.35))
-        # 涨势贴上沿 → 程序倾向不追多
-        self.assertIn("倾向等回踩到下沿低吸", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
+        # 涨势贴上沿 → 程序不给方向（原来给 +1，等于给追高背书）
+        self.assertIn("此处不是买点", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
         # 跌势贴上沿 → 反抽到位倾向做空
         self.assertIn("倾向做空", autotrade._zone_text(0.90, 0.70, -5.0, 0.35))
         # 震荡两边都对称
@@ -1587,7 +1599,7 @@ class TestStructure(unittest.TestCase):
             bars_from_closes([4000 - i for i in range(14)]), 0.35), -1)
         # 涨势贴下沿 → 倾向多（回踩到位）
         self.assertEqual(autotrade._prog_direction(
-            bars_from_closes([4000 + i for i in range(14)]), 0.35), 1)
+            bars_from_closes([4000 + i for i in range(14)]), 0.35), 0)
         # 震荡收在区间最低 → 倾向多
         self.assertEqual(autotrade._prog_direction(
             bars_from_closes([4002, 4000] * 7), 0.35), 1)
@@ -1598,6 +1610,20 @@ class TestStructure(unittest.TestCase):
                      "low": 4000 + (2 if i % 2 else 0) - 3,
                      "close": 4000 + (2 if i % 2 else 0)} for i in range(14)]
         self.assertEqual(autotrade._prog_direction(mid_rows, 0.35), 0)
+
+    def test_uptrend_upper_edge_gives_no_direction(self):
+        """涨势贴上沿：程序不给方向，而不是 +1。
+
+        2026-10-27 改。原来返回 +1，等于「看涨」；面板据此把模型在 94% 位置
+        的追多裁决成「一致」，程序在给追高背书。这一格必须回到 0——
+        位置在高位，既不建议追多，也不建议逆势空。
+        """
+        rows = bars_from_closes([4000 + i for i in range(14)])
+        self.assertGreater(autotrade._structure(rows)["pos"], 0.65)
+        self.assertEqual(autotrade._prog_direction(rows, 0.35), 0)
+        # 同一格在震势里仍然给做空（这是标准动作，不能连坐）
+        self.assertEqual(autotrade._prog_direction(
+            bars_from_closes([4000 + (2 if i % 2 else 0) for i in range(14)]), 0.35), -1)
 
     def test_system_suggests_not_commands(self):
         """提示词必须把位置判定定位成建议而非命令（p_up 两极分化的根因）。"""
@@ -1752,7 +1778,9 @@ class TestActFlag(TempLedger):
 
     def setUp(self):
         super().setUp()
-        self.cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False)
+        # 同上：bars_up() 的 pos 恒为 1.0，关掉入场闸门才能测"act=true 就开"。
+        self.cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False,
+                                 act_guard=False, top_long_ban=False)
 
     def test_parse_act_true(self):
         got = autotrade.parse_p_up('{"act": true, "p_up": 0.62, "reason": "突破"}')
@@ -2137,7 +2165,8 @@ class TestReviewQueue(TempLedger):
                                              "reason": "突破", "source": "llm"}), \
              mock.patch.object(autotrade, "send_open",
                                return_value={"ok": True, "price": 4001.2, "order": 555}):
-            row = autotrade.tick(autotrade.Cfg(interval_sec=60), now=NOW,
+            row = autotrade.tick(autotrade.Cfg(interval_sec=60, act_guard=False,
+                                               top_long_ban=False), now=NOW,
                                  quote=(4000.0, 4000.24), rows=bars_up(), positions=[])
         self.assertEqual(row["kind"], "open")
         fake_review.assert_called_once()
@@ -2944,7 +2973,8 @@ class TestFeatureSnapshotLands(TempLedger):
                                return_value={"ok": True, "order": 7, "price": 4040.0}), \
              mock.patch.object(autotrade, "_mtf_bundle",
                                return_value={"text": "", "info": None}):
-            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+            row = autotrade.tick(autotrade.Cfg(dry_run=True, act_guard=False,
+                                               top_long_ban=False), now=NOW,
                                  quote=(4040.0, 4040.24), rows=bars_up(),
                                  positions=[])
         self.assertEqual(row["kind"], "open")
@@ -3389,6 +3419,165 @@ class TestHardRuleGate(TempLedger):
                 "ts": NOW - 100 + i, "kind": "review", "scope": "entry",
                 "theme": "逆势抢反弹/接刀", "lesson": "下跌途中接刀，等真阳确认再进"})
         self.assertIn("【铁律", autotrade.recent_lessons(scope="entry"))
+
+
+# ------------------------------------------------- 入场闸门（2026-10-27）
+
+
+class TestEntryVeto(unittest.TestCase):
+    """两个入场硬闸门。用例里的原话全部取自 10-27 那轮真实日志。
+
+    为什么要用真实原话：这两条规则的唯一价值就是挡住"已经发生过的错"，
+    用编造的句子测等于没测——真正难的是"赢单的措辞不能被误伤"。
+    """
+
+    def setUp(self):
+        self.cfg = autotrade.Cfg()
+
+    # ---------------- 闸门 1：理由与动作自相矛盾 ----------------
+
+    def test_hangdan_with_act_true_is_vetoed(self):
+        """18:45 那笔：reason 写"回踩 4004 挂多，不追高"，成交在 4010.917。"""
+        veto = autotrade._entry_veto(
+            self.cfg, 1, {"pos": 0.96},
+            "回踩T-1实体中位4004附近挂多，不追高但方向偏多", True)
+        self.assertIsNotNone(veto)
+        self.assertEqual(veto[0], "act_guard")
+        self.assertIn("挂多", veto[1])
+
+    def test_wait_for_confirmation_with_act_true_is_vetoed(self):
+        """18:09 那笔：reason 写"阴线未止跌…等收阳确认"，当场就进了，-3.49。"""
+        veto = autotrade._entry_veto(
+            self.cfg, 1, {"pos": 0.28},
+            "ER=0.03窄幅震荡，3999附近支撑；当前阴线未止跌，轻仓做多等收阳确认", True)
+        self.assertEqual(veto[0], "act_guard")
+
+    def test_act_false_is_never_double_counted(self):
+        """模型自己说不做时，这里不能抢功——它走到这一步之前就 return 了。"""
+        self.assertIsNone(autotrade._entry_veto(
+            self.cfg, 1, {"pos": 0.96}, "等确认", False))
+
+    def test_winning_reasons_are_not_blocked(self):
+        """四笔赢单的原话必须全部放行。
+
+        它们的 reason 里都有"企稳""止跌""贴边"这类词——如果把裸词
+        （而不是"等企稳""等止跌"）收进词表，这四笔 +4.00/+4.04/+6.35/+5.12
+        会被自己的闸门挡掉，等于用规则杀掉当天唯一的赚钱来源。
+        """
+        winners = [
+            "ER=0.07窄幅震荡，收盘66%贴上沿，连阳3根且当前81笔tick缩量，贴上沿做空，目标回4004.5均线",
+            "ER=0.28窄幅震荡，收盘位置17%贴下沿，当前K收阳且tick连续上行收复3993.8，符合震荡贴边做多",
+            "ER0.23震荡贴下沿25%，T-1当前连续收阳止跌，tick放量246笔承接，M5偏空故只轻仓看反弹",
+            "ER0.21窄幅震荡，收盘位置28%贴下沿，T-2探底3993.3后连收两阳止跌，位置符合震荡下沿做多",
+            "ER0.37、位置26%贴下沿，T-1与当前连阳收于3994.876，止跌确认；M5震荡不冲突，轻仓试多",
+        ]
+        for r in winners:
+            self.assertIsNone(autotrade._hesitation_word(r), r)
+            self.assertIsNone(
+                autotrade._entry_veto(self.cfg, 1, {"pos": 0.25}, r, True), r)
+
+    def test_unknown_reason_is_not_vetoed(self):
+        self.assertIsNone(autotrade._entry_veto(self.cfg, -1, {"pos": 0.8}, "", True))
+        self.assertIsNone(autotrade._entry_veto(self.cfg, -1, {"pos": 0.8}, None, True))
+
+    # ---------------- 闸门 2：贴上沿做多 ----------------
+
+    def test_long_at_top_edge_is_vetoed(self):
+        """17:07 那笔：分位 0.97、ER 0.71、drift +8.4，追多 -3.24。"""
+        veto = autotrade._entry_veto(
+            self.cfg, 1, {"pos": 0.9664},
+            "ER0.71单边上涨，5连阳收盘97%贴顶；回踩3998-3996是顺势多单点", True)
+        self.assertEqual(veto[0], "top_long_ban")
+        self.assertIn("0.97", veto[1])
+
+    def test_short_at_top_edge_is_allowed(self):
+        """贴上沿做空是本打法的标准动作（15:44 那笔 +3.71），不能连坐。"""
+        self.assertIsNone(autotrade._entry_veto(
+            self.cfg, -1, {"pos": 0.80},
+            "ER=0.19窄幅震荡，收盘位置80%贴上沿，贴边做空符合区间卖压", True))
+
+    def test_long_below_edge_is_allowed(self):
+        self.assertIsNone(autotrade._entry_veto(
+            self.cfg, 1, {"pos": 0.6499}, "贴下沿做多", True))
+
+    def test_missing_pos_does_not_veto(self):
+        """特征快照算不出来时不能凭空拦单——那是数据问题，不是位置问题。"""
+        self.assertIsNone(autotrade._entry_veto(self.cfg, 1, {}, "贴边做多", True))
+
+    def test_threshold_follows_zone_edge(self):
+        """门槛必须跟着 cfg 走：面板把 zone_edge 调到 0.20，0.75 就不该再拦。"""
+        cfg = autotrade.Cfg(zone_edge=0.20)
+        self.assertIsNone(autotrade._entry_veto(cfg, 1, {"pos": 0.79}, "贴边做多", True))
+        self.assertIsNotNone(autotrade._entry_veto(cfg, 1, {"pos": 0.81}, "贴边做多", True))
+
+    # ---------------- 开关与提示词一致性 ----------------
+
+    def test_switches_turn_gates_off(self):
+        cfg = autotrade.Cfg(act_guard=False, top_long_ban=False)
+        self.assertIsNone(autotrade._entry_veto(
+            cfg, 1, {"pos": 0.99}, "回踩4004挂多，不追高", True))
+
+    def test_prompt_states_the_two_gates(self):
+        """提示词必须和代码说同一件事，否则模型每次都被拦却不知道为什么。
+
+        {ZONE_UP} 也要真的被换掉——留着占位符等于没写。
+        """
+        s = autotrade.system_for(autotrade.ENTRY_SYSTEM, autotrade.Cfg())
+        self.assertNotIn("{ZONE_UP}", s)
+        self.assertIn("没有挂单", s)
+        self.assertIn("65%", s)          # 1 - 默认 zone_edge 0.35
+        s2 = autotrade.system_for(autotrade.ENTRY_SYSTEM,
+                                  autotrade.Cfg(zone_edge=0.20))
+        self.assertIn("80%", s2)
+
+
+class TestEntryVetoInTick(TempLedger):
+    """闸门真的接进 tick() 了吗？
+
+    上面那些用例测的是纯函数。纯函数对、接线错，单子照样开出去——
+    而且这种错不会报错，只会在账本里慢慢体现成"规则好像没生效"。
+    所以这里必须走一次完整的 tick()，断言 send_open 一次都没被调用。
+    """
+
+    def test_top_long_ban_blocks_real_open(self):
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "agree": True, "reason": "结构支持",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open") as m_open:
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4000.0, 4000.24), rows=bars_up(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "skip")
+        self.assertEqual(row["veto"], "top_long_ban")
+        m_open.assert_not_called()
+
+    def test_act_guard_blocks_real_open(self):
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.3,
+                                             "agree": True,
+                                             "reason": "反抽到4002挂空，等收阴确认",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open") as m_open:
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4000.0, 4000.24), rows=bars_down(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "skip")
+        self.assertEqual(row["veto"], "act_guard")
+        self.assertIn("模型原话", row["reason"])   # 面板上要看得到它自己写了什么
+        m_open.assert_not_called()
+
+    def test_veto_row_keeps_features(self):
+        """被闸门拦掉的单也要留特征，否则没法回答「这条闸门是不是误杀」。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "reason": "结构支持", "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open"):
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4000.0, 4000.24), rows=bars_up(),
+                                 positions=[])
+        self.assertTrue(row["feat"]["ok"])
+        self.assertIsNotNone(row["feat"]["pos"])
 
 
 if __name__ == "__main__":
