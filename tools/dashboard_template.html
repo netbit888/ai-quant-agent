@@ -3279,16 +3279,40 @@ async function updateProgress() {
   } catch (e) { return null; }
 }
 
+// 下载速率采样：后端只给 received 累计值，速率在前端两次采样间算。
+// 采样间隔太短（<400ms）会算出抖动很大的假数字，所以不够 400ms 就沿用上次。
+let _dlPrev = { t: 0, b: 0, kbps: 0 };
+
+function dlRate(received) {
+  const now = Date.now();
+  if (!_dlPrev.t) { _dlPrev = { t: now, b: received, kbps: 0 }; return 0; }
+  const dt = (now - _dlPrev.t) / 1000;
+  if (dt >= 0.4) {
+    _dlPrev = { t: now, b: received, kbps: (received - _dlPrev.b) / dt / 1024 };
+  }
+  return _dlPrev.kbps;
+}
+
+function kbpsText(k) {
+  if (!k || k < 1) return '停滞…';
+  if (k >= 1024) return (k / 1024).toFixed(1) + ' MB/s';
+  return k.toFixed(0) + ' KB/s';
+}
+
 // 按 snapshot 驱动弹窗按钮与进度文案。返回 snapshot 供调用方读 check。
 async function updateRender() {
   const j = await updateProgress();
   if (!j) return null;
   const d = j.download || {};
   const go = $('updateGo'), later = $('updateLater'), prog = $('updateProgress');
+  if (d.status !== 'downloading') _dlPrev = { t: 0, b: 0, kbps: 0 };
   if (d.status === 'downloading') {
     go.disabled = true; later.disabled = true;
     const mb = (d.received / 1048576).toFixed(1), tot = (d.total / 1048576).toFixed(1);
-    prog.textContent = `下载中 ${d.pct}% (${mb}/${tot} MB)`;
+    // 分片/重试数字全部来自后端真实值，不在前端编
+    const seg = d.segments > 1 ? ` · ${d.segments} 连接` : '';
+    const retry = d.retries > 0 ? ` · 重试 ${d.retries} 次` : '';
+    prog.textContent = `下载中 ${d.pct}% (${mb}/${tot} MB) · ${kbpsText(dlRate(d.received))}${seg}${retry}`;
   } else if (d.status === 'done') {
     go.disabled = false; later.disabled = false;
     go.textContent = '立即升级并重启'; go.onclick = applyUpdate;
@@ -3415,11 +3439,16 @@ async function startUpdateDownload() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
   } catch (e) { /* 由下面的进度轮询兜错 */ }
-  // 下载最长 10 分钟（PyInstaller 包一两百 MB），进度条每 0.5s 刷一次
+  // 原来这里硬编码 10 分钟，到点就停刷新——但后端还在下。慢网下用户以为卡死，
+  // 关窗口重来，白白丢掉已下的字节。现在只在终态或用户关掉弹窗时退出，
+  // 60 分钟只是个安全阀（后端自己会重试续传，轮询不该比它先放弃）。
   const t0 = Date.now();
-  while (Date.now() - t0 < 10 * 60 * 1000) {
+  while (Date.now() - t0 < 60 * 60 * 1000) {
     const j = await updateRender();
-    if (j && j.download && (j.download.status === 'done' || j.download.status === 'error')) break;
+    if (!j) break;
+    if ($('updateMask').classList.contains('hidden')) break;
+    const st = (j.download || {}).status;
+    if (st === 'done' || st === 'error') break;
     await new Promise(r => setTimeout(r, 500));
   }
 }
