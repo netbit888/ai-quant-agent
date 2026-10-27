@@ -84,8 +84,10 @@ class _Server:
         self.honour_range = honour_range
         self.fail_ranges = dict(fail_ranges or {})
         self.seen: list[str] = []          # 每次请求带的 Range 头，按序
+        self.timeouts: list = []           # 每次请求传的 timeout，按序
 
     def __call__(self, req, timeout=None):
+        self.timeouts.append(timeout)
         rng = ""
         for k, v in req.headers.items():
             if k.lower() == "range":
@@ -348,6 +350,25 @@ class TestDownload(unittest.TestCase):
         self.assertGreater(kbps, 0)
         self.assertEqual(part0.read_bytes(), self.PAYLOAD)
 
+    def test_probe_uses_short_timeout(self):
+        """探针只握手+读样本；30 秒超时会让死链路白等两分钟才报错。"""
+        server = _Server(self.PAYLOAD)
+        with mock.patch.object(updater.urllib.request, "urlopen",
+                               side_effect=server):
+            updater._probe_once("https://x/a.exe", len(self.PAYLOAD),
+                                self._dest("p0"))
+        self.assertEqual(server.timeouts[0], updater.PROBE_TIMEOUT)
+        self.assertLess(updater.PROBE_TIMEOUT, updater.DOWNLOAD_TIMEOUT)
+
+    def test_probe_try_counter_visible_to_ui(self):
+        """前端靠 probe_try 把"还没连上"和"下着没速度"分开，必须递增。"""
+        server = _Server(self.PAYLOAD, fail_ranges={"0-262143": 1})
+        with _sync_threads():
+            self._run(server, consts=self.SEG_SMALL, pick=4)
+        snap = updater.snapshot()["download"]
+        self.assertEqual(snap["status"], "done")
+        self.assertGreaterEqual(snap["probe_try"], 2)
+
     def test_probe_transient_failure_retries_then_segments(self):
         """探针被链路掐一次不许降级成单流——那是最慢的路。"""
         server = _Server(self.PAYLOAD, fail_ranges={"0-262143": 1})
@@ -457,6 +478,24 @@ class TestDownload(unittest.TestCase):
         self.assertFalse(tmp.exists())
         updater._clear_dir(d)              # 启动扫尾：连段一起清
         self.assertFalse(keep.exists())
+
+
+class TestErrorText(unittest.TestCase):
+    """错误文案要让人看懂，原文保留在括号里给排查用。"""
+
+    def test_handshake_timeout(self):
+        exc = OSError("_ssl.c:1015: The handshake operation timed out")
+        msg = updater._brief_net_error(exc)
+        self.assertIn("连接超时", msg)
+        self.assertIn("handshake", msg)      # 原文不能丢
+
+    def test_connection_reset(self):
+        msg = updater._brief_net_error(OSError("Remote end closed connection"))
+        self.assertIn("连接被中断", msg)
+
+    def test_unknown_keeps_type_name(self):
+        msg = updater._brief_net_error(ValueError("boom"))
+        self.assertIn("ValueError", msg)
 
 
 class TestSegmentPlan(unittest.TestCase):
@@ -595,6 +634,16 @@ class TestUpdateDialogMarkup(unittest.TestCase):
         self.assertIn("function kbpsText", self.html)
         self.assertIn("kbpsText(dlRate(d.received))", self.html)
         self.assertIn("d.segments > 1", self.html)
+
+    def test_zero_bytes_says_connecting_not_stalled(self):
+        """0 字节时报"停滞"是错的信息：真实状态是连不上、正在重试。
+
+        2026-10-27 真机截图：链路的 TLS 握手被掐，弹窗写着「下载中 0% · 停滞…」，
+        看起来像下载卡死，实际是一个字节都没拿到。
+        """
+        self.assertIn("正在连接", self.html)
+        self.assertIn("d.probe_try > 1", self.html)
+        self.assertIn("d.received > 0", self.html)
 
     def test_polling_cap_is_not_ten_minutes(self):
         """10 分钟硬上限 = 后端还在下、界面却停止刷新，用户以为卡死重来。

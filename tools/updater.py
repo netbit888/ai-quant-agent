@@ -53,6 +53,14 @@ ACCEPT = "application/vnd.github+json"
 
 CHECK_TIMEOUT = 5.0        # 检测是启动路径上的客人，超时要短
 DOWNLOAD_TIMEOUT = 30.0    # 单次 read 的 socket 超时；大文件靠循环续读
+# 探针只做 TLS 握手 + 读一小段样本。两个值的取舍：
+#   太长（30s）→ 链路已死时用户对着 0% 干等两分钟；
+#   太短（10s）→ 4KB/s 的慢链路读一个 64KB 块要 16s，会被判成失败——
+#                而那条链路本来是能下完的。
+# 折中：15 秒 + 探针专用 16KB 小块（16KB/15s 覆盖到 1KB/s），
+# 最坏 4 次尝试 + 退避 ≈ 70 秒出结果。
+PROBE_TIMEOUT = 15.0
+PROBE_CHUNK = 16 * 1024
 CHECK_THROTTLE_SEC = 60.0  # 无鉴权配额 60 次/时/IP，60 秒节流是底线
 ASSET_RE = re.compile(r"AIQuant-Setup-.+\.exe")
 # delta 资产名自证身份：AIQuant-Delta-<base>-to-<target>.exe。
@@ -95,7 +103,7 @@ _state: dict = {
               "newer": False, "notes": None, "error": None, "checked_at": 0.0},
     "download": {"status": "idle", "received": 0, "total": 0, "pct": 0,
                  "file": None, "error": None, "segments": 0, "retries": 0,
-                 "probe_kbps": 0.0},
+                 "probe_kbps": 0.0, "probe_try": 0},
 }
 _last_check = 0.0
 
@@ -364,7 +372,7 @@ def _probe_once(url: str, total: int, part0: Path) -> tuple[bool, float]:
         "User-Agent": UA, "Range": f"bytes=0-{CANARY_MAX - 1}",
         "Accept-Encoding": "identity"})
     got = 0
-    with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as resp:
         status = getattr(resp, "status", None) or resp.getcode()
         if status != 206:
             raise _NoRange(f"HTTP {status}")
@@ -379,7 +387,8 @@ def _probe_once(url: str, total: int, part0: Path) -> tuple[bool, float]:
         part0.parent.mkdir(parents=True, exist_ok=True)
         with part0.open("wb") as fh:
             while time.time() - t0 < CANARY_SECONDS and got < CANARY_MAX:
-                chunk = resp.read(SEG_CHUNK)
+                # 小块读：慢链路上大块会把单次 read 拖过超时，误判成失败
+                chunk = resp.read(PROBE_CHUNK)
                 if not chunk:
                     break
                 fh.write(chunk)
@@ -404,6 +413,8 @@ def _probe_and_measure(url: str, total: int, part0: Path) -> tuple[bool, float]:
     """
     for attempt in range(RETRIES + 1):
         try:
+            # 前端靠 probe_try 把"还没连上，正在第 N 次尝试"和下不动区分开
+            _set("download", probe_try=attempt + 1)
             return _probe_once(url, total, part0)
         except _NoRange:
             return False, 0.0
@@ -575,6 +586,24 @@ def _verify(path: Path, total: int, sha: str | None) -> None:
         raise _IntegrityError("sha256 校验失败（文件被改过或传坏了）")
 
 
+def _brief_net_error(exc: BaseException) -> str:
+    """把底层网络异常翻成用户能看懂的一句话，原文放括号里留着排查。
+
+    原始信息长这样：``URLError: <urlopen error _ssl.c:1015: The handshake
+    operation timed out>``——对着这行字，用户既不知道发生了什么，也不知道
+    下一步该干嘛。
+    """
+    s = str(exc)
+    low = s.lower()
+    if "handshake" in low or "timed out" in low:
+        return f"连接超时，网络到 GitHub 不通（{s}）"
+    if "remote end closed" in low or "reset" in low or "disconnected" in low:
+        return f"连接被中断（{s}）"
+    if "getaddrinfo" in low or "name or service" in low:
+        return f"域名解析失败（{s}）"
+    return f"{type(exc).__name__}: {s}"
+
+
 def _do_download(url: str, total: int, dest: Path, sha: str | None = None) -> None:
     """分片 + 续传下载。**只有全须全尾才让文件出现在 dest 上。**
 
@@ -593,7 +622,8 @@ def _do_download(url: str, total: int, dest: Path, sha: str | None = None) -> No
     tmp = dest.with_name(dest.name + ".tmp")
     part0 = dest.with_name(dest.name + PART_SUFFIX + "0")
     _set("download", status="downloading", received=0, total=total, pct=0,
-         file=str(dest), error=None, segments=0, retries=0, probe_kbps=0.0)
+         file=str(dest), error=None, segments=0, retries=0, probe_kbps=0.0,
+         probe_try=0)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         can_segment, kbps = (False, 0.0)
@@ -621,7 +651,7 @@ def _do_download(url: str, total: int, dest: Path, sha: str | None = None) -> No
         kept = sum(p.stat().st_size for p in _parts_of(dest)) if total else 0
         _set("download", status="error", received=kept,
              pct=min(99, round(kept * 100 / total)) if total else 0,
-             error=f"{type(exc).__name__}: {exc}"
+             error=_brief_net_error(exc)
                    + ("（已下载的部分已保留，重试会接着下）" if kept else ""))
 
 

@@ -3335,7 +3335,12 @@ async function updateRender() {
     // 分片/重试数字全部来自后端真实值，不在前端编
     const seg = d.segments > 1 ? ` · ${d.segments} 连接` : '';
     const retry = d.retries > 0 ? ` · 重试 ${d.retries} 次` : '';
-    prog.textContent = `下载中 ${d.pct}% (${mb}/${tot} MB) · ${kbpsText(dlRate(d.received))}${seg}${retry}`;
+    // 一个字节都没到手 = 还卡在探测/握手。这时报「停滞」是错的：真实状态是
+    // 「连不上，正在重试」，和「下着但没速度」是两回事，必须分开说。
+    const tryNo = d.probe_try > 1 ? `（第 ${d.probe_try} 次尝试）` : '';
+    const speed = d.received > 0
+      ? kbpsText(dlRate(d.received)) : `正在连接…${tryNo}`;
+    prog.textContent = `下载中 ${d.pct}% (${mb}/${tot} MB) · ${speed}${seg}${retry}`;
   } else if (d.status === 'done') {
     go.disabled = false; later.disabled = false;
     go.textContent = '立即升级并重启'; go.onclick = applyUpdate;
