@@ -3424,11 +3424,13 @@ class TestHardRuleGate(TempLedger):
 # ------------------------------------------------- 入场闸门（2026-10-27）
 
 
-class TestEntryVeto(unittest.TestCase):
-    """两个入场硬闸门。用例里的原话全部取自 10-27 那轮真实日志。
+class TestEntryAdvice(unittest.TestCase):
+    """程序对开仓的两条建议。用例里的原话全部取自 10-27 那轮真实日志。
 
-    为什么要用真实原话：这两条规则的唯一价值就是挡住"已经发生过的错"，
-    用编造的句子测等于没测——真正难的是"赢单的措辞不能被误伤"。
+    两条建议 2026-10-28 起默认不拦单（决策权交还模型），但"程序怎么看"
+    必须算得准——否则面板上的「模型否决了建议」和日志里的 would_veto
+    全是假的，事后拿它做对比就成了自欺。
+    用真实原话测的理由：难的不是造句子，是"赢单的措辞不能被误判成问题单"。
     """
 
     def setUp(self):
@@ -3438,7 +3440,7 @@ class TestEntryVeto(unittest.TestCase):
 
     def test_hangdan_with_act_true_is_vetoed(self):
         """18:45 那笔：reason 写"回踩 4004 挂多，不追高"，成交在 4010.917。"""
-        veto = autotrade._entry_veto(
+        veto = autotrade._entry_advice(
             self.cfg, 1, {"pos": 0.96},
             "回踩T-1实体中位4004附近挂多，不追高但方向偏多", True)
         self.assertIsNotNone(veto)
@@ -3447,14 +3449,14 @@ class TestEntryVeto(unittest.TestCase):
 
     def test_wait_for_confirmation_with_act_true_is_vetoed(self):
         """18:09 那笔：reason 写"阴线未止跌…等收阳确认"，当场就进了，-3.49。"""
-        veto = autotrade._entry_veto(
+        veto = autotrade._entry_advice(
             self.cfg, 1, {"pos": 0.28},
             "ER=0.03窄幅震荡，3999附近支撑；当前阴线未止跌，轻仓做多等收阳确认", True)
         self.assertEqual(veto[0], "act_guard")
 
     def test_act_false_is_never_double_counted(self):
         """模型自己说不做时，这里不能抢功——它走到这一步之前就 return 了。"""
-        self.assertIsNone(autotrade._entry_veto(
+        self.assertIsNone(autotrade._entry_advice(
             self.cfg, 1, {"pos": 0.96}, "等确认", False))
 
     def test_winning_reasons_are_not_blocked(self):
@@ -3474,17 +3476,17 @@ class TestEntryVeto(unittest.TestCase):
         for r in winners:
             self.assertIsNone(autotrade._hesitation_word(r), r)
             self.assertIsNone(
-                autotrade._entry_veto(self.cfg, 1, {"pos": 0.25}, r, True), r)
+                autotrade._entry_advice(self.cfg, 1, {"pos": 0.25}, r, True), r)
 
     def test_unknown_reason_is_not_vetoed(self):
-        self.assertIsNone(autotrade._entry_veto(self.cfg, -1, {"pos": 0.8}, "", True))
-        self.assertIsNone(autotrade._entry_veto(self.cfg, -1, {"pos": 0.8}, None, True))
+        self.assertIsNone(autotrade._entry_advice(self.cfg, -1, {"pos": 0.8}, "", True))
+        self.assertIsNone(autotrade._entry_advice(self.cfg, -1, {"pos": 0.8}, None, True))
 
     # ---------------- 闸门 2：贴上沿做多 ----------------
 
     def test_long_at_top_edge_is_vetoed(self):
         """17:07 那笔：分位 0.97、ER 0.71、drift +8.4，追多 -3.24。"""
-        veto = autotrade._entry_veto(
+        veto = autotrade._entry_advice(
             self.cfg, 1, {"pos": 0.9664},
             "ER0.71单边上涨，5连阳收盘97%贴顶；回踩3998-3996是顺势多单点", True)
         self.assertEqual(veto[0], "top_long_ban")
@@ -3492,92 +3494,115 @@ class TestEntryVeto(unittest.TestCase):
 
     def test_short_at_top_edge_is_allowed(self):
         """贴上沿做空是本打法的标准动作（15:44 那笔 +3.71），不能连坐。"""
-        self.assertIsNone(autotrade._entry_veto(
+        self.assertIsNone(autotrade._entry_advice(
             self.cfg, -1, {"pos": 0.80},
             "ER=0.19窄幅震荡，收盘位置80%贴上沿，贴边做空符合区间卖压", True))
 
     def test_long_below_edge_is_allowed(self):
-        self.assertIsNone(autotrade._entry_veto(
+        self.assertIsNone(autotrade._entry_advice(
             self.cfg, 1, {"pos": 0.6499}, "贴下沿做多", True))
 
     def test_missing_pos_does_not_veto(self):
         """特征快照算不出来时不能凭空拦单——那是数据问题，不是位置问题。"""
-        self.assertIsNone(autotrade._entry_veto(self.cfg, 1, {}, "贴边做多", True))
+        self.assertIsNone(autotrade._entry_advice(self.cfg, 1, {}, "贴边做多", True))
 
     def test_threshold_follows_zone_edge(self):
         """门槛必须跟着 cfg 走：面板把 zone_edge 调到 0.20，0.75 就不该再拦。"""
         cfg = autotrade.Cfg(zone_edge=0.20)
-        self.assertIsNone(autotrade._entry_veto(cfg, 1, {"pos": 0.79}, "贴边做多", True))
-        self.assertIsNotNone(autotrade._entry_veto(cfg, 1, {"pos": 0.81}, "贴边做多", True))
+        self.assertIsNone(autotrade._entry_advice(cfg, 1, {"pos": 0.79}, "贴边做多", True))
+        self.assertIsNotNone(autotrade._entry_advice(cfg, 1, {"pos": 0.81}, "贴边做多", True))
 
     # ---------------- 开关与提示词一致性 ----------------
 
-    def test_switches_turn_gates_off(self):
-        cfg = autotrade.Cfg(act_guard=False, top_long_ban=False)
-        self.assertIsNone(autotrade._entry_veto(
-            cfg, 1, {"pos": 0.99}, "回踩4004挂多，不追高", True))
+    def test_gate_switch_decides_whether_it_blocks(self):
+        """建议永远算得出来；要不要拦由开关定，默认两个都是关的。
+
+        2026-10-28 用户定的定位：程序只给建议和特征，决策权在模型。
+        这意味着默认情况下 `_entry_advice` 有意见、但 `_gate_blocks` 返回 False。
+        """
+        cfg = autotrade.Cfg()
+        self.assertFalse(cfg.act_guard)
+        self.assertFalse(cfg.top_long_ban)
+        advice = autotrade._entry_advice(cfg, 1, {"pos": 0.99}, "回踩4004挂多，不追高", True)
+        self.assertIsNotNone(advice)                       # 建议照给
+        self.assertFalse(autotrade._gate_blocks(cfg, advice[0]))   # 但不拦
+
+        strict = autotrade.Cfg(act_guard=True, top_long_ban=True)
+        self.assertTrue(autotrade._gate_blocks(strict, "act_guard"))
+        self.assertTrue(autotrade._gate_blocks(strict, "top_long_ban"))
+        self.assertFalse(autotrade._gate_blocks(strict, "unknown_code"))
 
     def test_prompt_states_the_two_gates(self):
-        """提示词必须和代码说同一件事，否则模型每次都被拦却不知道为什么。
+        """提示词必须和代码说同一件事。
 
-        {ZONE_UP} 也要真的被换掉——留着占位符等于没写。
+        {ZONE_UP} 要真的被换掉——留着占位符等于没写。
+        关键字别再写"代码会拦"：现在默认不拦了，提示词要是还说"会拦"，
+        模型就会以为写了 act=true 也没用，反而乱写。
         """
         s = autotrade.system_for(autotrade.ENTRY_SYSTEM, autotrade.Cfg())
         self.assertNotIn("{ZONE_UP}", s)
         self.assertIn("没有挂单", s)
+        self.assertIn("不会替你拦单", s)
         self.assertIn("65%", s)          # 1 - 默认 zone_edge 0.35
         s2 = autotrade.system_for(autotrade.ENTRY_SYSTEM,
                                   autotrade.Cfg(zone_edge=0.20))
         self.assertIn("80%", s2)
 
 
-class TestEntryVetoInTick(TempLedger):
-    """闸门真的接进 tick() 了吗？
+class TestEntryAdviceInTick(TempLedger):
+    """建议真的接进 tick() 了吗？
 
-    上面那些用例测的是纯函数。纯函数对、接线错，单子照样开出去——
-    而且这种错不会报错，只会在账本里慢慢体现成"规则好像没生效"。
-    所以这里必须走一次完整的 tick()，断言 send_open 一次都没被调用。
+    2026-10-28 起默认行为是「只建议不拦」——所以这里既要证明默认放行，
+    也要证明把开关打开后仍然拦得住（否则开关是死的）。
+    走完整 tick()：纯函数对、接线错的话，单子照样会出去。
     """
 
-    def test_top_long_ban_blocks_real_open(self):
+    def test_default_lets_the_model_decide(self):
+        """默认（两个开关都关）：贴着上沿做多照样开，只留一条 would_veto。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "agree": True, "reason": "结构支持",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open",
+                              return_value={"ok": True, "price": 4001.0,
+                                            "order": 600}):
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4000.0, 4000.24), rows=bars_up(),
+                                 positions=[])
+        self.assertEqual(row["kind"], "open")
+        self.assertEqual(row["would_veto"], "top_long_ban")   # 意见留痕
+        self.assertTrue(row["feat"]["ok"])
+        state = autotrade.load_state()
+        self.assertEqual(state["last_decision"]["advice"], "top_long_ban")
+        self.assertNotIn("veto", state["last_decision"])       # 没有拦
+
+    def test_top_long_ban_blocks_when_switched_on(self):
         with mock.patch.object(autotrade, "ask_entry",
                                return_value={"act": True, "p_up": 0.7,
                                              "agree": True, "reason": "结构支持",
                                              "source": "llm"}), \
              mock.patch.object(autotrade, "send_open") as m_open:
-            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                                 quote=(4000.0, 4000.24), rows=bars_up(),
-                                 positions=[])
+            row = autotrade.tick(autotrade.Cfg(dry_run=True, top_long_ban=True),
+                                 now=NOW, quote=(4000.0, 4000.24),
+                                 rows=bars_up(), positions=[])
         self.assertEqual(row["kind"], "skip")
         self.assertEqual(row["veto"], "top_long_ban")
         m_open.assert_not_called()
 
-    def test_act_guard_blocks_real_open(self):
+    def test_act_guard_blocks_when_switched_on(self):
         with mock.patch.object(autotrade, "ask_entry",
                                return_value={"act": True, "p_up": 0.3,
                                              "agree": True,
                                              "reason": "反抽到4002挂空，等收阴确认",
                                              "source": "llm"}), \
              mock.patch.object(autotrade, "send_open") as m_open:
-            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                                 quote=(4000.0, 4000.24), rows=bars_down(),
-                                 positions=[])
+            row = autotrade.tick(autotrade.Cfg(dry_run=True, act_guard=True),
+                                 now=NOW, quote=(4000.0, 4000.24),
+                                 rows=bars_down(), positions=[])
         self.assertEqual(row["kind"], "skip")
         self.assertEqual(row["veto"], "act_guard")
         self.assertIn("模型原话", row["reason"])   # 面板上要看得到它自己写了什么
         m_open.assert_not_called()
-
-    def test_veto_row_keeps_features(self):
-        """被闸门拦掉的单也要留特征，否则没法回答「这条闸门是不是误杀」。"""
-        with mock.patch.object(autotrade, "ask_entry",
-                               return_value={"act": True, "p_up": 0.7,
-                                             "reason": "结构支持", "source": "llm"}), \
-             mock.patch.object(autotrade, "send_open"):
-            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                                 quote=(4000.0, 4000.24), rows=bars_up(),
-                                 positions=[])
-        self.assertTrue(row["feat"]["ok"])
-        self.assertIsNotNone(row["feat"]["pos"])
 
     def test_veto_lands_in_last_decision(self):
         """面板要能区分「模型自己不做」和「被规则否决」——后者挂在 last_decision 上。"""
@@ -3585,8 +3610,9 @@ class TestEntryVetoInTick(TempLedger):
                                return_value={"act": True, "p_up": 0.7,
                                              "reason": "结构支持", "source": "llm"}), \
              mock.patch.object(autotrade, "send_open"):
-            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                           quote=(4000.0, 4000.24), rows=bars_up(), positions=[])
+            autotrade.tick(autotrade.Cfg(dry_run=True, top_long_ban=True),
+                           now=NOW, quote=(4000.0, 4000.24),
+                           rows=bars_up(), positions=[])
         self.assertEqual(autotrade.load_state()["last_decision"]["veto"],
                          "top_long_ban")
 

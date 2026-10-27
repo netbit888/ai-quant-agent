@@ -854,6 +854,7 @@
   .sb-why-tag.is-skip { color: var(--warn); border-color: rgba(240,180,41,.35); background: rgba(240,180,41,.08); }
   .sb-why-tag.is-veto { color: var(--bad); border-color: rgba(255,77,79,.38); background: rgba(255,77,79,.08); }
   .sb-why-tag.is-act { color: var(--good); border-color: rgba(46,204,113,.38); background: rgba(46,204,113,.08); }
+  .sb-why-tag.is-override { color: var(--accent, #4a9eff); border-color: rgba(74,158,255,.38); background: rgba(74,158,255,.09); }
   .sb-why-text {
     min-width: 0; flex: 1 1 auto; color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2432,6 +2433,9 @@ function renderAutoTrade(a) {
     if (ld) {
       text = String(ld.reason || '').replace(/\s+/g, ' ').trim() || '（模型没给理由）';
       if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
+      // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。
+      // 这一格是事后分桶的关键——「听了程序」和「没听」要能分开算期望。
+      else if (ld.advice) { tag = '模型否决建议'; cls = 'is-override'; }
       else if (ld.kind === 'entry') {
         if (ld.act === false) { tag = '模型不做'; cls = 'is-skip'; }
         else if (ld.act === true) { tag = '模型开仓'; cls = 'is-act'; }
@@ -2447,6 +2451,7 @@ function renderAutoTrade(a) {
     }
     whyTag.textContent = tag;
     whyTag.className = 'sb-why-tag ' + cls;
+    whyTag.title = (ld && ld.advice_text) || '';
     whyText.textContent = text;
     whyText.title = text;
     whyWait.textContent = waitTxt;

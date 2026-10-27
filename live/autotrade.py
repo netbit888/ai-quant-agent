@@ -166,14 +166,17 @@ class Cfg:
     # 版本都更差，根子在入场不在出场。这两条都只碰「开不开」，不碰「怎么走」。
     #
     # act_guard：reason 里出现"等确认/回踩再/挂多/不追"这类"我现在不进场"的
-    #   措辞，却给了 act=true —— 按 reason 处理，改判不做。提示词里「注意 act
-    #   和 reason 必须一致」那段本来就写着这条，实测违反率 3/10，且这 3 笔
+    #   措辞，却给了 act=true —— 程序据此给一条建议。提示词里「注意 act
+    #   和 reason 必须一致」那段本来就有这条约束，实测违反率 3/10，且这 3 笔
     #   亏掉当天亏损的 58%。
-    # top_long_ban：做多且收盘位置 ≥ 1-zone_edge（贴上沿）—— 直接拒。
+    # top_long_ban：做多且收盘位置 ≥ 1-zone_edge（贴上沿）—— 也是建议。
     #   `_zone_text` 在所有 regime 分支下都只会给出"做空 / 等回踩"，从来没有
     #   "贴上沿做多"这一项，所以这不是新规矩，是让代码和位置判定对齐。
-    act_guard: bool = True
-    top_long_ban: bool = True
+    # **两个开关默认关（2026-10-28）**：用户要求把决策权交还模型，程序只给
+    #   建议和特征。打开即回到"程序硬拦"的旧行为；关闭时命中只写日志，
+    #   开仓行会带 `would_veto` 字段，事后能按这个分桶算"听了程序 vs 没听"的期望。
+    act_guard: bool = False
+    top_long_ban: bool = False
     # 是否把 tick 级（逐笔 bid/ask）数据喂给模型。关掉可省 token 和一次数据查询。
     ticks: bool = True
     # 信号强度门槛：|p_up - 0.5| 低于这个值就不开仓。
@@ -946,12 +949,14 @@ reason —— 不超过 40 字的中文依据，必须引用输入里的具体�
 - 所以"想等回踩/等确认/等企稳"的唯一正确写法是 `"act": false`，
   并在 reason 里写清等的是什么价位。60 秒后你会拿到新的 K 线，
   那时候真到位了再开。
-- 代码会拦：reason 里出现"等确认""等企稳""等收阳""回踩再""挂多""挂空"
-  "不追"这类字眼，却给了 act=true，系统直接改判为不做。
-- 代码也会拦：做多时收盘位置 ≥ {ZONE_UP}%（贴上沿）。这个组合在任何
-  行情分类下都不成立——震荡市上沿是做空位，上涨趋势里贴上沿该等回踩
-  低吸，下跌趋势里更不该接多。想表达"看涨但位置太高"，正确写法是
-  act=false + reason 写"等回踩到下沿"。
+- 程序**不会替你拦单**：开不开由你决定。但程序会给出建议，并且记下你否决了
+  哪一条。所以下面两种情况，如果照做，reason 里必须正面回应，不能装作没看见：
+  ① reason 里出现"等确认""等企稳""等收阳""回踩再""挂多""挂空""不追"这类
+     字眼，却给了 act=true —— 那就等于说"我说要等，但我现在就买"。系统只有
+     市价单，成交价会是你写下等待价的那一刻的现价，两者必然对不上。
+  ② 做多时收盘位置 ≥ {ZONE_UP}%（贴上沿）。这个组合在任何行情分类下都不成立
+     ——震荡市上沿是做空位，上涨趋势里贴上沿该等回踩低吸，下跌趋势里更不该追。
+     真要做，就明写"我知道这是贴上沿，理由是 XXX"。
 - **等待锚点是锁定的。** 你说"等回踩到 X"，系统就记住 X；下一轮会把 X、
   离现价还差多少、已经等了多久一起给你。往后把 X 改成更靠近现价的数字
   **不算数**（那只是把"追"改写成"等"），system 不会采纳。要改只有两种
@@ -1437,32 +1442,35 @@ def _hesitation_word(reason: str) -> str | None:
     return None
 
 
-def _entry_veto(cfg: Cfg, direction: int, feat: dict,
-                reason: str, act) -> tuple[str, str] | None:
-    """开仓前的两个硬闸门。返回 (闸门代号, 拦截原因)，None = 放行。
+def _entry_advice(cfg: Cfg, direction: int, feat: dict,
+                  reason: str, act) -> tuple[str, str] | None:
+    """**程序对这笔开仓的建议**。返回 (代号, 说明)，None = 没意见。
 
-    刻意做成纯函数：tick() 里那堆东西没法单测，而这两条规则恰恰是
+    2026-10-28 定位调整（用户定的）：程序只提供建议和特征，不替模型做决定。
+    所以这个函数只负责"算出程序怎么看"，拦不拦由 `_gate_blocks()` 按开关决定，
+    两个开关默认都是关的——默认行为是：模型想开就开，程序把意见写进日志，
+    面板上标一句"模型否决了建议"，事后可以按 `would_veto` 分桶算期望。
+
+    刻意做成纯函数：tick() 里那堆东西没法单测，而这两条判断恰恰是
     "以后还会被人想改"的地方，必须能一个一个用例锁死。
 
-    两条都只在 act 不为 False 时才可能触发——模型自己说不做的时候，
+    两条都只在 act 不为 False 时才有意义——模型自己说不做的时候，
     走到这里之前就已经 return 了。
     """
     if act is False:
         return None
-    # 闸门 1：理由与动作自相矛盾。
-    if cfg.act_guard:
-        w = _hesitation_word(reason)
-        if w:
-            return ("act_guard",
-                    f"理由自相矛盾：写了「{w}」（这是「先不进」的意思），"
-                    f"却给了 act=true。按理由处理——本轮不做，"
-                    f"等真的到位了再开")
-    # 闸门 2：贴上沿做多。
+    # 建议 1：理由与动作自相矛盾。
+    w = _hesitation_word(reason)
+    if w:
+        return ("act_guard",
+                f"理由自相矛盾：写了「{w}」（这是「先不进」的意思），"
+                f"却给了 act=true。若照做，成交价会和你说的等待价对不上")
+    # 建议 2：贴上沿做多。
     # `_zone_text` 在任何一个 regime 分支下都不会给出"贴上沿做多"
     # （震荡→做空、上涨→等回踩低吸、下跌→做空），所以这条不是新规则，
     # 是让代码和位置判定对齐。10-27 那轮两笔追多（分位 0.97 / 0.96）
     # 合计 -6.26，全在这一条上。
-    if cfg.top_long_ban and direction > 0:
+    if direction > 0:
         pos = feat.get("pos")
         line = 1.0 - float(cfg.zone_edge)
         if pos is not None and float(pos) >= line:
@@ -1471,6 +1479,19 @@ def _entry_veto(cfg: Cfg, direction: int, feat: dict,
                     f"买在窗口最高处。上涨趋势里贴上沿是强势延续不是超买，"
                     f"此处追多＝接最后一棒；等回踩到下沿再低吸")
     return None
+
+
+def _gate_blocks(cfg: Cfg, code: str) -> bool:
+    """这条建议要不要升级成硬拦。两个开关默认关（2026-10-28 起）。
+
+    留着开关而不是删代码：拦与不拦各自的期望要能用数据说话，
+    删掉就再也测不回来了。想恢复 10-27 的严格模式，把这两个字段置 True。
+    """
+    if code == "act_guard":
+        return bool(cfg.act_guard)
+    if code == "top_long_ban":
+        return bool(cfg.top_long_ban)
+    return False
 
 
 # ------------------------------------------------------------ 等待锚点（锁定）
@@ -3319,13 +3340,15 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         save_state(state, login)
         return row
 
-    # 入场闸门（2026-10-27）。放在 min_edge 之后、send_open 之前：
-    # 前面的闸门判的是"信号够不够强"，这两条判的是"这个位置/这句话允不允许开"。
-    veto = _entry_veto(cfg, direction, feat, decision.get("reason"), act)
-    if veto:
-        code, why = veto
+    # 程序对这笔开仓的建议（2026-10-28 起默认只建议、不拦）。
+    # 放在 min_edge 之后、send_open 之前：前面那道判的是"信号够不够强"，
+    # 这两条判的是"这个位置/这句话合不合适"——但最终开不开由模型说了算。
+    advice = _entry_advice(cfg, direction, feat, decision.get("reason"), act)
+    advice_code = advice[0] if advice else None
+    if advice and _gate_blocks(cfg, advice_code):
+        code, why = advice
         # 记在 last_decision 上：面板要能区分「模型自己不做」和「被规则否决」，
-        # 这两件事该找的人不一样（前者调提示词，后者调闸门）。
+        # 这两件事该找的人不一样（前者调提示词，后者调开关）。
         state["last_decision"]["veto"] = code
         row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
                "prog_dir": prog_dir, "agree": agree, "feat": feat,
@@ -3335,6 +3358,11 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         append_log(row, login)
         save_state(state, login)
         return row
+    if advice_code:
+        # 建议归建议，单照开。把意见挂到决策上，面板会显示「模型否决了建议」，
+        # 开仓行也带 would_veto——事后能按这一格算「听了 vs 没听」的期望。
+        state["last_decision"]["advice"] = advice_code
+        state["last_decision"]["advice_text"] = advice[1]
 
     res = send_open(cfg, direction)
     if not res.get("ok"):
@@ -3376,6 +3404,10 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "dry_run": cfg.dry_run,
     }
+    if advice_code:
+        # 程序不建议这笔、但模型坚持开了。留痕是为了事后分桶：
+        # 「程序不建议却开了」的期望 vs「两边都同意」的期望，谁更该有判断权。
+        row["would_veto"] = advice_code
     if decision.get("error"):
         row["error"] = decision["error"]
     append_log(row, login)
