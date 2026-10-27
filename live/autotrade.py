@@ -3324,6 +3324,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     veto = _entry_veto(cfg, direction, feat, decision.get("reason"), act)
     if veto:
         code, why = veto
+        # 记在 last_decision 上：面板要能区分「模型自己不做」和「被规则否决」，
+        # 这两件事该找的人不一样（前者调提示词，后者调闸门）。
+        state["last_decision"]["veto"] = code
         row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
                "prog_dir": prog_dir, "agree": agree, "feat": feat,
                "veto": code, "act": act,

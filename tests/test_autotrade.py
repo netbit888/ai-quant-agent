@@ -3579,6 +3579,17 @@ class TestEntryVetoInTick(TempLedger):
         self.assertTrue(row["feat"]["ok"])
         self.assertIsNotNone(row["feat"]["pos"])
 
+    def test_veto_lands_in_last_decision(self):
+        """面板要能区分「模型自己不做」和「被规则否决」——后者挂在 last_decision 上。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "reason": "结构支持", "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open"):
+            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                           quote=(4000.0, 4000.24), rows=bars_up(), positions=[])
+        self.assertEqual(autotrade.load_state()["last_decision"]["veto"],
+                         "top_long_ban")
+
 
 class TestWaitAnchor(unittest.TestCase):
     """等回踩的价位不许跟着价格漂。

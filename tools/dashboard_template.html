@@ -837,6 +837,28 @@
   .statusbar .sb-k { color: var(--dim); font-size: 11px; }
   .statusbar .sb-v { font-family: var(--mono); font-weight: 600; }
   .statusbar .btn-ghost { margin: 0; padding: 4px 10px; font-size: 11.5px; }
+  /* 常驻状态带的第二行：最近一次判断的原话。
+     为什么要有：空仓时最想知道"为什么没做"，而理由原来只躺在流水里，
+     流水默认还隐藏跳过行 —— 等于要翻日志才知道它在等什么。
+     用 flex:1 1 100% 换行，状态带本身是 sticky，滚到哪儿都看得见。 */
+  .statusbar .sb-why {
+    flex: 1 1 100%; min-width: 0;
+    display: flex; align-items: baseline; gap: 8px;
+    padding-top: 6px; margin-top: 2px; border-top: 1px dashed var(--border);
+    font-size: 11.5px; line-height: 1.5;
+  }
+  .sb-why-tag {
+    flex: none; padding: 0 7px; border-radius: 5px; font-size: 10.5px;
+    border: 1px solid var(--border); background: rgba(255,255,255,.05); color: var(--dim);
+  }
+  .sb-why-tag.is-skip { color: var(--warn); border-color: rgba(240,180,41,.35); background: rgba(240,180,41,.08); }
+  .sb-why-tag.is-veto { color: var(--bad); border-color: rgba(255,77,79,.38); background: rgba(255,77,79,.08); }
+  .sb-why-tag.is-act { color: var(--good); border-color: rgba(46,204,113,.38); background: rgba(46,204,113,.08); }
+  .sb-why-text {
+    min-width: 0; flex: 1 1 auto; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sb-why-wait { flex: none; color: var(--dim); font-family: var(--mono); font-size: 10.5px; }
   .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
   .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
   .at-msg b { color: #fff; }
@@ -1090,6 +1112,11 @@
     <span class="sb-grow"></span>
     <button class="btn-ghost btn-danger" id="atBarStop" onclick="stopAutoTrade()"
             title="停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）">关闭并清仓</button>
+    <div class="sb-why">
+      <span class="sb-why-tag" id="atWhyTag">—</span>
+      <span class="sb-why-text" id="atWhyText">还没跑过</span>
+      <span class="sb-why-wait" id="atWhyWait"></span>
+    </div>
   </div>
   <div class="acct" id="acct">
     <div class="who">
@@ -2394,6 +2421,35 @@ function renderAutoTrade(a) {
   } else {
     $('atCall').textContent = '—';
     $('atCallSub').textContent = '还没跑过';
+  }
+
+  // 常驻状态带第二行：最近一次判断的原话 + 等待锚点。
+  // 「模型不做」和「程序拦下」要分开显示——前者是它自己的判断，后者是规则否决，
+  // 看到的人该知道去找谁改。
+  const whyTag = $('atWhyTag'), whyText = $('atWhyText'), whyWait = $('atWhyWait');
+  if (whyTag && whyText) {
+    let tag = '—', cls = '', text = '还没跑过', waitTxt = '';
+    if (ld) {
+      text = String(ld.reason || '').replace(/\s+/g, ' ').trim() || '（模型没给理由）';
+      if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
+      else if (ld.kind === 'entry') {
+        if (ld.act === false) { tag = '模型不做'; cls = 'is-skip'; }
+        else if (ld.act === true) { tag = '模型开仓'; cls = 'is-act'; }
+        else { tag = '模型偏' + (ld.direction > 0 ? '多' : '空'); cls = 'is-skip'; }
+      } else { tag = ld.close ? '平仓' : '持仓中'; }
+      const w = ld.wait;
+      if (w && w.level) {
+        const FLAG = { set: '刚定', keep: '继续等', move: '下调', drift: '想上移·已拦',
+                       expired: '已作废', consumed: '到点未进·作废', cleared_open: '已进场' };
+        const f = FLAG[ld.wait_flag] || '';
+        waitTxt = '锚 ' + Number(w.level).toFixed(3) + (f ? ' · ' + f : '');
+      }
+    }
+    whyTag.textContent = tag;
+    whyTag.className = 'sb-why-tag ' + cls;
+    whyText.textContent = text;
+    whyText.title = text;
+    whyWait.textContent = waitTxt;
   }
 
   $('atClosed').textContent = a.closed + ' 笔';
