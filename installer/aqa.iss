@@ -115,6 +115,10 @@ var
   ErrCode: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
+  { 换了新 exe 后桌面/开始菜单快捷方式可能继续显示缓存的旧图标：
+    explorer 把 lnk 解析结果按路径缓存，升级不换 lnk 就不失效。
+    SHCNE_ASSOCCHANGED 会让 shell 全量重读图标（等同 ie4uinit -show）。 }
+  SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
   if WebView2Installed() then Exit;
   { 不内置运行时（体积 +100MB，还要管理员权限），只提示 + 给官方下载页 }
   if MsgBox('Microsoft Edge WebView2 Runtime is missing.' + #13#10 + #13#10 +
