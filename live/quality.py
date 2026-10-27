@@ -320,7 +320,7 @@ def compute(trades: list[dict], now: int | None = None) -> dict:
     now = int(now or time.time())
     closed = _closed(trades)
     if not closed:
-        return {"empty": True, "windows": [], "rolling": [], "min_sample": MIN_SAMPLE}
+        return {"empty": True, "windows": [], "rolling": [], "rolling100": [], "min_sample": MIN_SAMPLE}
 
     unit = _risk_unit(closed)
     windows = []
@@ -347,7 +347,10 @@ def compute(trades: list[dict], now: int | None = None) -> dict:
         "risk_unit": round(unit, 4),
         "total": len(closed),
         "windows": windows,
+        # rolling = 近 20 笔（主图）；rolling100 = 近 100 笔（对照线）。
+        # 两者都是只读统计，不进任何交易决策链路。100 笔不足时是 []，前端兜底。
         "rolling": rolling_expectancy(closed, 20),
+        "rolling100": rolling_expectancy(closed, 100),
         "generated_at": now,
     }
 

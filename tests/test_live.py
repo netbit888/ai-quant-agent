@@ -356,6 +356,21 @@ class TestRollingExpectancy(unittest.TestCase):
     def test_insufficient_trades(self):
         self.assertEqual(rolling_expectancy([_q(10.0, i) for i in range(5)], span=20), [])
 
+    def test_compute_returns_rolling100(self):
+        # rolling100 是只读对照字段：120 笔时 20 笔窗 101 个点、100 笔窗 21 个点，
+        # 且两条线终点都落在最近一笔（画对照线时日期才能纵向对齐）
+        trades = [_q(20.0 if i % 2 == 0 else -10.0, i) for i in range(120)]
+        q = quality_compute(trades, now=T0 + 30 * 86400)
+        self.assertEqual(len(q["rolling"]), 101)
+        self.assertEqual(len(q["rolling100"]), 21)
+        self.assertEqual(q["rolling100"][-1]["ts"], q["rolling"][-1]["ts"])
+
+    def test_compute_empty_trades_rolling100(self):
+        # 空 trades 的提前返回也要带上 rolling100，口径与前端兜底一致
+        q = quality_compute([], now=T0 + 30 * 86400)
+        self.assertEqual(q["rolling"], [])
+        self.assertEqual(q["rolling100"], [])
+
 
 class TestQualitySnapshot(unittest.TestCase):
     def test_same_day_overwrites(self):

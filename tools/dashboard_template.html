@@ -218,6 +218,20 @@
   .line-bad { fill: none; stroke: var(--bad); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255,77,79,.55)); }
   .pt { fill: #0b111a; stroke: var(--info); stroke-width: 1.6; }
   .lbl { fill: var(--dim); font-size: 10px; font-family: var(--mono); }
+  /* 对照线：低权重灰蓝细虚线，视觉权重必须压不过主线 */
+  .line-ghost { fill: none; stroke: #7f93a8; stroke-width: 1.3; stroke-dasharray: 6 4; opacity: .85; }
+  /* 全量 hover 的竖向参考线 */
+  .hover-line { stroke: rgba(140,170,200,.45); stroke-width: 1; stroke-dasharray: 3 3; }
+  /* hover 浮窗：position:fixed 定位在 body 上，不进 svg——
+     preserveAspectRatio="none" 会把 svg 内的元素拉伸变形，浮窗进去文字必花 */
+  .chart-tip {
+    position: fixed; z-index: 1200; pointer-events: none;
+    background: #131c27; border: 1px solid var(--border-hi); border-radius: 6px;
+    padding: 6px 9px; font-size: 11px; line-height: 1.6; color: var(--text);
+    font-variant-numeric: tabular-nums; box-shadow: 0 8px 24px -8px rgba(0,0,0,.8);
+    white-space: nowrap;
+  }
+  .chart-tip.hidden { display: none; }
 
   table { width: 100%; border-collapse: collapse; font-size: var(--fs-body); }
   th, td { padding: 6px 12px; text-align: right; border-bottom: 1px solid rgba(30,42,56,.55);
@@ -514,6 +528,18 @@
 
   /* ---------------- 单笔交易溯源弹窗 ---------------- */
   .modal-wide { width: min(860px, calc(100vw - 40px)); max-height: calc(100vh - 60px); overflow-y: auto; }
+  /* 图表最大化：占满视口留边距。svg 必须 1:1 映射（viewBox = 实际像素）再画，
+     否则 preserveAspectRatio="none" 会把坐标轴文字拉花——这是本方案最大的坑 */
+  .modal-chart {
+    width: calc(100vw - 48px); height: calc(100vh - 48px);
+    max-height: none; display: flex; flex-direction: column;
+  }
+  .chart-mask-head { display: flex; align-items: center; gap: 12px; }
+  .chart-mask-head h4 { margin: 0; flex: none; }
+  .chart-mask-head .mini { flex: 1; min-width: 0; }
+  .chart-big-wrap { flex: 1; min-height: 0; margin-top: 10px; }
+  #chartBig { width: 100%; height: 100%; display: block; overflow: visible; }
+  .btn-max { padding: 2px 9px; font-size: 13px; line-height: 1.4; flex: none; }
   .td-sec { margin: 14px 0 0; }
   .td-sec > b { display: block; font-size: 12px; color: var(--accent, #4a9eff); margin-bottom: 6px; letter-spacing: .5px; }
   .td-sec pre {
@@ -966,6 +992,21 @@
   </div>
 </div>
 
+<!-- 图表最大化查看：从 CHART_REG 重放同源入参（与原渲染同口径），
+     viewBox=实际像素 1:1 映射防文字变形。Esc / 点遮罩 / 关闭按钮均可退出。 -->
+<div class="modal-mask hidden" id="chartMask" onclick="if(event.target===this) chartMaskClose()">
+  <div class="modal modal-chart" role="dialog" aria-modal="true">
+    <div class="chart-mask-head">
+      <h4 id="chartMaskTitle"></h4>
+      <span class="mini" id="chartMaskLegend"></span>
+      <button class="btn-cancel" onclick="chartMaskClose()">关闭</button>
+    </div>
+    <div class="chart-big-wrap" id="chartBigWrap">
+      <svg id="chartBig" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+</div>
+
 <header>
   <h1>AI Quant</h1>
   <span class="pill"><span id="dot" class="dot"></span><span id="statusText">连接中</span></span>
@@ -1249,8 +1290,9 @@
 
   <div class="card">
     <div class="card-head">
-      <h2>滚动期望（近 20 笔）</h2>
+      <h2>滚动期望（近 20 笔 · 100 笔对照）</h2>
       <span class="mini" id="rollNote"></span>
+      <button class="btn-ghost btn-max" data-chart="chartRolling" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
     </div>
     <svg id="chartRolling" viewBox="0 0 1240 150" preserveAspectRatio="none"></svg>
   </div>
@@ -1260,16 +1302,24 @@
       <div class="card-head">
         <h2>账户余额曲线（含出入金）</h2>
         <span class="mini" id="balNote"></span>
+        <button class="btn-ghost btn-max" data-chart="chartEquity" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
       </div>
       <svg id="chartEquity" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
     </div>
-    <div class="card"><h2>逐日盈亏</h2><svg id="chartDaily" viewBox="0 0 620 156" preserveAspectRatio="none"></svg></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>逐日盈亏</h2>
+        <button class="btn-ghost btn-max" data-chart="chartDaily" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
+      </div>
+      <svg id="chartDaily" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
+    </div>
   </div>
 
   <div class="card l3">
     <div class="card-head">
       <h2>账户余额（每日快照）</h2>
       <span class="mini" id="histNote"></span>
+      <button class="btn-ghost btn-max" data-chart="chartBalance" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
     </div>
     <svg id="chartBalance" viewBox="0 0 1240 150" preserveAspectRatio="none"></svg>
   </div>
@@ -1329,8 +1379,20 @@
   </div>
 
   <div class="grid2">
-    <div class="card"><h2>净盈利（每轮）</h2><svg id="chartProfit" viewBox="0 0 620 156" preserveAspectRatio="none"></svg></div>
-    <div class="card"><h2>最大回撤 %（每轮）</h2><svg id="chartDd" viewBox="0 0 620 156" preserveAspectRatio="none"></svg></div>
+    <div class="card">
+      <div class="card-head">
+        <h2>净盈利（每轮）</h2>
+        <button class="btn-ghost btn-max" data-chart="chartProfit" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
+      </div>
+      <svg id="chartProfit" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>最大回撤 %（每轮）</h2>
+        <button class="btn-ghost btn-max" data-chart="chartDd" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
+      </div>
+      <svg id="chartDd" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
+    </div>
   </div>
 
   <div class="card">
@@ -1360,7 +1422,13 @@
     <div class="kpi"><div class="k">最差年度回撤</div><div class="v mono neut" id="eDd">-</div><div class="s">≤30% 才达标</div></div>
   </div>
 
-  <div class="card"><h2>逐年净盈利</h2><svg id="chartYear" viewBox="0 0 620 156" preserveAspectRatio="none"></svg></div>
+  <div class="card">
+    <div class="card-head">
+      <h2>逐年净盈利</h2>
+      <button class="btn-ghost btn-max" data-chart="chartYear" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
+    </div>
+    <svg id="chartYear" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
+  </div>
 
   <div class="grid2">
     <div class="card">
@@ -1426,6 +1494,12 @@ function nativeApi(name) {
 const $ = id => document.getElementById(id);
 const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
 const signClass = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+// epoch 秒 → 「MM-DD HH:mm」（本地时间）。图表时间轴和 hover 浮窗共用。
+function fmtTsMin(ts) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -1450,18 +1524,56 @@ function ensureGradient(svg, color, opacityTop) {
   return id;
 }
 
+// 图表数据登记表：drawArea/drawBars 每次渲染时把入参原样存进来，
+// 最大化弹层用同一份 args 换个大 svgId/宽高重放——与原渲染同源同口径，
+// 7 处调用点零改动。数据新鲜度 = 最近一次轮询渲染。
+const CHART_REG = {};
+let chartTipEl = null;
+function tipEl() {
+  if (!chartTipEl) {
+    chartTipEl = document.createElement('div');
+    chartTipEl.className = 'chart-tip hidden';
+    document.body.appendChild(chartTipEl);
+  }
+  return chartTipEl;
+}
+
 function drawArea(svgId, values, colorClass, color, opt) {
+  CHART_REG[svgId] = { kind: 'area', args: [values, colorClass, color, opt] };
   const svg = $(svgId);
   const W = (opt && opt.W) || 620, H = (opt && opt.H) || 156;
   const padL = 44, padR = 14, padT = 14, padB = 20;
   svg.innerHTML = '';
   if (!values.length) return;
 
-  const max = Math.max(...values, 0), min = Math.min(...values, 0);
+  // 多系列（opt.series）是可选增强；没传时退化为单系列，行为与老版一致。
+  // series 顺序 = 绘制顺序（后画的在上层）。
+  const hasEnh = !!(opt && (opt.series || opt.ts || opt.hover));
+  const series = hasEnh && opt.series && opt.series.length
+    ? opt.series
+    : [{ values, colorClass, color, area: true, ts: hasEnh ? opt.ts : null }];
+  const primary = series.find(s => s.primary) || series[series.length - 1];
+
+  // Y 轴范围取所有系列的并集，仍含 0（与老口径一致）
+  let max = 0, min = 0;
+  for (const s of series) for (const v of s.values) { if (v > max) max = v; if (v < min) min = v; }
   const span = (max - min) || 1;
-  const x = i => values.length === 1 ? (padL + W - padR) / 2
-              : padL + i * (W - padL - padR) / (values.length - 1);
   const y = v => H - padB - ((v - min) / span) * (H - padT - padB);
+
+  // X 映射：系列带 ts（且首尾可分）时按时间对齐——20 笔线和 100 笔线点数不同、
+  // 终点都是最近一笔，按索引映射会把两条线的日期对错位；时间映射才能纵向对齐。
+  let tsMin = Infinity, tsMax = -Infinity;
+  for (const s of series) {
+    if (s.ts && s.ts.length === s.values.length) {
+      if (s.ts[0] < tsMin) tsMin = s.ts[0];
+      if (s.ts[s.ts.length - 1] > tsMax) tsMax = s.ts[s.ts.length - 1];
+    }
+  }
+  const timeMode = tsMax > tsMin;
+  const xIdx = (i, n) => n === 1 ? (padL + W - padR) / 2
+              : padL + i * (W - padL - padR) / (n - 1);
+  const xOfTs = t => padL + (t - tsMin) / (tsMax - tsMin) * (W - padL - padR);
+  const xAt = (s, i) => (timeMode && s.ts) ? xOfTs(s.ts[i]) : xIdx(i, s.values.length);
 
   for (let g = 0; g <= 3; g++) {
     const val = min + span * g / 3;
@@ -1472,16 +1584,77 @@ function drawArea(svgId, values, colorClass, color, opt) {
   }
   svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(0), y2: y(0), class: 'zero-line' }));
 
-  const gid = ensureGradient(svg, color, .22);
-  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-  const y0 = y(0);
-  const area = `${line} L${x(values.length - 1).toFixed(1)},${y0.toFixed(1)} L${x(0).toFixed(1)},${y0.toFixed(1)} Z`;
-  svg.appendChild(svgEl('path', { d: area, fill: `url(#${gid})`, stroke: 'none' }));
-  svg.appendChild(svgEl('path', { d: line, class: colorClass }));
+  for (const s of series) {
+    if (!s.values.length) continue;
+    const x = i => xAt(s, i);
+    if (s.area) {
+      const gid = ensureGradient(svg, s.color, .22);
+      const line = s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+      const y0 = y(0);
+      const area = `${line} L${x(s.values.length - 1).toFixed(1)},${y0.toFixed(1)} L${x(0).toFixed(1)},${y0.toFixed(1)} Z`;
+      svg.appendChild(svgEl('path', { d: area, fill: `url(#${gid})`, stroke: 'none' }));
+    }
+    const lp = s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    svg.appendChild(svgEl('path', { d: lp, class: s.colorClass }));
+  }
 
-  if (values.length <= 40) {
+  // X 轴日期刻度：只在时间模式下画，放底部 padB 空带里
+  if (timeMode) {
+    const k = (opt && opt.ticks) || 5;
+    const p2 = n => String(n).padStart(2, '0');
+    for (let j = 0; j < k; j++) {
+      const t = tsMin + (tsMax - tsMin) * j / (k - 1);
+      const tx = xOfTs(t);
+      const d = new Date(t * 1000);
+      svg.appendChild(svgEl('line', { x1: tx, x2: tx, y1: H - padB, y2: H - padB + 4, class: 'grid-line' }));
+      const txt = svgEl('text', {
+        x: tx, y: H - 6, class: 'lbl',
+        'text-anchor': j === 0 ? 'start' : (j === k - 1 ? 'end' : 'middle')
+      });
+      txt.textContent = `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+      svg.appendChild(txt);
+    }
+  }
+
+  // 全量 hover：透明 rect 盖住绘图区（必须最后 append 保证在顶层），
+  // mousemove 反查最近点 → 竖向参考线 + fixed 定位浮窗。
+  // 浮窗不进 svg：preserveAspectRatio="none" 会拉伸 svg 内的文字。
+  if (hasEnh && opt.hover && primary.values.length) {
+    const pv = primary.values;
+    const pts = pv.map((v, i) => [xAt(primary, i), y(v), i]);
+    const hline = svgEl('line', {
+      x1: -9, x2: -9, y1: padT, y2: H - padB, class: 'hover-line',
+      visibility: 'hidden', 'pointer-events': 'none'
+    });
+    const hit = svgEl('rect', {
+      x: padL, y: padT, width: W - padL - padR, height: H - padT - padB, fill: 'transparent'
+    });
+    hit.addEventListener('mousemove', e => {
+      const r = svg.getBoundingClientRect();
+      const mx = (e.clientX - r.left) / r.width * W;
+      let best = 0, bd = Infinity;
+      for (const p of pts) { const d = Math.abs(p[0] - mx); if (d < bd) { bd = d; best = p[2]; } }
+      hline.setAttribute('x1', pts[best][0]);
+      hline.setAttribute('x2', pts[best][0]);
+      hline.setAttribute('visibility', 'visible');
+      const tip = tipEl();
+      tip.innerHTML = opt.hover(best).map(s => `<div>${s}</div>`).join('');
+      tip.classList.remove('hidden');
+      const tw = tip.offsetWidth || 120;
+      let lx = e.clientX + 14;
+      if (lx + tw > window.innerWidth - 8) lx = e.clientX - tw - 14;
+      tip.style.left = lx + 'px';
+      tip.style.top = Math.max(8, e.clientY + 14) + 'px';
+    });
+    hit.addEventListener('mouseleave', () => {
+      hline.setAttribute('visibility', 'hidden');
+      tipEl().classList.add('hidden');
+    });
+    svg.appendChild(hline);
+    svg.appendChild(hit);
+  } else if (values.length <= 40) {
     values.forEach((v, i) => {
-      const c = svgEl('circle', { cx: x(i), cy: y(v), r: 3, class: 'pt' });
+      const c = svgEl('circle', { cx: xAt(primary, i), cy: y(v), r: 3, class: 'pt' });
       const title = svgEl('title', {});
       title.textContent = v;
       c.appendChild(title);
@@ -1490,9 +1663,12 @@ function drawArea(svgId, values, colorClass, color, opt) {
   }
 }
 
-function drawBars(svgId, labels, values) {
+function drawBars(svgId, labels, values, opt) {
+  CHART_REG[svgId] = { kind: 'bars', args: [labels, values, opt] };
   const svg = $(svgId);
-  const W = 620, H = 156, padL = 48, padR = 14, padT = 14, padB = 24;
+  // 宽高参数化：最大化弹层重绘时传大尺寸；缺省 620x156 与老版一致
+  const W = (opt && opt.W) || 620, H = (opt && opt.H) || 156,
+        padL = 48, padR = 14, padT = 14, padB = 24;
   svg.innerHTML = '';
   if (!values.length) return;
 
@@ -3300,6 +3476,69 @@ function tradeMaskClose() {
   $('tradeMask').classList.add('hidden');
 }
 
+/* ==================== 图表最大化查看 ====================
+ * 7 张图在渲染时已把入参登记进 CHART_REG（drawArea/drawBars 入口），
+ * 打开弹层 = 拿同一份 args 换个大 svg 重放，与原渲染同源同口径。
+ * 关键：viewBox 必须等于实际渲染像素（1:1 映射）。模板全局
+ * svg { height:156px } + preserveAspectRatio="none" 会按视口缩放坐标，
+ * 固定 viewBox 的文字在大图上会被拉花——动态设置 viewBox 后映射比恒为 1。 */
+const CHART_TITLES = {
+  chartRolling: '滚动期望（近 20 笔 · 100 笔对照）',
+  chartBalance: '账户余额（每日快照）',
+  chartEquity: '账户余额曲线（含出入金）',
+  chartDaily: '逐日盈亏',
+  chartProfit: '净盈利（每轮）',
+  chartDd: '最大回撤 %（每轮）',
+  chartYear: '逐年净盈利',
+};
+let chartMaxId = null;
+
+function chartMaskDraw() {
+  const reg = chartMaxId && CHART_REG[chartMaxId];
+  if (!reg) return;
+  const wrap = $('chartBigWrap');
+  // 弹层刚从 display:none 里放出时同步读 clientWidth 即可拿到真实尺寸
+  const cw = Math.max(320, wrap.clientWidth || 0);
+  const ch = Math.max(200, wrap.clientHeight || 0);
+  $('chartBig').setAttribute('viewBox', `0 0 ${cw} ${ch}`);
+  if (reg.kind === 'bars') {
+    const [labels, values, opt] = reg.args;
+    drawBars('chartBig', labels, values, { W: cw, H: ch });
+  } else {
+    const [values, colorClass, color, opt] = reg.args;
+    drawArea('chartBig', values, colorClass, color, Object.assign({}, opt, { W: cw, H: ch }));
+  }
+}
+
+function openChartMax(id) {
+  const reg = CHART_REG[id];
+  if (!reg || !reg.args) return;
+  chartMaxId = id;
+  $('chartMaskTitle').textContent = CHART_TITLES[id] || id;
+  $('chartMaskLegend').textContent = (id === 'chartRolling')
+    ? '实线 = 近 20 笔 · 虚线 = 近 100 笔（对照） · 悬停看每个时点'
+    : '数据截至最近一次刷新';
+  $('chartMask').classList.remove('hidden');
+  chartMaskDraw();
+}
+
+function chartMaskClose() {
+  $('chartMask').classList.add('hidden');
+  chartMaxId = null;
+  $('chartBig').innerHTML = '';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('chartMask').classList.contains('hidden')) chartMaskClose();
+});
+// 弹层可见时窗口尺寸变化要重画（viewBox 跟着视口走）。
+// 冒烟环境的假 DOM 没有 window，顶层代码不能裸引用。
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('resize', () => {
+    if (chartMaxId && !$('chartMask').classList.contains('hidden')) chartMaskDraw();
+  });
+}
+
 function tradeRow(label, val, cls) {
   return `<div><span class="mini">${esc(label)}　</span><span class="${cls || ''}">${val}</span></div>`;
 }
@@ -4030,12 +4269,34 @@ function renderQuality(q) {
         : `${freq.days} 个交易日，分不出高低频`),
   ].join('');
 
-  // 滚动期望曲线
-  const roll = (q.rolling || []).map(x => x.r);
-  drawArea('chartRolling', roll, roll.length && roll[roll.length - 1] >= 0 ? 'line-up' : 'line-down',
-    roll.length && roll[roll.length - 1] >= 0 ? '#2ecc71' : '#ff4d4f', { W: 1240, H: 150 });
+  // 滚动期望曲线：近 20 笔主线（语义色+渐变面积）+ 近 100 笔对照线（灰蓝虚线，低权重）。
+  // series 顺序 = 绘制顺序：对照线先画（垫底），主线和面积压在上面。
+  // 按平仓时间对齐 X 轴——两条线点数不同、终点都是最近一笔，按索引映射日期会错位。
+  const rollRaw = q.rolling || [];
+  const roll = rollRaw.map(x => x.r);
+  const rollTs = rollRaw.map(x => x.ts);
+  // 旧后端/旧缓存可能没有 rolling100：兜底为空 = 自动退化为单线图，不报错
+  const roll100Raw = q.rolling100 || [];
+  const roll100 = roll100Raw.map(x => x.r);
+  const roll100Ts = roll100Raw.map(x => x.ts);
+  const rollUp = roll.length && roll[roll.length - 1] >= 0;
+  const mainCls = rollUp ? 'line-up' : 'line-down';
+  const mainColor = rollUp ? '#2ecc71' : '#ff4d4f';
+  drawArea('chartRolling', roll, mainCls, mainColor, {
+    W: 1240, H: 150, ts: rollTs,
+    series: [
+      ...(roll100.length ? [{ values: roll100, colorClass: 'line-ghost', color: '#7f93a8', area: false, ts: roll100Ts }] : []),
+      { values: roll, colorClass: mainCls, color: mainColor, area: true, primary: true, ts: rollTs },
+    ],
+    hover: i => [
+      `${fmtTsMin(rollTs[i])} · 窗口 ${rollRaw[i].n} 笔`,
+      `近20笔 ${roll[i] >= 0 ? '+' : ''}${fmt(roll[i], 3)} R`,
+      roll100[i] != null ? `近100笔 ${roll100[i] >= 0 ? '+' : ''}${fmt(roll100[i], 3)} R` : '近100笔 无数据',
+    ],
+  });
   $('rollNote').textContent = roll.length
-    ? `${roll.length} 个时点 · 最新 ${fmt(roll[roll.length - 1], 3)} R · 区间 ${fmt(Math.min(...roll), 2)} ~ ${fmt(Math.max(...roll), 2)}`
+    ? `近20笔 最新 ${fmt(roll[roll.length - 1], 3)} R（区间 ${fmt(Math.min(...roll), 2)} ~ ${fmt(Math.max(...roll), 2)}）`
+      + (roll100.length ? ` · 近100笔 最新 ${fmt(roll100[roll100.length - 1], 3)} R` : '')
     : `交易数不足 20 笔，无法计算滚动期望`;
 }
 
