@@ -1146,6 +1146,23 @@ _fullscreen = False
 _over_top = False
 
 
+def _dialog_type(name: str) -> int:
+    """取 pywebview 的对话框类型常量（"OPEN" / "SAVE" / "FOLDER"）。
+
+    pywebview 6 起 ``OPEN_DIALOG`` / ``SAVE_DIALOG`` 这些模块常量全部标了废弃，
+    而且它们是 module_property——**每访问一次就打一行 warning**。用户在「导入」
+    点几次，控制台就刷几行，看着像程序有毛病。优先用 ``FileDialog`` 枚举，
+    只有在老版本 pywebview 上才回落到旧常量（那时也只能忍着那行 warning）。
+    """
+    import webview
+
+    fd = getattr(webview, "FileDialog", None)
+    val = getattr(fd, name, None) if fd is not None else None
+    if val is not None:
+        return int(val)
+    return int(getattr(webview, f"{name}_DIALOG"))
+
+
 class _Bridge:
     """暴露给页面 JS 的接口（pywebview 的 js_api）。
 
@@ -1169,10 +1186,8 @@ class _Bridge:
         if _WINDOW is None:
             return {"ok": False, "error": "仅窗口模式支持文件选择"}
         try:
-            import webview
-
             files = _WINDOW.create_file_dialog(
-                webview.OPEN_DIALOG, allow_multiple=False,
+                _dialog_type("OPEN"), allow_multiple=False,
                 file_types=("经验库文件 (*.jsonl)", "所有文件 (*.*)"))
             p = files[0] if files else None
             return {"ok": True, "path": p,
@@ -1191,8 +1206,6 @@ class _Bridge:
         try:
             import re
 
-            import webview
-
             # 文件名清洗只在 Python 这一侧做一次：经验库名可能带 / \ : * ? " < > |
             # 这类字符，直接塞给 save_filename 在 Windows 上是非法文件名。
             # 前端只管把库名原样递过来，别让它再写一份清洗规则。
@@ -1206,10 +1219,9 @@ class _Bridge:
             # 而 HOMEPATH 是不带盘符的（\Users\xxx），WinForms 认不了。
             home = Path.home()
             start = home / "Downloads"
-            dialog_type = getattr(getattr(webview, "FileDialog", None),
-                                  "SAVE", None) or webview.SAVE_DIALOG
             files = _WINDOW.create_file_dialog(
-                dialog_type, directory=str(start if start.is_dir() else home),
+                _dialog_type("SAVE"),
+                directory=str(start if start.is_dir() else home),
                 save_filename=name,
                 file_types=("经验库文件 (*.jsonl)", "所有文件 (*.*)"))
             p = files[0] if files else None

@@ -243,5 +243,28 @@ class TestPickExportPath(unittest.TestCase):
         self.assertIn("仅窗口模式", res["error"])
 
 
+class TestDialogType(unittest.TestCase):
+    """对话框类型常量：不许再碰 pywebview 的废弃模块常量。"""
+
+    def test_values(self):
+        from tools.dashboard import _dialog_type
+        self.assertEqual(_dialog_type("OPEN"), 10)
+        self.assertEqual(_dialog_type("SAVE"), 30)
+        self.assertEqual(_dialog_type("FOLDER"), 20)
+
+    def test_no_deprecation_noise(self):
+        """OPEN_DIALOG 是 module_property，每访问一次就打一行 deprecated。"""
+        import contextlib
+        import io
+
+        from tools.dashboard import _dialog_type
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            _dialog_type("OPEN")
+            _dialog_type("SAVE")
+        self.assertNotIn("deprecated", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
