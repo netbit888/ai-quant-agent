@@ -972,6 +972,7 @@
 <div class="modal-mask hidden" id="updateMask">
   <div class="modal" role="dialog" aria-modal="true">
     <h4 id="updateTitle">发现新版本</h4>
+    <div class="mini mono" id="updatePlan" style="margin-bottom:6px"></div>
     <div class="desc" id="updateDesc"></div>
     <div class="mini" id="updateProgress" style="min-height:18px"></div>
     <div class="actions">
@@ -3268,9 +3269,24 @@ async function updateWaitCheck(ms) {
   return await updateRender();
 }
 
+// 增量/完整包的尺寸文案。数字缺失显示占位符，绝不显示 NaN——
+// 后端字段是渐进增强（老版本快照里没有 plan），前端必须兜底。
+function mbText(n) {
+  return (typeof n === 'number' && n > 0) ? (n / 1048576).toFixed(1) : '—';
+}
+
+function updatePlanLine(c) {
+  if (!c || !c.newer) return '';
+  if (c.plan === 'delta') {
+    return `本次为增量更新：仅需 ${mbText(c.delta_size)} MB（完整包 ${mbText(c.full_size)} MB）`;
+  }
+  return `本次需下载完整安装包 ${mbText(c.full_size)} MB（当前版本没有匹配的增量包）`;
+}
+
 function updatePopup(j) {
   if (!j || !j.check || !j.check.newer) return;
   $('updateTitle').textContent = `发现新版本 v${j.check.latest}（当前 v${j.check.current}）`;
+  $('updatePlan').textContent = updatePlanLine(j.check);
   $('updateDesc').textContent = (j.check.notes || '').slice(0, 2000) || '无更新日志';
   updateShow();
 }

@@ -57,15 +57,37 @@ if not errorlevel 1 (
 )
 
 echo [2/2] creating release ...
-"%GH%" release create v%VER% "%PKG%" ^
-    --title "v%VER%" ^
-    --notes-file "%NOTES%"
+
+rem ---- delta asset (optional) ---------------------------------------------
+rem Built by build_installer.bat step 4/4 when a baseline snapshot exists.
+rem Not finding one is normal (first release after the feature, or a broken
+rem baseline refused to generate) - the release just ships full installer.
+set "DELTA="
+for %%f in ("dist\installer\AIQuant-Delta-*-to-%VER%.exe") do set "DELTA=%%f"
+
+if defined DELTA (
+    echo [INFO] uploading with delta asset: %DELTA%
+    "%GH%" release create v%VER% "%PKG%" "%DELTA%" ^
+        --title "v%VER%" ^
+        --notes-file "%NOTES%"
+) else (
+    echo [INFO] no delta asset for v%VER%, uploading full installer only
+    "%GH%" release create v%VER% "%PKG%" ^
+        --title "v%VER%" ^
+        --notes-file "%NOTES%"
+)
 
 if errorlevel 1 ( echo [ERROR] release failed & exit /b 1 )
+
+rem ---- record release baseline --------------------------------------------
+rem ONLY after a successful upload: the snapshot must be exactly what users
+rem can download right now, or the next delta would patch a tree nobody has.
+.venv\Scripts\python.exe tools\make_delta.py record --dist dist\AIQuant --version %VER% || exit /b 1
 
 echo.
 echo ============================================
 echo   Done. Release v%VER% published with:
 echo   %PKG%
+if defined DELTA echo   %DELTA%
 echo ============================================
 endlocal

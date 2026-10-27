@@ -73,11 +73,20 @@ echo.
 echo [3/3] compiling installer ...
 "%ISCC%" /DMyAppVersion=%VER% installer\aqa.iss || exit /b 1
 
+rem ---- 4/4 delta installer ----------------------------------------------
+rem Needs a baseline snapshot from the previous RELEASE (dist\_snapshots,
+rem written by release.bat after a successful upload). Without one this is
+rem a no-op warning and the release simply ships full installer only.
+echo.
+echo [4/4] building delta installer ...
+.venv\Scripts\python.exe tools\make_delta.py delta --target dist\AIQuant || exit /b 1
+
 echo.
 echo ============================================
 echo   Done.
 echo   Version   : %VER%
 echo   App       : dist\AIQuant\AIQuant.exe
 echo   Installer : dist\installer\AIQuant-Setup-%VER%.exe
+echo   Delta     : dist\installer\AIQuant-Delta-^<base^>-to-%VER%.exe (if baseline exists)
 echo ============================================
 endlocal

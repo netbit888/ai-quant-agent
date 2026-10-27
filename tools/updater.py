@@ -8,6 +8,15 @@ git pull 后重启进程就是更新；绿色版没有 Inno 升级通道（覆�
 异常全吞（中国办公网到 api.github.com 限流/超时是常态，60 次/时/IP 的
 无鉴权配额在 NAT 出口说没就没）；下载失败只改 state，绝不抛出到 HTTP 层。
 
+两种升级包（同一套安装/重启时序，只是 Setup 文件不同）::
+
+    full   AIQuant-Setup-<ver>.exe          完整安装包（22.6MB 级，永远兜底）
+    delta  AIQuant-Delta-<base>-to-<ver>.exe 文件级增量包（~9.5MB，代码改动）
+           只携带上一版以来变化的文件；未变化文件由 Inno 的 external 标志
+           引用已安装文件（零下载量，但进卸载日志，卸载仍干净）。
+           base 必须等于本机版本才可用，否则自动回退 full——增量包一旦与
+           本机内容对不上，装出来就是混合版本，这是绝不接受的。
+
 升级时序（为什么是 3 秒延迟，见 spawn_setup_then_quit）::
 
     用户点「立即升级并重启」
@@ -43,6 +52,13 @@ CHECK_TIMEOUT = 5.0        # 检测是启动路径上的客人，超时要短
 DOWNLOAD_TIMEOUT = 30.0    # 单次 read 的 socket 超时；大文件靠循环续读
 CHECK_THROTTLE_SEC = 60.0  # 无鉴权配额 60 次/时/IP，60 秒节流是底线
 ASSET_RE = re.compile(r"AIQuant-Setup-.+\.exe")
+# delta 资产名自证身份：AIQuant-Delta-<base>-to-<target>.exe。
+# base 必须严格等于本机 APP_VERSION 才可用；两个版本段都取纯数字，
+# 脏 tag 进不了正则，天然不会被选中。
+DELTA_RE = re.compile(r"AIQuant-Delta-(\d+(?:\.\d+)+)-to-(\d+(?:\.\d+)+)\.exe")
+# delta 相对完整包的收益门槛：省不到 20% 就不值得冒"增量链路"的风险
+# （病态情形下 delta 可能几乎和完整包一样大）。
+DELTA_MIN_SAVING = 0.8
 CHUNK = 64 * 1024
 
 # RLock 而不是 Lock：start_check 持锁期间要调 _set（它自己也拿锁），
@@ -88,10 +104,25 @@ def ui_mode() -> str:
 _last_fail_reason: str | None = None
 
 
+def _decide_plan(info: dict) -> str:
+    """'delta' | 'full'。规则很窄，错边永远倒向 full（完整包永远是对的）。"""
+    delta = info.get("delta")
+    if not delta:
+        return "full"
+    if delta["base"] != APP_VERSION:
+        return "full"  # base 对不上：装出来是混合版本，绝不接受
+    full = int(info.get("asset_size") or 0)
+    if full and int(delta["size"]) >= full * DELTA_MIN_SAVING:
+        return "full"  # 省不了 20% 就别走增量链路
+    return "delta"
+
+
 def fetch_latest() -> dict | None:
     """GET releases/latest。返回
-    ``{'tag','version','notes','asset_url','asset_size'}``；网络失败/限流/
-    没有 Setup 资产一律返回 None（原因存 ``_last_fail_reason``，不抛）。
+    ``{'tag','version','notes','asset_url','asset_size','delta'}``；网络失败/
+    限流/没有 Setup 资产一律返回 None（原因存 ``_last_fail_reason``，不抛）。
+    ``delta`` 是 ``{'base','url','size'}`` 或 None——只挑 base==本机版本 且
+    target==本次发布 的那个，其余 delta 资产视而不见。
     """
     global _last_fail_reason
     _last_fail_reason = None
@@ -120,7 +151,7 @@ def fetch_latest() -> dict | None:
     if not tag:
         _last_fail_reason = "Release 响应缺少 tag_name"
         return None
-    # asset 可能有好几个（未来加 sha256/绿色版 zip）：挑字典序最大的 Setup，
+    # asset 可能有好几个（Setup + Delta + 未来更多）：挑字典序最大的 Setup，
     # 版本号大的名字也大（AIQuant-Setup-1.10.0 > 1.9.0 按字典序也成立，
     # 但我们的版本段固定两位起步，不会撞上这个坑）。
     assets = [a for a in (data.get("assets") or [])
@@ -132,11 +163,23 @@ def fetch_latest() -> dict | None:
     url = str(asset.get("browser_download_url") or "")
     if not url:
         return None
+    release_ver = tag.lstrip("vV")
+    # delta：base==本机版本 且 target==本次发布才算数；多于一个取字典序最大
+    deltas = []
+    for a in (data.get("assets") or []):
+        m = DELTA_RE.fullmatch(str(a.get("name") or ""))
+        if m and m.group(1) == APP_VERSION and m.group(2) == release_ver:
+            u = str(a.get("browser_download_url") or "")
+            if u:
+                deltas.append({"base": m.group(1), "url": u,
+                               "size": int(a.get("size") or 0)})
+    delta = max(deltas, key=lambda d: (d["size"], d["url"])) if deltas else None
     return {"tag": tag,
-            "version": tag.lstrip("vV"),
+            "version": release_ver,
             "notes": str(data.get("body") or ""),
             "asset_url": url,
-            "asset_size": int(asset.get("size") or 0)}
+            "asset_size": int(asset.get("size") or 0),
+            "delta": delta}
 
 
 def is_newer(latest: str, current: str) -> bool:
@@ -159,8 +202,14 @@ def _do_check() -> None:
              checked_at=now)
         return
     newer = is_newer(info["version"], APP_VERSION)
+    plan = _decide_plan(info) if newer else "full"
+    delta = info.get("delta") or {}
     _set("check", status="ok", latest=info["version"], newer=newer,
-         notes=info["notes"], error=None, checked_at=now)
+         notes=info["notes"], error=None, checked_at=now,
+         plan=plan,
+         delta_base=delta.get("base"),
+         delta_size=delta.get("size"),
+         full_size=info["asset_size"])
 
 
 def start_check(force: bool = False) -> dict:
@@ -195,8 +244,9 @@ def _update_dir() -> Path:
 
 def _clear_dir(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
-    for p in d.glob("AIQuant-Setup-*.exe"):
-        p.unlink(missing_ok=True)
+    for pattern in ("AIQuant-Setup-*.exe", "AIQuant-Delta-*.exe"):
+        for p in d.glob(pattern):
+            p.unlink(missing_ok=True)
 
 
 def _do_download(url: str, total: int, dest: Path) -> None:
@@ -246,11 +296,23 @@ def start_download() -> dict:
     if info is None:
         _set("download", status="error", error="获取下载地址失败（网络或限流）")
         return {"ok": False, "error": "获取下载地址失败"}
+    # 决策基于**这次**的 fetch 结果而不是 check 缓存：资产可能刚被删/改名，
+    # 下载的东西必须和决策一致，同时把决策写回 check（UI 与实际动作同步）。
+    plan = _decide_plan(info)
+    delta = info.get("delta") or {}
+    if plan == "delta":
+        dest_name = f"AIQuant-Delta-{delta['base']}-to-{info['version']}.exe"
+        asset_url, asset_size = delta["url"], delta["size"]
+    else:
+        dest_name = f"AIQuant-Setup-{info['version']}.exe"
+        asset_url, asset_size = info["asset_url"], info["asset_size"]
+    _set("check", plan=plan, delta_base=delta.get("base"),
+         delta_size=delta.get("size"), full_size=info.get("asset_size"))
     d = _update_dir()
     _clear_dir(d)
-    dest = d / f"AIQuant-Setup-{info['version']}.exe"
+    dest = d / dest_name
     threading.Thread(target=_run_download_quiet,
-                     args=(info["asset_url"], info["asset_size"], dest),
+                     args=(asset_url, asset_size, dest),
                      name="update-download", daemon=True).start()
     return {"ok": True, "status": "downloading"}
 
@@ -294,6 +356,9 @@ def spawn_setup_then_quit() -> None:
 
     /SILENT（不是 /VERYSILENT）：保留安装进度窗，用户看得见「在装」，安心。
     装完由 iss [Run]（无 skipifsilent）拉起新版。
+
+    full 和 delta 走同一条链：两者都是 Inno Setup exe（delta 与完整包同
+    AppId，覆盖升级、更新卸载信息与注册表版本号），dest 只影响文件名。
     """
     with _lock:
         dest = _state["download"].get("file")
