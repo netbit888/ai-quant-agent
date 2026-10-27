@@ -1248,7 +1248,7 @@
       <button class="btn-ghost" id="lpImport" onclick="lpScanAndImport()"
               title="把 .jsonl 文件放进程序的 import 目录，然后点这里扫描导入">导入</button>
       <button class="btn-ghost" id="lpExport" onclick="lpExportActive()"
-              title="把当前选中的经验库导出成 .jsonl 备份">导出</button>
+              title="把当前选中的经验库导出成 .jsonl 备份，会弹保存对话框让你选位置">导出</button>
       <button class="btn-ghost" id="lpNew" onclick="lpCreate()"
               title="新建一个空的经验库，从零积累">新建</button>
     </div>
@@ -2937,18 +2937,41 @@ async function loadAppVersion() {
 }
 
 async function lpExportActive() {
-  const id = ($('lpSelect') || {}).value || '';
+  const sel = $('lpSelect');
+  const id = (sel || {}).value || '';
   if (!id) { alert('先选一个要导出的经验库'); return; }
+
+  // 原生窗口：先弹系统「另存为」，用户选哪里就写哪里——和「导入」对称。
+  // 浏览器模式拿不到原生对话框，退回后端 export/ 目录（老行为不能丢）。
+  let dest = '';
+  let native = false;
+  if (isNative() && typeof window.pywebview.api.pick_export_path === 'function') {
+    const pack = (lpPacks || []).find(p => p.id === id) || {};
+    let picked;
+    // 文件名清洗交给后端：那边已经有一份规则，前端再写一遍必然分叉
+    try { picked = await nativeApi('pick_export_path', pack.name || 'lesson_pack'); }
+    catch (e) { alert('打开保存对话框失败：' + String(e)); return; }
+    if (!picked || !picked.ok) {
+      if (picked && picked.error) alert('无法打开保存对话框：' + picked.error);
+      return;
+    }
+    if (!picked.path) return;   // 用户在对话框里点了取消，不是错误
+    dest = picked.path;
+    native = true;
+  }
+
   try {
     const j = await (await fetch('/api/lesson_packs/export', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify(native ? { id, path: dest } : { id }),
     })).json();
     if (!j.ok) { alert('导出失败：' + (j.error || '')); return; }
-    // 不能用浏览器下载（WebView2 里 ALLOW_DOWNLOADS=False），所以把路径告诉用户
+    // 不能用浏览器下载（WebView2 里 ALLOW_DOWNLOADS=False），路径就是交付物
     confirmApiCall({
       title: '导出完成',
-      desc: `已导出 ${j.count} 条到：\n${j.path}\n\n用文件管理器打开这个位置就能拿到 .jsonl 文件。`,
+      desc: native
+        ? `已导出 ${j.count} 条到：\n${j.path}`
+        : `已导出 ${j.count} 条到：\n${j.path}\n\n用文件管理器打开这个位置就能拿到 .jsonl 文件。`,
       okText: '知道了',
     });
   } catch (e) { alert('导出请求失败：' + String(e)); }

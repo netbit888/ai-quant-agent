@@ -2,6 +2,32 @@
 
 版本号的唯一来源是仓库根 `app_version.py` 的 `APP_VERSION`（构建/发版脚本与安装脚本都从它派生）。
 
+## v1.5.6 — 2026-10-27
+
+<!-- notes -->
+**经验库导出可以直接选位置了**：点「导出」先弹系统「另存为」，选哪儿就存哪儿，默认文件名就是经验库的名字。
+
+- 以前只能落进程序的 export/ 目录，再去文件管理器里翻。
+- 现在和「导入」对称：导入选源文件，导出选目标位置。
+- 目录不存在会自己建；文件名忘了写 `.jsonl` 会自动补上。
+- 选到经验库自己的文件上会被拦下（那会把正在用的经验覆盖掉）。
+- 浏览器模式（没有原生窗口时）仍是老行为，落到 export/ 目录。
+
+顺手修了经验库文件句柄没关闭的泄漏。
+<!-- /notes -->
+
+### 改进：经验库导出走系统「另存为」对话框
+
+导入早就会弹系统文件选择器（`_Bridge.pick_lesson_file` 用 `OPEN_DIALOG`），导出却一直把文件写进固定的 `export/` 目录，再让用户自己去文件管理器里翻。同一块 UI 上两个按钮、两套心智，说不过去。
+
+- **`live/lesson_packs.py`**：`export_to(id, dest=None)`。`dest` 为空仍是老路（`export/` + 清洗过的库名）；给了就写到用户选的位置，父目录自动建，没后缀自动补 `.jsonl`。只因一个理由拒绝：目标解析后等于包文件自己——那会让 `shutil.copy2` 抛 `SameFileError`，而且用户找的其实是"备份"，不是"覆盖源文件"。返回值加 `custom` 区分两条路，前端据此换文案。
+- **`tools/dashboard.py`**：新增 `_Bridge.pick_export_path(default_name)`，`webview.FileDialog.SAVE`（旧版 pywebview 兜底 `SAVE_DIALOG`）。起始目录显式给 `~/Downloads`——`directory` 传空时 pywebview 的 winforms 实现会读 `HOMEPATH`，而 `HOMEPATH` 不带盘符（`\Users\xxx`），WinForms 认不了，对话框会开在不该开的地方。
+- **文件名清洗只在 Python 做一次**（`[<>:"/\|?*\x00-\x1f]` → `_`）：前端把库名原样递过去。两边各写一套必然分叉，早晚出「前端以为合法、后端存不下」的问题。
+- **HTTP**：`POST /api/lesson_packs/export` 接受可选 `path`；没给就落 `export/`——浏览器模式拿不到原生对话框，靠这条降级，不能丢。
+- 顺手修 `_count_lines` 没加 `with` 的文件句柄泄漏（测试里冒 `ResourceWarning`，面板长跑会积句柄）。
+
+验收：675 个用例全绿（新增 10 个：dest 生效 / 父目录自动建 / 补后缀 / 拒写包自身 / 未知包，以及桥的路径透传 / 文件名清洗 / 用户取消 / 浏览器模式降级）。
+
 ## v1.5.5 — 2026-10-27
 
 <!-- notes -->

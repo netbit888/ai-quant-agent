@@ -941,7 +941,10 @@ class Handler(BaseHTTPRequestHandler):
         if not pid:
             self._json(400, {"ok": False, "error": "缺少 id"})
             return
-        self._lesson_pack_action(body, lambda lp: lp.export_to(pid))
+        # path 是用户在系统「另存为」对话框里亲手选的绝对路径。没给就落 export/
+        # 目录——浏览器模式（拿不到原生对话框）靠这条降级，不能丢。
+        dest = str(body.get("path") or "").strip()
+        self._lesson_pack_action(body, lambda lp: lp.export_to(pid, dest or None))
 
     def _post_lesson_pack_rename(self, body: dict) -> None:
         pid = str(body.get("id") or "").strip()
@@ -1174,6 +1177,44 @@ class _Bridge:
             p = files[0] if files else None
             return {"ok": True, "path": p,
                     "name": Path(p).stem if p else None}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def pick_export_path(self, default_name=None):
+        """弹系统「另存为」对话框，让用户决定经验库导到哪里。
+
+        和 pick_lesson_file 一样是允许阻塞的方法（模态框本来就在等用户）。
+        浏览器模式没有窗口对象，返回 ok=False，前端据此降级回 export/ 目录。
+        """
+        if _WINDOW is None:
+            return {"ok": False, "error": "仅窗口模式支持文件选择"}
+        try:
+            import re
+
+            import webview
+
+            # 文件名清洗只在 Python 这一侧做一次：经验库名可能带 / \ : * ? " < > |
+            # 这类字符，直接塞给 save_filename 在 Windows 上是非法文件名。
+            # 前端只管把库名原样递过来，别让它再写一份清洗规则。
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_",
+                          str(default_name or "lesson_pack"))[:60].strip(" .")
+            if not name:
+                name = "lesson_pack"
+            if not name.lower().endswith(".jsonl"):
+                name += ".jsonl"
+            # 起始目录显式给：winforms 那边 directory 为空会去读 HOMEPATH，
+            # 而 HOMEPATH 是不带盘符的（\Users\xxx），WinForms 认不了。
+            home = Path.home()
+            start = home / "Downloads"
+            dialog_type = getattr(getattr(webview, "FileDialog", None),
+                                  "SAVE", None) or webview.SAVE_DIALOG
+            files = _WINDOW.create_file_dialog(
+                dialog_type, directory=str(start if start.is_dir() else home),
+                save_filename=name,
+                file_types=("经验库文件 (*.jsonl)", "所有文件 (*.*)"))
+            p = files[0] if files else None
+            return {"ok": True, "path": p,
+                    "name": Path(p).name if p else None}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 

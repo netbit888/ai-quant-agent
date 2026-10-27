@@ -89,8 +89,9 @@ def _count_lines(p: Path) -> int:
         return 0
     n = 0
     try:
-        for _ in p.open(encoding="utf-8"):
-            n += 1
+        with p.open(encoding="utf-8") as fh:   # 不 with 会漏文件句柄（ResourceWarning）
+            for _ in fh:
+                n += 1
     except OSError:
         pass
     return n
@@ -211,11 +212,16 @@ def import_from(src_path: Path, name: str) -> dict:
             "skipped_bad": bad, "skipped_dup": 0}
 
 
-def export_to(id: str) -> dict:
-    """把指定包复制到 export/，返回绝对路径。
+def export_to(id: str, dest: str | Path | None = None) -> dict:
+    """把指定包导出成 .jsonl，返回绝对路径。
+
+    ``dest`` 为空 → 落到 export/ 目录（浏览器模式的老路，仍然保留）；
+    给了 dest → 写到用户在系统「另存为」对话框里亲自选的位置，原生窗口
+    模式一律走这条。
 
     Blob 下载在 WebView2 里被 pywebview 禁掉（`ALLOW_DOWNLOADS=False`），
-    所以导出只能后端写文件 + 前端显示路径让用户用文件管理器去复制。
+    所以文件必须由后端落地，前端只能显示结果路径——这也是为什么"选哪里"
+    必须靠原生对话框问用户，而不是靠浏览器下载。
     """
     idx = _read_index()
     p = next((x for x in idx["packs"] if x["id"] == id), None)
@@ -224,13 +230,24 @@ def export_to(id: str) -> dict:
     src = packs_dir() / p["file"]
     if not src.exists():
         return {"ok": False, "error": "包文件丢失"}
-    export_dir().mkdir(parents=True, exist_ok=True)
-    safe = re.sub(r"[^\w\u4e00-\u9fff\-]", "_", p["name"])[:40] or "lesson_pack"
-    dst = export_dir() / f"{safe}.jsonl"
+
+    if dest:
+        dst = Path(dest)
+        # 用户可能手打了没后缀的名字：补上，别产出个打不开的文件
+        if not dst.name.lower().endswith(".jsonl"):
+            dst = dst.with_name(dst.name + ".jsonl")
+        # 用户选的路径就是明确意图，只挡一种真会炸的：导到包文件自己头上
+        if dst.exists() and dst.resolve() == src.resolve():
+            return {"ok": False, "error": "不能导出到经验库自己的文件上"}
+        dst.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        export_dir().mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w\u4e00-\u9fff\-]", "_", p["name"])[:40] or "lesson_pack"
+        dst = export_dir() / f"{safe}.jsonl"
     # 同名已存在就覆盖——导出是给别人/别处用的，不留旧版
     shutil.copy2(src, dst)
     return {"ok": True, "path": str(dst), "name": dst.name,
-            "count": _count_lines(src)}
+            "count": _count_lines(src), "custom": bool(dest)}
 
 
 def rename(id: str, name: str) -> dict:
