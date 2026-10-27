@@ -43,6 +43,9 @@ ArchitecturesAllowed=x64compatible
 MinVersion=10.0
 OutputDir=..\dist\installer
 OutputBaseFilename=AIQuant-Setup-{#MyAppVersion}
+; 安装包/卸载项自身的图标。路径相对本 .iss 所在目录（installer/）。
+; exe 图标走 aqa.spec 的 assets/aqa.ico，快捷方式默认继承 exe，这里只管 Setup 自己。
+SetupIconFile=..\assets\aqa.ico
 UninstallDisplayIcon={app}\{#MyAppExe}
 UninstallDisplayName={#MyAppName}
 Compression=lzma2/max
