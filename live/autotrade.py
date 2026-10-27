@@ -236,6 +236,10 @@ def _empty_state() -> dict:
         "position": None,
         "stop_reason": None,
         "last_decision": None,
+        # 等待锚点：模型说"等回踩到 X"就把 X 记下来（见 _wait_step）。
+        # 不记的话它每轮都会换一个更靠近现价的数，等于把追高改写成等待。
+        "wait": None,
+        "wait_drift": 0,
         # 出场端连续模型调用失败次数：≥3 次自动停（仓位没人管比少做一笔危险）
         "model_errors": 0,
         # 已平仓、但还没到复盘时机的单子。平仓后要等 7 根 K 线走完才复盘，
@@ -948,6 +952,11 @@ reason —— 不超过 40 字的中文依据，必须引用输入里的具体�
   行情分类下都不成立——震荡市上沿是做空位，上涨趋势里贴上沿该等回踩
   低吸，下跌趋势里更不该接多。想表达"看涨但位置太高"，正确写法是
   act=false + reason 写"等回踩到下沿"。
+- **等待锚点是锁定的。** 你说"等回踩到 X"，系统就记住 X；下一轮会把 X、
+  离现价还差多少、已经等了多久一起给你。往后把 X 改成更靠近现价的数字
+  **不算数**（那只是把"追"改写成"等"），system 不会采纳。要改只有两种
+  合法走向：往离现价更远的方向调（更保守），或者直接说"这一波不做"。
+  锚点 15 分钟没成交会自动作废，到时候重新按结构判断，别顺着旧价位往下说。
 
 【判断原则】
 - **不做交易是允许的，而且经常是对的。** 给出 `"act": false` 即可，
@@ -977,7 +986,7 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
 战绩 样本={n_closed} 笔  命中率={hit}
-{recent_close}{lessons}
+{recent_close}{wait_note}{lessons}
 报价 bid={bid}  ask={ask}  点差={spread_pts} 点
 时间 {clock} UTC"""
 
@@ -1464,6 +1473,111 @@ def _entry_veto(cfg: Cfg, direction: int, feat: dict,
     return None
 
 
+# ------------------------------------------------------------ 等待锚点（锁定）
+#
+# 模型说"等回踩到 4044 再进"，下一分钟又说"等回踩到 4049.9"——它**没有上一轮
+# 的记忆**（prompt 里不含历史决策），所以目标价跟着价格一起上移：名义上在等，
+# 实际上在追。2026-10-27 22:29–22:40 实测十二分钟：4037 → 4038 → 4041 →
+# 4043 → 4045 → 4046 → 4049.9，价格涨了 12 美元，一次都没等到。
+# 危害不只是错过：真回调来时它锚在新高位上，一接就接在半山腰。
+#
+# 治法不是让它"记性变好"，而是给它一个外部记忆——锚点一次设定就锁住，
+# 只允许往**离现价更远**的方向调（那是更保守的等待）；每轮 prompt 把
+# 锚点、差价、等了多久写回去。它想挪，系统不采纳并记一笔 drift。
+_WAIT_RE = re.compile(
+    r"(?:等回踩|等反抽|等回到|等价格回到|等跌到|等回抽|回踩到|回踩至|反抽到)"
+    r".{0,14}?(\d{4,5}(?:\.\d{1,2})?)")
+WAIT_TTL_SEC = 900        # 锚点最长存活 15 分钟：再久这条等待已经不是同一个结构
+WAIT_DRIFT_ATR = 0.25     # 朝现价方向挪动超过 0.25 倍均幅 = 漂移
+
+
+def parse_wait_level(reason: str, price: float | None = None) -> float | None:
+    """从 reason 里抠出"等回踩到 X"的那个 X。抠不到返回 None。
+
+    只认紧跟在等待措辞后面的价位数，不做全句扫数字：reason 里还有
+    "MA28 上方 +10.1""ER 0.55""5.5 倍均幅""前高 4050.9"这些数字，
+    全句扫必然抓错。离现价 0.5% 以上的也丢掉——M1 十四根窗口的振幅
+    通常只有几美元，差半个百分点开外的价位等的根本不是这一波结构。
+    """
+    m = _WAIT_RE.search(str(reason or ""))
+    if not m:
+        return None
+    try:
+        level = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    if price and abs(level - float(price)) > float(price) * 0.005:
+        return None
+    return level
+
+
+def _wait_touched(wait: dict, price: float, side: int) -> bool:
+    """价格有没有已经踩到锚点（多：跌到价下方；空：涨到价上方）。"""
+    level = float(wait.get("level") or 0.0)
+    if not level:
+        return False
+    return price <= level if side > 0 else price >= level
+
+
+def _wait_note(wait: dict | None, price: float, atr: float, symbol: str,
+               now: int, ttl: int = WAIT_TTL_SEC) -> str:
+    """把上一轮的锚点写回 prompt。没有锚点就返回空串（模板里不留空行）。"""
+    if not isinstance(wait, dict) or not wait.get("level"):
+        return ""
+    level = float(wait["level"])
+    side = int(wait.get("side") or 1)
+    age = max(0, int(now) - int(wait.get("ts") or 0))
+    px = lambda v: _px(symbol, v)          # noqa: E731
+    if age >= ttl:
+        return (f"【等待锚点·已作废】上一轮定的 {px(level)} 等了 {age // 60} 分钟仍没成交，"
+                f"这条等待作废——按现在的结构重新判断，不要接着旧价位往下说。\n")
+    if _wait_touched(wait, price, side):
+        return (f"【等待锚点·已到位】你等的 {px(level)} 已经触及（现价 {px(price)}）。"
+                f"这一轮必须二选一：act=true 就在这个位置做，或者明确放弃这条等待。\n")
+    gap = (price - level) * (1 if side > 0 else -1)
+    mult = gap / atr if atr else 0.0
+    return (f"【等待锚点·锁定】{age} 秒前你定了等 {px(level)} 再进"
+            f"{'多' if side > 0 else '空'}，现价 {px(price)}，还差 {gap:.3f}"
+            f"（约 {mult:.1f} 倍单根均幅）。锚点由系统锁定：把价位改成更靠近现价的"
+            f"数字**不会生效**——那只是把「追」改写成「等」。要么继续等这个价，"
+            f"要么这轮直接说「这一波不做」。\n")
+
+
+def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
+               now: int, side: int, ttl: int = WAIT_TTL_SEC,
+               tol_atr: float = WAIT_DRIFT_ATR) -> tuple[dict | None, str]:
+    """推进锚点状态机，返回 (新状态, 本轮标记)。
+
+    标记：
+      set       —— 第一次定锚
+      keep      —— 这轮没提价位，继续等
+      move      —— 往更保守的方向改（允许，ts 不变：等的还是同一次机会）
+      drift     —— 朝现价方向挪动 = 跟着价格跑，**不采纳**，锚点不变
+      expired   —— 超过 ttl，作废
+      consumed  —— 已经踩到锚点却仍不进，锚点作废（不敢做就别占着）
+      cleared_open —— 这轮进场了，等待结束
+    """
+    old = wait if isinstance(wait, dict) and wait.get("level") else None
+    if act is True:
+        return None, "cleared_open"
+    flag = ""
+    if old and now - int(old.get("ts") or 0) >= ttl:
+        old, flag = None, "expired"
+    level = parse_wait_level(reason, price)
+    if level is None:
+        if old and _wait_touched(old, price, side):
+            return None, "consumed"
+        return old, flag or "keep"
+    if old is None:
+        return {"level": level, "ts": now, "side": side, "drift": 0}, flag or "set"
+    tol = max(float(atr or 0.0) * tol_atr, 0.05)
+    drifted = (level > old["level"] + tol) if side > 0 else (level < old["level"] - tol)
+    if drifted:
+        return {**old, "side": side, "drift": int(old.get("drift") or 0) + 1}, "drift"
+    return {"level": level, "ts": old.get("ts") or now, "side": side,
+            "drift": int(old.get("drift") or 0)}, "move"
+
+
 def _structure_text(rows: list[dict], zone_edge: float = 0.35,
                     digits: int = 3) -> str:
     s = _structure(rows)
@@ -1668,7 +1782,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
                        lots: float = 0.01, lessons: str = "",
                        ticks_text: str = "", zone_edge: float = 0.35,
                        mtf_text: str = "",
-                       recent_close: dict | None = None) -> str:
+                       recent_close: dict | None = None,
+                       wait_note: str = "") -> str:
     w = visible_bars(rows)
     r1, r5, r13, span = _returns(w)
     st = stats or {}
@@ -1707,6 +1822,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
         recent_close=rc_text,
+        wait_note=wait_note or "",
         mtf=mtf_text or "",
         ma=(ma_text + "\n") if ma_text else "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
@@ -2569,7 +2685,8 @@ def _log_call(ok: bool, usage: dict | None, error: str | None = None,
 def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
               stats: dict | None = None, login: int | str | None = None,
               ticks_text: str = "", mtf_text: str = "",
-              recent_close: dict | None = None) -> dict:
+              recent_close: dict | None = None,
+              wait_note: str = "") -> dict:
     """让模型给上涨概率。**模型没答上来就不做**，不拿规则替它下单。"""
     prompt = build_entry_prompt(rows, bid, ask, cfg.symbol, cfg.tf,
                                 _point(cfg.symbol), stats,
@@ -2580,7 +2697,8 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                 zone_edge=cfg.zone_edge,
                                 ticks_text=ticks_text,
                                 mtf_text=mtf_text,
-                                recent_close=recent_close)
+                                recent_close=recent_close,
+                                wait_note=wait_note)
     try:
         text, usage = _chat(prompt, system_for(ENTRY_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
@@ -3140,10 +3258,16 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                 "seconds_ago": seconds_ago,
                 "pnl": state.get("last_close_pnl"),
             }
+    # 等待锚点：把上一轮它自己定的回踩价写回 prompt（它没有跨轮记忆，
+    # 不喂回去就必然跟着价格漂——见 _wait_step 上面的注释）。
+    wait_prev = state.get("wait")
+    atr_now = float(_atr(bars).get("atr") or 0.0)
+    wait_note = _wait_note(wait_prev, bid, atr_now, cfg.symbol, now)
     decision = ask_entry(bars, bid, ask, cfg, state, login,
                          ticks_text=_ticks_text(cfg, bars),
                          mtf_text=mtf["text"],
-                         recent_close=recent_close)
+                         recent_close=recent_close,
+                         wait_note=wait_note)
     # 特征快照：决策当下就走一次，后面所有分支（skip / open / failed）都带上。
     # 不存它的话，事后想问「ER 高的单更容易赢吗」只能靠重建，而重建必然失败。
     feat = feature_snapshot(bars, cfg, mtf=mtf["info"])
@@ -3151,10 +3275,17 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     act = decision.get("act")
     direction = 1 if p_up > 0.5 else -1
     agree = decision.get("agree")
+    # 推动锚点状态机。放在 last_decision 之前：act=false 的三个分支和
+    # 后面的开仓分支都要能读到最新的 wait，否则面板上看到的还是上一轮的。
+    state["wait"], wait_flag = _wait_step(
+        state.get("wait"), decision.get("reason"), act, bid, atr_now, now, direction)
+    if wait_flag == "drift":
+        state["wait_drift"] = int(state.get("wait_drift") or 0) + 1
     state["last_decision"] = {
         "ts": now, "kind": "entry", "p_up": p_up, "direction": direction,
         "act": act, "prog_dir": prog_dir, "agree": agree,
         "reason": decision.get("reason"), "source": decision.get("source"),
+        "wait": state.get("wait"), "wait_flag": wait_flag,
     }
 
     # 模型明确说不做，就别做。以前只能靠 p_up≈0.5 暗示，结果常常
@@ -3163,6 +3294,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         failed = decision.get("source") == "error"
         row = {"ts": now, "kind": "skip", "p_up": p_up, "act": False,
                "prog_dir": prog_dir, "feat": feat,
+               "wait": state.get("wait"), "wait_flag": wait_flag,
                "reason": (decision.get("reason") if failed else
                           f"模型判定不做：{decision.get('reason') or '未给理由'}")}
         if failed:

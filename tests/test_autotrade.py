@@ -3580,5 +3580,186 @@ class TestEntryVetoInTick(TempLedger):
         self.assertIsNotNone(row["feat"]["pos"])
 
 
+class TestWaitAnchor(unittest.TestCase):
+    """等回踩的价位不许跟着价格漂。
+
+    2026-10-27 22:29–22:40 实测十二分钟：模型说的回踩位 4037 → 4038 → 4041 →
+    4043 → 4045 → 4046 → 4049.9，价格涨了 12 美元，一次都没等到。名义在等、
+    实际在追，而且真回调时锚点已经变成新的高位。
+    """
+
+    # ---------------- 解析 ----------------
+
+    def test_parse_real_reasons(self):
+        """每一条都是当晚日志里的原话（价格 4050 附近）。"""
+        cases = [
+            ("ER0.57 单边趋势，收盘位置达96%贴近上沿，此时做多是追最后一根阳线；"
+             "等价格回踩到4046附近再做多方。", 4046.0),
+            ("ER0.55单边上行，收盘位置99%贴上沿，MA28上方+10.1已显过热；"
+             "连阳3根不追多，等回踩前根实体中位4049.9再进", 4049.9),
+            ("距MA28已+6.63=2.6倍均幅，追高即接最后一棒；"
+             "等回踩至T-1实体中位4043附近再顺势多", 4043.0),
+            ("连阳3根不追多，等回踩4041-4040实体中位再进", 4041.0),
+            ("ER0.35方向不明，T-1放量476笔后涨势未续，等回踩4040附近再顺势多", 4040.0),
+        ]
+        for reason, want in cases:
+            self.assertEqual(autotrade.parse_wait_level(reason, 4050.0), want, reason)
+
+    def test_no_level_returns_none(self):
+        """只说"等贴边再进"但没给价位——不锁，免得锁一个模型没说的东西。"""
+        self.assertIsNone(autotrade.parse_wait_level(
+            "震荡ER=0.19，收盘58%在中间地带，程序倾向不动手，等贴边再进", 4050.0))
+
+    def test_far_away_number_is_ignored(self):
+        """差 0.5% 开外的价位等的不是这一波结构（14 根 M1 振幅只有几美元）。"""
+        self.assertIsNone(autotrade.parse_wait_level("等回踩4000附近", 4050.0))
+
+    def test_numbers_in_the_same_sentence_do_not_confuse_it(self):
+        """ER/倍数/前高都在句子里，只有紧跟在"等回踩"后面的才算。"""
+        r = "ER0.72单边涨，收盘95%贴上沿，振幅5.5倍已拉伸，前高4050.9，等回踩4045一线再做多"
+        self.assertEqual(autotrade.parse_wait_level(r, 4050.0), 4045.0)
+
+    # ---------------- 状态机 ----------------
+
+    def _wait(self, level=4044.0, ts=1500, side=1):
+        # ts 默认贴近 now=2000（500 秒前定的锚，没过 900 秒 ttl）
+        return {"level": level, "ts": ts, "side": side, "drift": 0}
+
+    def test_first_time_sets_anchor(self):
+        st, flag = autotrade._wait_step(None, "等回踩4044附近再进", False,
+                                        4050.0, 1.5, 2000, 1)
+        self.assertEqual(flag, "set")
+        self.assertEqual(st["level"], 4044.0)
+        self.assertEqual(st["ts"], 2000)
+
+    def test_upward_drift_is_rejected(self):
+        """这就是当初那个毛病：新价位比原锚点高，系统不采纳。"""
+        st, flag = autotrade._wait_step(self._wait(4044.0), "等回踩4049.9再进",
+                                        False, 4050.0, 1.5, 2000, 1)
+        self.assertEqual(flag, "drift")
+        self.assertEqual(st["level"], 4044.0)      # 原锚点不动
+        self.assertEqual(st["drift"], 1)
+
+    def test_more_conservative_move_is_allowed(self):
+        """往下改是"更耐心的等"，不是漂移，允许，且 ts 保留（等的还是同一次机会）。"""
+        st, flag = autotrade._wait_step(self._wait(4044.0), "等回踩4030附近再进",
+                                        False, 4050.0, 1.5, 2000, 1)
+        self.assertEqual(flag, "move")
+        self.assertEqual(st["level"], 4030.0)
+        self.assertEqual(st["ts"], 1500)
+
+    def test_short_side_drifts_downward(self):
+        """空单镜像：价位往下挪才是跟着价格跑。"""
+        st, flag = autotrade._wait_step(self._wait(4044.0, side=-1),
+                                        "等反抽4038附近做空", False, 4040.0, 1.5, 2000, -1)
+        self.assertEqual(flag, "drift")
+        self.assertEqual(st["level"], 4044.0)
+
+    def test_expired_anchor_is_dropped(self):
+        st, flag = autotrade._wait_step(self._wait(4044.0, ts=1000), "等回踩4044附近",
+                                        False, 4050.0, 1.5, 1000 + 901, 1)
+        self.assertEqual(flag, "expired")
+        self.assertEqual(st["level"], 4044.0)      # 过期后按这轮重设，ts 变新
+        self.assertEqual(st["ts"], 1000 + 901)
+
+    def test_touched_but_still_refusing_consumes_anchor(self):
+        """已经跌到锚点还不进 → 这条等待作废，别占着位置假装在等。"""
+        st, flag = autotrade._wait_step(self._wait(4044.0), "再看一下，不动手",
+                                        False, 4042.0, 1.5, 2000, 1)
+        self.assertIsNone(st)
+        self.assertEqual(flag, "consumed")
+
+    def test_entering_clears_anchor(self):
+        st, flag = autotrade._wait_step(self._wait(4044.0), "到了，进", True,
+                                        4044.0, 1.5, 2000, 1)
+        self.assertIsNone(st)
+        self.assertEqual(flag, "cleared_open")
+
+    def test_keep_when_no_new_level(self):
+        st, flag = autotrade._wait_step(self._wait(4044.0), "等确认再说", False,
+                                        4050.0, 1.5, 2000, 1)
+        self.assertEqual(flag, "keep")
+        self.assertEqual(st["level"], 4044.0)
+
+    # ---------------- 喂回模型的提示 ----------------
+
+    def test_note_says_locked_with_gap(self):
+        note = autotrade._wait_note(self._wait(4044.0, ts=2000), 4050.0, 1.5,
+                                    "XAUUSDm", 2060)
+        self.assertIn("等待锚点·锁定", note)
+        self.assertIn("4044", note)
+        self.assertIn("不会生效", note)      # 明确告诉它改成近价没用
+        self.assertIn("60 秒", note)
+
+    def test_note_announces_arrival(self):
+        note = autotrade._wait_note(self._wait(4044.0, ts=2000), 4043.0, 1.5,
+                                    "XAUUSDm", 2060)
+        self.assertIn("已到位", note)
+        self.assertIn("二选一", note)
+
+    def test_note_announces_expiry(self):
+        note = autotrade._wait_note(self._wait(4044.0, ts=1000), 4050.0, 1.5,
+                                    "XAUUSDm", 1000 + 1200)
+        self.assertIn("已作废", note)
+
+    def test_no_anchor_no_note(self):
+        self.assertEqual(autotrade._wait_note(None, 4050.0, 1.5, "XAUUSDm", 2000), "")
+        self.assertEqual(autotrade._wait_note({"level": 0}, 4050.0, 1.5,
+                                              "XAUUSDm", 2000), "")
+
+    def test_prompt_carries_the_note(self):
+        p = autotrade.build_entry_prompt(bars_up(30), 4050.0, 4050.24,
+                                         wait_note="【等待锚点·锁定】4044\n")
+        self.assertIn("等待锚点·锁定", p)
+
+
+class TestWaitAnchorInTick(TempLedger):
+    """锚点必须真的接到 tick 上：纯函数再对，没接线就是没改。"""
+
+    def _seed(self, level=4044.0, ts=NOW - 120):
+        st = autotrade._empty_state()
+        st["wait"] = {"level": level, "ts": ts, "side": 1, "drift": 0}
+        autotrade.save_state(st)
+
+    def test_previous_anchor_reaches_the_model(self):
+        self._seed()
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": False, "p_up": 0.6,
+                                             "reason": "等回踩4044附近",
+                                             "source": "llm"}) as m:
+            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                           quote=(4050.0, 4050.24), rows=bars_up())
+        note = m.call_args.kwargs.get("wait_note", "")
+        self.assertIn("等待锚点·锁定", note)
+        self.assertIn("4044", note)
+
+    def test_drift_is_blocked_and_counted(self):
+        self._seed()
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": False, "p_up": 0.6,
+                                             "reason": "等回踩4049.9再进多方",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open"):
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4050.0, 4050.24), rows=bars_up())
+        self.assertEqual(row["wait_flag"], "drift")
+        state = autotrade.load_state()
+        self.assertEqual(state["wait"]["level"], 4044.0)   # 没被改走
+        self.assertEqual(state["wait_drift"], 1)
+
+    def test_anchor_survives_into_next_tick(self):
+        """第一轮定锚、第二轮把锚点写回 prompt——这才是"外部记忆"的意义。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": False, "p_up": 0.6,
+                                             "reason": "等回踩4044附近再进",
+                                             "source": "llm"}) as m:
+            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                           quote=(4050.0, 4050.24), rows=bars_up())
+            self.assertEqual(m.call_args.kwargs.get("wait_note"), "")   # 第一轮没有
+            autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW + 60,
+                           quote=(4050.0, 4050.24), rows=bars_up())
+        self.assertIn("等待锚点·锁定", m.call_args.kwargs.get("wait_note", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
