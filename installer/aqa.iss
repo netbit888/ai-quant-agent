@@ -95,6 +95,12 @@ Type: filesandordirs; Name: "{app}\data\webview"
 const
   WEBVIEW2_KEY = 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WEBVIEW2_URL = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+  SHCNE_ASSOCCHANGED = $08000000;
+  SHCNF_IDLIST = $0000;
+
+{ Pascal Script 不内置 SHChangeNotify，须自行从 shell32 声明 }
+procedure SHChangeNotify(wEventId, uFlags, dwItem1, dwItem2: Longint);
+  external 'SHChangeNotify@shell32.dll stdcall';
 
 function WebView2Installed(): Boolean;
 var
