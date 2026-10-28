@@ -190,6 +190,54 @@ class TestModelFailureStops(TempLedger):
         self.assertEqual(rows[2]["kind"], "stop")
         self.assertIn("连续", rows[2]["reason"])
 
+    def test_model_hold_row_carries_pnl_and_peak(self):
+        """模型判「继续持有」的 hold 行必须带浮盈/峰值/单据号。
+
+        2026-10-29 那笔插针单：模型在浮盈 +4.86 时判继续持有，但这条 hold 行
+        只存了 reason 文本，`float_pnl` / `peak_pnl` / `ticket` 全是 None——
+        复盘时根本看不出"它是在过门槛之后做的决定"，只能从中文里手抠数字。
+        和闸门那条 hold 行对齐口径，两处都要能直接统计。
+        """
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": 88, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 60,
+                             "p_up": 0.6, "entry_reason": "贴下沿",
+                             "plan": "range"}
+        autotrade.save_state(state)
+
+        # tp_min_usd=0 且 min_hold_sec=0 → 闸门放行，本轮一定会问模型
+        cfg = autotrade.Cfg(interval_sec=60, tp_min_usd=0, max_hold_sec=0,
+                            min_hold_sec=0)
+        with mock.patch.object(autotrade, "ask_exit",
+                               return_value={"close": False, "source": "llm",
+                                             "reason": "结构没走完"}):
+            row = autotrade.tick(cfg, now=NOW, quote=(4003.0, 4003.24),
+                                 rows=bars_up(),
+                                 positions=[{"ticket": 88, "symbol": "XAUUSDm"}])
+
+        self.assertEqual(row["kind"], "hold")
+        self.assertEqual(row["ticket"], 88)
+        self.assertAlmostEqual(row["float_pnl"], 3.0, places=2)
+        self.assertAlmostEqual(row["peak_pnl"], 3.0, places=2)
+        self.assertIn("peak_ts", row)
+
+    def test_gate_hold_row_carries_ticket(self):
+        """闸门那条 hold 行也要带单据号：同一次持仓里会有多条 hold，
+        没有 ticket 就只能靠时间戳猜属于哪一笔。"""
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": 99, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 60,
+                             "p_up": 0.6, "entry_reason": "贴下沿", "plan": "range"}
+        autotrade.save_state(state)
+
+        cfg = autotrade.Cfg(interval_sec=60)          # 默认门槛 3.25，浮盈 0 会拦
+        row = autotrade.tick(cfg, now=NOW, quote=(4000.0, 4000.24), rows=bars_up(),
+                             positions=[{"ticket": 99, "symbol": "XAUUSDm"}])
+        self.assertEqual(row["kind"], "hold")
+        self.assertEqual(row.get("source"), "tp_wait")
+        self.assertEqual(row["ticket"], 99)
+        self.assertAlmostEqual(row["float_pnl"], 0.0, places=2)
+
 
 # ------------------------------------------------------------------ 1 分钟内重开
 
@@ -1643,6 +1691,53 @@ class TestStructure(unittest.TestCase):
         """震荡里贴下沿仍然是买点，别把趋势线规则误用到震荡。"""
         rows = bars_from_closes([4002, 4000] * 7)     # 收在区间最低
         self.assertIn("贴下沿（程序倾向：可考虑做多", autotrade._structure_text(rows))
+
+    # ---- 出场端只讲结构，不给行动指令（2026-10-29）---------------------
+    #
+    # 那笔 0.01 多单：plan=range（止盈 3.25），一根插针把 ER 从 0.04 顶到 0.74，
+    # 出场 prompt 里同时出现「行情判定：趋势市·上行 → 顺势做多，不等回踩」和
+    # 「震荡单…别指望它变成趋势」。模型 13 秒里被问三次、三次都挑前者，从
+    # +4.86 拿到 -3.90（K 线真实高点对应 +8.30）。
+    #
+    # 入场端靠这句话选打法，必须留着；出场端 plan 已经锁死，再看一遍行情判定
+    # 只会给它反悔的理由。所以两端的文案从这里分开。
+
+    def test_exit_structure_drops_action_directive(self):
+        rows = bars_from_closes([4000 + i for i in range(14)])   # ER=1.0 单边上行
+        entry_text = autotrade._structure_text(rows)
+        exit_text = autotrade._structure_text(rows, for_exit=True)
+        # 入场端原封不动
+        self.assertIn("顺势做多", entry_text)
+        self.assertIn("高位本身不是否决理由", entry_text)
+        self.assertIn("趋势市·上行", entry_text)
+        # 出场端不许再出现「该做多还是做空」
+        self.assertNotIn("顺势做多", exit_text)
+        self.assertNotIn("程序倾向", exit_text)
+        self.assertNotIn("趋势市·上行", exit_text)
+
+    def test_exit_structure_keeps_the_facts(self):
+        """去掉的只是行动指令，结构事实一条都不能少——模型仍要判断走没走完。"""
+        rows = bars_from_closes([4000 + i for i in range(14)])
+        text = autotrade._structure_text(rows, for_exit=True)
+        self.assertIn("结构 ER=", text)
+        self.assertIn("位置判定：贴着区间上沿", text)
+        self.assertIn("行情判定：单边上行", text)
+        self.assertIn("当前根", text)
+
+    def test_exit_prompt_has_no_entry_directive(self):
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0, "plan": "range",
+               "opened_at": NOW, "entry_reason": "测试"}
+        rows = bars_from_closes([4000 + i for i in range(14)])
+        p = autotrade.build_exit_prompt(rows, pos, 4013.0, 4013.24)
+        self.assertNotIn("顺势做多", p)
+        self.assertNotIn("程序倾向", p)
+        self.assertIn("别指望它变成趋势", p)      # plan_text 还在（这单是震荡单）
+
+    def test_entry_prompt_keeps_entry_directive(self):
+        """入场端一个字都不许动：趋势市选打法全靠这句。"""
+        rows = bars_from_closes([4000 + i for i in range(14)])
+        p = autotrade.build_entry_prompt(rows, 4013.0, 4013.24)
+        self.assertIn("顺势做多", p)
 
     def test_structure_line_shows_direction(self):
         """净移动必须带符号：只给绝对值，模型分不清在涨还是在跌。"""

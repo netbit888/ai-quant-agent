@@ -1584,6 +1584,21 @@ def _zone_text(pos: float, er: float, drift: float, edge: float,
     return f"中间地带（{edge:.0%}~{1 - edge:.0%}，程序倾向不动手）"
 
 
+def _zone_fact(pos: float, edge: float) -> str:
+    """位置判定（**纯事实版**）：只说价格站在区间哪里，不说该买还是该卖。
+
+    出场 prompt 用这个，不用 `_zone_text`。理由见 `_structure_text` 的
+    `for_exit` 分支——出场端已经锁定打法（plan），再给它一句"程序倾向：
+    顺势做多"，只会让模型在两个方向之间挑一个它爱听的。
+    """
+    edge = max(0.0, min(0.49, float(edge)))
+    if pos <= edge:
+        return f"贴着区间下沿（≤{edge:.0%}）"
+    if pos >= 1 - edge:
+        return f"贴着区间上沿（≥{1 - edge:.0%}）"
+    return f"区间中部（{edge:.0%}~{1 - edge:.0%}）"
+
+
 def _prog_direction(rows: list[dict], zone_edge: float = 0.35,
                     trend_follow: bool = True) -> int:
     """程序对方向的**建议**：+1 多 / -1 空 / 0 不动手。
@@ -1924,11 +1939,25 @@ def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
 
 
 def _structure_text(rows: list[dict], zone_edge: float = 0.35,
-                    digits: int = 3, trend_follow: bool = True) -> str:
+                    digits: int = 3, trend_follow: bool = True,
+                    for_exit: bool = False) -> str:
     s = _structure(rows)
     if not s.get("ok"):
         return "结构 数据不足"
-    if s["er"] < ER_RANGE_MAX:
+    if for_exit:
+        # 出场端只报「是什么行情」，不报「该怎么做」。
+        #
+        # 2026-10-29 那笔的账：plan=range（止盈 3.25）锁定了打法，20 分钟后
+        # 一根插针把 ER 从 0.04 顶到 0.74，这里原样塞进 prompt 的
+        # 「趋势市·上行 → 顺势做多，不等回踩」和 plan_text 的「震荡单别指望
+        # 变成趋势」正面打架。模型 13 秒里被问三次、三次都挑后者，从 +4.86
+        # 拿到 -3.90（真实高点 8.30，浮盈 6.9 倍 ATR）。
+        #
+        # 入场端靠这句话选打法，必须留着；出场端打法已经定了，再看一遍
+        # 行情判定只会给它一个反悔的理由。纯结构（ER/位置/形态）仍在。
+        zone = _zone_fact(s["pos"], zone_edge)
+        regime = _regime_word(s["er"], s["drift"])
+    elif s["er"] < ER_RANGE_MAX:
         regime = "震荡市 → 低买高卖（贴下沿做多、贴上沿做空，中间不动手）"
     elif s["er"] > ER_TREND_MIN:
         if not trend_follow:
@@ -1944,7 +1973,8 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35,
     # 阈值改一次就得让它跟着变，各算各的必然对不上。
     pos = s["pos"]
     edge = max(0.0, min(0.49, float(zone_edge)))
-    zone = _zone_text(pos, s["er"], s["drift"], edge, trend_follow)
+    if not for_exit:
+        zone = _zone_text(pos, s["er"], s["drift"], edge, trend_follow)
 
     streak = s["streak"]
     streak_text = f"连阳 {streak} 根" if streak > 0 else (
@@ -2269,7 +2299,7 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
         entry_reason=(position.get("entry_reason") or "未记录")[:120],
         plan_text=plan_text,
         n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
-        structure=_structure_text(w, zone_edge, dg, trend_follow),
+        structure=_structure_text(w, zone_edge, dg, trend_follow, for_exit=True),
         r1=r1, r5=r5, r13=r13,
         lessons=lessons or "暂无复盘笔记。",
         mtf=mtf_text or "",
@@ -3660,6 +3690,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         if gate is not None and not gate.get("close"):
             row = {"ts": now, "kind": "hold", "reason": gate["reason"],
                    "source": gate["source"], "held_sec": held_sec,
+                   "ticket": pos.get("ticket"),
                    "float_pnl": round(float_pnl, 2), "peak_pnl": pos["peak_pnl"],
                    "peak_ts": pos.get("peak_ts")}
             state["last_decision"] = {
@@ -3700,8 +3731,14 @@ def _tick_body(cfg: Cfg, login, now: int,
                 "via": decision.get("via"),
             }
             if not decision.get("close"):
+                # 埋点和闸门那条 hold 行**同口径**：复盘时要能对齐"这一轮浮盈
+                # 多少、峰值摸到过多少、是哪一笔"。2026-10-29 那笔就是因为这里
+                # 只有 reason 文本，得手抠"浮盈+4.86仍有空间"才知道当时过门槛了。
                 row = {"ts": now, "kind": "hold", "reason": decision.get("reason"),
-                       "source": decision.get("source")}
+                       "source": decision.get("source"),
+                       "ticket": pos.get("ticket"), "held_sec": held_sec,
+                       "float_pnl": round(float_pnl, 2),
+                       "peak_pnl": pos["peak_pnl"], "peak_ts": pos.get("peak_ts")}
                 if decision.get("via"):
                     row["via"] = decision["via"]
                 if decision.get("error"):
