@@ -114,8 +114,19 @@ class TestSwitchWritesEnv(unittest.TestCase):
     def test_blank_model_falls_back_to_provider_default(self):
         """模型框留空 = 用该家默认模型，别把空字符串写进 .env。"""
         switch_mod.switch("deepseek", key="k", model="   ")
-        self.assertIn("LLM_MODEL=deepseek-chat",
+        self.assertIn("LLM_MODEL=deepseek-flash",
                       self.env.read_text(encoding="utf-8"))
+
+    def test_deepseek_default_is_not_the_legacy_alias(self):
+        """默认模型必须是官方 /models 里有的名字。
+
+        deepseek-chat 已从模型表里消失（仍能通，但属于未承诺的兼容）。把它留作
+        默认，一旦上游摘掉别名，请求全失败 → 每轮都判「本轮不做」，面板看着在
+        跑、实际一笔不开，且不报错。这条断言就是防这个静默停摆。
+        """
+        spec = switch_mod.PROVIDERS["deepseek"]
+        self.assertEqual(spec["model"], "deepseek-flash")
+        self.assertNotIn("deepseek-chat", spec["models"])
 
     def test_failed_verify_restores_file(self):
         """验证失败必须把文件还原，别把人留在坏配置上。"""

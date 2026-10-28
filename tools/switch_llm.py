@@ -51,9 +51,10 @@ PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "name": "DeepSeek（按量付费，判断质量更好）",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-chat",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
-        "note": "reasoner 不支持 JSON 输出，超短线会自动退回文本解析，慢一倍左右",
+        "model": "deepseek-flash",
+        "models": ["deepseek-flash", "deepseek-v4-pro"],
+        "note": "deepseek-chat 已不在官方模型表里（旧别名，随时可能失效）；"
+                "v4-pro 判断更强但更贵，两者都支持 JSON 输出",
     },
     "siliconflow": {
         "name": "硅基流动（部分开源模型永久免费）",

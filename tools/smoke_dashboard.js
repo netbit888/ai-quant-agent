@@ -69,7 +69,7 @@ global.fetch = async (url, opts) => {
   const u = String(url);
   fetchCalls.push({ url: u, opts });
   if (u.includes('/api/llm/switch')) {
-    return { json: async () => ({ ok: true, model: 'deepseek-chat', reply: '可用', elapsed: 1.5 }) };
+    return { json: async () => ({ ok: true, model: 'deepseek-flash', reply: '可用', elapsed: 1.5 }) };
   }
   if (u.includes('/api/llm')) return { json: async () => llmJson || { ok: false } };
   // 教训库：跨场次统计。返回一段真实形状的文本，用来断言面板把它渲染出来了。
@@ -556,7 +556,7 @@ try {
       { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4',
         default_model: 'glm-4-flash', models: ['glm-4-flash', 'glm-4-air'], note: '' },
       { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com',
-        default_model: 'deepseek-chat', models: ['deepseek-chat', 'deepseek-reasoner'], note: '' },
+        default_model: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'], note: '' },
     ],
   };
   await api.loadLlm();
@@ -573,7 +573,7 @@ try {
   made.atLlmKey.value = '';
   made.atLlmProvider.value = 'deepseek';
   api.onLlmProviderChange();
-  const modelSwitched = String(made.atLlmModel.value || '') === 'deepseek-chat';
+  const modelSwitched = String(made.atLlmModel.value || '') === 'deepseek-flash';
   console.log(`  换供应商自动切默认模型名 ${modelSwitched ? '✓' : '✗'} (${made.atLlmModel.value || '空'})`);
   if (!modelSwitched) failed = true;
 
