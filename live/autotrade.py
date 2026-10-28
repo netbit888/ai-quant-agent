@@ -4489,18 +4489,37 @@ def pending_signal_view(login=None) -> dict:
 
     面板每秒无条件轮询它（不判页面可见性），所以开销必须小到"窗口最小化
     也敢每秒问一次"——这正是它在隐藏状态下仍然生效的前提。
+
+    **没有 worker 在等的时候不返回信号。** 2026-10-29 实机：卡死 → 用户强关
+    → 重启，state 里那条 pending_signal 还在（90 秒还没过期），页面立刻弹出
+    一个"同意做空"的窗。可这个进程里没有任何人在读答复：点了 approve 只会
+    写一个没人消费的文件，弹窗倒计时走完自动消失。人以为自己在授权下单，
+    实际什么都发生过不了——比不弹更糟。
+
+    判据是 `running`（外加进程内 worker 是否真活着）：`_tick_body` 开始就会
+    把 running 写进 state，`_stop` 会清掉；正常等待期间 running 恒为 True。
+    跨进程（CLI 跑 worker、面板只看）时 state 里同样是 True，不会误杀。
     """
     try:
         state = load_state(login)
     except Exception:  # noqa: BLE001
         state = {}
     now = int(time.time())
-    sig = state.get("pending_signal")
+    running = bool(state.get("running"))
+    # 面板重启过、worker 已经不在了，但 state 还写着 running=True：这时候
+    # 信号同样是孤儿，不能因为字段是 True 就发给页面。
+    if running and state.get("owner") == "panel" and not WORKER.alive():
+        running = False
+    sig = state.get("pending_signal") if running else None
     return {
         "ok": True,
         "server_ts": now,
         "assist": bool((state.get("cfg") or {}).get("assist")),
         "running": bool(state.get("running")),
+        # 有信号却发不出去时把原因带上，省得以后又靠猜"为什么没弹"
+        "signal_suppressed": (
+            None if (sig or not state.get("pending_signal"))
+            else ("not_running" if not state.get("running") else "worker_dead")),
         "signal": ({**sig, "remain_sec": max(0, int(sig.get("expires_at") or 0) - now)}
                    if sig else None),
     }
@@ -5219,7 +5238,17 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 人工确认统计：从日志现算，不做缓存——和这个函数里其它指标一个口径。
     # 关心的不是"弹了几次"，而是 aprove_rate：人点同意的比例长期偏低，
     # 说明模型的信号质量差；偏高但期望差，说明人只是跟着模型走。
-    signal_now = state.get("pending_signal")
+    #
+    # **有信号 ≠ 该弹窗。** 2026-10-29 实机：面板卡死 → 强关 → 重启，state 里
+    # 那条 90 秒还没过期的 pending_signal 被原样送到页面，立刻弹出「同意做空」。
+    # 可这个进程里没有任何 worker 在读答复——点 approve 只是写一个没人消费的
+    # 文件，倒计时走完消失。人以为自己授权了一笔单，实际什么都没发生。
+    #
+    # 判据用 running（外加 stale：面板重启后线程早没了，state 却还写着 True）。
+    # 正常等待期间 running 恒为 True；跨进程（CLI 跑 worker、面板只看）时 state
+    # 里也是 True，不会误杀。
+    signal_now = (state.get("pending_signal")
+                  if (running and not stale) else None)
     sig_rows = [r for r in rows if r.get("kind") == "signal"]
     sig_ans: dict[str, int] = {}
     for r in sig_rows:

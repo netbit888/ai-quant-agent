@@ -1188,6 +1188,247 @@ _exit_allowed = threading.Event()   # 置位 = 这次关闭是程序自己发起
 _last_close_ask = 0.0               # 防连点 X 弹两次
 _fullscreen = False
 _over_top = False
+_raise_seq = 0                      # raise_window 的代次，防旧定时器撤掉新置顶
+
+# ---------------------------------------------------------------- 窗口置顶
+# 为什么这两件事要自己调 Win32，而不用 pywebview 的 restore() / on_top：
+#
+#   · restore() 的实现是「无条件 WindowState = Normal」。最大化窗口被信号
+#     叫醒一次就掉成小窗，用户每收一次信号都要手动再最大化一次。
+#     实机复现 12/12 次（每轮 maximize → restore，WindowState 全部变成
+#     Normal），不是偶发。
+#   · on_top 是**直接给 WinForms 控件属性赋值**，而这些桥方法跑在 js_api 的
+#     工作线程上。跨线程改 Form 属性是未定义行为（WinForms 只在 Debug 编译
+#     里检查），Win32 这一层由系统投递，不经过托管层的控件状态。
+#
+# 所以：只动 z 序，只在真的最小化时才还原，窗口的 Max/Normal 状态一个字节
+# 都不碰。
+_SW_RESTORE = 9
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOACTIVATE = 0x0010
+_SWP_NOOWNERZORDER = 0x0200
+_WM_NULL = 0
+_SMTO_BLOCK = 0x0001
+_SMTO_ABORTIFHUNG = 0x0002
+
+_u32_ready = False
+
+
+def _user32():
+    """取 user32 并显式声明参数类型。
+
+    不声明的话 ctypes 会把句柄当 C int 传，64 位下靠"值足够小"侥幸不出错；
+    而 HWND_TOPMOST 是 -1，必须走 c_void_p 才能正确传成 0xFFFFFFFFFFFFFFFF。
+    """
+    global _u32_ready
+    import ctypes
+    from ctypes import wintypes
+
+    u = ctypes.windll.user32
+    if not _u32_ready:
+        u.IsIconic.argtypes = [wintypes.HWND]
+        u.IsIconic.restype = wintypes.BOOL
+        u.IsZoomed.argtypes = [wintypes.HWND]
+        u.IsZoomed.restype = wintypes.BOOL
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.ShowWindow.restype = wintypes.BOOL
+        u.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.UINT]
+        u.SetWindowPos.restype = wintypes.BOOL
+        u.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+        u.SendMessageTimeoutW.restype = wintypes.LPARAM
+        _u32_ready = True
+    return u
+
+
+def _window_hwnd() -> int:
+    """宿主窗口句柄；拿不到返回 0（浏览器模式、窗口没建好、已经销毁）。
+
+    走 `win.native.Handle` 是为了快（信号路径上每来一次都调）。**窗口已经
+    卡死时这条读不到**——窗口过程不回消息，读句柄本身就会挂住。需要探活
+    的地方一律用 `_find_main_hwnd()`。
+    """
+    w = _WINDOW
+    if w is None:
+        return 0
+    try:
+        h = int(w.native.Handle.ToInt32() or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+    return h if h > 0 else 0
+
+
+def _find_main_hwnd() -> int:
+    """纯 Win32 枚举出本进程的主窗口句柄——**窗口卡死时也能返回**。
+
+    两个坑都实测踩过：
+      · `win.native.Handle` 跨线程读 Form 属性，窗口一睡死就一起挂住；
+      · `GetWindowTextLengthW` 同进程内是**发消息**问窗口的（WM_GETTEXTLENGTH），
+        一样会挂。所以这里只读窗口样式位（GetWindowLong 是直接读内存），
+        一个消息都不发。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    u = _user32()
+    if not getattr(u, "_aqa_enum_ready", False):
+        u.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.GetWindowLongW.restype = ctypes.c_long
+        u._aqa_enum_ready = True
+
+    pid = os.getpid()
+    hit: list[int] = []
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    GWL_STYLE, GWL_EXSTYLE = -16, -20
+    WS_CAPTION, WS_VISIBLE = 0x00C00000, 0x10000000
+    WS_EX_TOOLWINDOW = 0x00000080
+
+    def _cb(hwnd, _lp):
+        wpid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value != pid:
+            return True
+        style = u.GetWindowLongW(hwnd, GWL_STYLE)
+        if (style & WS_VISIBLE) != WS_VISIBLE:
+            return True
+        if (style & WS_CAPTION) != WS_CAPTION:      # 无标题栏的辅助窗口不算
+            return True
+        if u.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:
+            return True
+        hit.append(int(hwnd))
+        return False
+
+    try:
+        u.EnumWindows(proc(_cb), 0)
+    except Exception:  # noqa: BLE001
+        return 0
+    return hit[0] if hit else 0
+
+
+def _is_minimized(h: int) -> bool:
+    try:
+        return bool(_user32().IsIconic(h))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _set_topmost(h: int, on: bool) -> None:
+    """只改 z 序：不动位置、不动尺寸、不抢焦点。
+
+    SWP_NOACTIVATE 是刻意的——抢焦点会打断用户正在别处输入的东西，
+    信号需要的是「看得见」，不是「抢走键盘」。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    _user32().SetWindowPos(
+        wintypes.HWND(h),
+        wintypes.HWND(_HWND_TOPMOST if on else _HWND_NOTOPMOST),
+        0, 0, 0, 0,
+        _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_NOOWNERZORDER)
+
+
+# ------------------------------------------------------------- 卡死取证
+# 2026-10-29 00:04 真的卡死过一次（Windows 事件日志 AppHangB1 / python.exe），
+# 事件日志只有"停止响应"，不带任何线程栈，事后完全没法定位。
+# 所以常驻一个探针：每 2 秒问窗口一次"你还在吗"，连续两次没回应就把**所有
+# 线程的 Python 栈**落到 data/logs/ui_hang_*.log。下次卡死有据可查。
+#
+# 用 SendMessageTimeout(SMTO_ABORTIFHUNG) 而不是普通 SendMessage：目标线程
+# 已经卡住时它立刻返回 0，不会把探针自己一起搭进去。
+_hang_dump_lock = threading.Lock()
+_last_hang_dump = 0.0
+
+
+def _ui_responsive(h: int, timeout_ms: int = 700) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    res = ctypes.c_size_t(0)
+    try:
+        rc = _user32().SendMessageTimeoutW(
+            wintypes.HWND(h), _WM_NULL, 0, 0,
+            _SMTO_ABORTIFHUNG | _SMTO_BLOCK, timeout_ms, ctypes.byref(res))
+    except Exception:  # noqa: BLE001
+        return True                  # 探不了就当没事，绝不误报
+    return bool(rc)
+
+
+def _dump_ui_hang(tag: str) -> str | None:
+    """把所有线程的 Python 栈写进 data/logs/，返回文件路径。
+
+    只在卡死/恢复时各写一次，且有 10 分钟冷却——探针自己不能变成刷盘源。
+    """
+    global _last_hang_dump
+    if not _hang_dump_lock.acquire(blocking=False):
+        return None
+    try:
+        if tag == "hung":
+            now = time.time()
+            if now - _last_hang_dump < 600:
+                return None
+            _last_hang_dump = now
+        import faulthandler
+
+        from live import appdirs
+
+        d = appdirs.data_dir() / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"ui_hang_{time.strftime('%Y%m%d-%H%M%S')}_{tag}.log"
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} {tag} "
+                    f"pid={os.getpid()}\n")
+            faulthandler.dump_traceback(file=f, all_threads=True)
+        return str(p)
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        _hang_dump_lock.release()
+
+
+def _start_ui_watchdog() -> None:
+    """窗口线程的响应看门狗（只在 native 模式起，daemon 线程）。"""
+
+    def loop() -> None:
+        h = 0
+        for _ in range(120):          # 最多等 30 秒让窗口建好
+            # 用 EnumWindows：窗口已经卡住时 `win.native.Handle` 会一起挂住，
+            # 那种情况下更要拿到句柄（否则永远等不到第一次探测）。
+            h = _find_main_hwnd()
+            if h:
+                break
+            time.sleep(0.25)
+        if not h:
+            return
+        bad = 0
+        since = 0.0
+        while True:
+            time.sleep(2.0)
+            if not _find_main_hwnd():
+                return                # 窗口没了，探针跟着退
+            if _ui_responsive(h):
+                if bad >= 2:
+                    _dump_ui_hang(f"recovered_after_{int(time.time() - since)}s")
+                bad = 0
+                since = 0.0
+                continue
+            bad += 1
+            if bad == 2:              # 连续两次 = 约 4 秒无响应，够 Windows 判 hung
+                since = time.time()
+                _dump_ui_hang("hung")
+
+    threading.Thread(target=loop, name="ui-watchdog", daemon=True).start()
 
 
 def _dialog_type(name: str) -> int:
@@ -1312,52 +1553,76 @@ class _Bridge:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def set_on_top(self, on):
+        """用户手动的「窗口置顶」开关。
+
+        走 Win32 SetWindowPos 而不是 `_WINDOW.on_top = ...`：pywebview 的
+        on_top 是**直接给 WinForms 控件属性赋值**，而这里跑在 js_api 的
+        工作线程上——跨线程改 Form 属性是未定义行为（WinForms 只在 Debug
+        编译里检查它），最坏把消息泵搅坏。SetWindowPos 由系统投递，不经过
+        托管层的控件状态。
+        """
         global _over_top
-        if _WINDOW is None:
-            return {"ok": False}
+        h = _window_hwnd()
+        if not h:
+            return {"ok": False, "on_top": _over_top}
         try:
-            _WINDOW.on_top = bool(on)
+            _set_topmost(h, bool(on))
             _over_top = bool(on)
             return {"ok": True, "on_top": _over_top}
-        except Exception:  # noqa: BLE001
-            return {"ok": False, "on_top": _over_top}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                    "on_top": _over_top}
 
     def state(self):
         return {"native": _WINDOW is not None, "shell": _SHELL,
                 "fullscreen": _fullscreen, "on_top": _over_top}
 
     def raise_window(self, hold_sec=5):
-        """把窗口还原并短暂置顶——AI 辅助模式的信号弹窗用它喊人。
+        """把窗口叫到前台并短暂置顶——AI 辅助模式的信号弹窗用它喊人。
+
+        **窗口的 Max / Normal 状态不参与判定，只在真的最小化时才还原。**
+        这是修 bug，不是优化：`_WINDOW.restore()` 无论如何都会把窗口设成
+        Normal，于是每收一次信号，最大化的面板就掉成小窗。
 
         为什么不是永久置顶：那是用户自己按的开关（set_on_top），弹窗借用
-        5 秒后就还回去。为什么不是只响铃：面板被最小化或被压在其他窗口后面
+        几秒后就还回去。为什么不是只响铃：面板被最小化或被压在其他窗口后面
         时，光有声音找不到窗口，而信号 90 秒就作废了。
-
-        桥的三条规矩照旧：可 JSON 化、全 try/except、不做慢事。
-        `Timer` 负责恢复，不阻塞调用方。
         """
-        global _over_top
-        if _WINDOW is None:
+        h = _window_hwnd()
+        if not h:
             return {"ok": False, "error": "仅窗口模式支持"}
         try:
-            prev = bool(_over_top)
-            try:
-                _WINDOW.restore()          # 最小化时先还原，否则 on_top 也看不见
-            except Exception:  # noqa: BLE001
-                pass
-            _WINDOW.on_top = True
+            prev_on_top = bool(_over_top)
+            was_min = _is_minimized(h)
+            if was_min:
+                # SW_RESTORE 由系统恢复到「最小化之前」的状态：原本最大化就
+                # 回最大化。这和 pywebview 的 restore() 是两回事。
+                _user32().ShowWindow(h, _SW_RESTORE)
+            if not prev_on_top:          # 本来就置顶着，不用再抬一次
+                _set_topmost(h, True)
             hold = max(1.0, min(60.0, float(hold_sec or 5)))
 
-            def _restore():
-                global _over_top
+            # 代次号：连续两次信号时，第一次的定时器会把第二次刚设上的置顶
+            # 撤掉（实测：hold=1 的 Timer 在 1 秒后正好抹掉下一次的 topmost）。
+            # 只有最新一次的定时器有权撤销。
+            global _raise_seq
+            _raise_seq += 1
+            my_seq = _raise_seq
+
+            def _release():
+                if prev_on_top:
+                    return               # 用户自己开的置顶，别替他关
+                if my_seq != _raise_seq:
+                    return               # 后面还有更新的 raise，交给它收尾
                 try:
-                    _WINDOW.on_top = prev
-                    _over_top = prev
+                    _set_topmost(h, False)
                 except Exception:  # noqa: BLE001
                     pass
 
-            threading.Timer(hold, _restore).start()
-            return {"ok": True, "hold_sec": hold, "restored_to": prev}
+            threading.Timer(hold, _release).start()
+            return {"ok": True, "hold_sec": hold,
+                    "restored_to": prev_on_top, "was_minimized": was_min,
+                    "seq": my_seq}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -1365,6 +1630,7 @@ class _Bridge:
 def _register_window(win) -> None:
     global _WINDOW
     _WINDOW = win
+    _start_ui_watchdog()
 
 
 def _on_window_closing() -> bool:

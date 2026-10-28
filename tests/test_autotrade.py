@@ -4570,9 +4570,16 @@ class TestAssistRuntime(TempLedger):
     def test_summary_exposes_assist_fields(self):
         state = autotrade.load_state()
         state["cfg"] = autotrade.cfg_to_dict(autotrade.Cfg(assist=True))
+        # 信号只有在真有 worker 在等它的时候才会发给页面（见 10-29 孤儿弹窗），
+        # 所以这里要把 running 和"本进程有活线程"一起造出来。
+        state["running"] = True
+        state["owner"] = "panel"
         state["pending_signal"] = _sig(wait=60)
         autotrade.save_state(state)
-        s = autotrade.summary()
+        worker = mock.Mock()
+        worker.alive.return_value = True
+        with mock.patch.object(autotrade, "WORKER", worker):
+            s = autotrade.summary()
         self.assertTrue(s["assist"])
         self.assertIsNotNone(s["pending_signal"])
         self.assertGreater(s["pending_signal"]["remain_sec"], 0)
