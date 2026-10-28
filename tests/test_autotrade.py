@@ -4604,5 +4604,203 @@ class TestAssistRuntime(TempLedger):
         self.assertIsNone(s["pending_signal"])
 
 
+class TestHardStopLessonReachesEntry(TempLedger):
+    """被硬止损砍掉的单，教训不许只归出场端。
+
+    实测 2026-10-28：21:46 写下「破 4047.4 双底立即止损」（模型标 scope=exit），
+    22:07 在 4047.44 又接了一笔多（-3.15）——因为那条教训根本进不了入场提示词。
+    根因是出场那一刻是程序按 sl_usd 砍的，模型没有出场决策权，
+    把它锁在出场端等于这条教训永远影响不到下一次入场。
+    """
+
+    def _rows(self, n=60):
+        return [bar(4000 + i, 4001 + i, 3999 + i, 4000.0 + i, NOW + i * 60)
+                for i in range(n)]
+
+    def _review(self, exit_source, reply):
+        pos = {"ticket": 1, "direction": 1, "lots": 0.01, "price_open": 4000.0,
+               "entry_reason": "贴下沿做多", "exit_reason": "硬止损",
+               "exit_source": exit_source, "opened_at": NOW}
+        with mock.patch.object(autotrade, "_bars", return_value=self._rows()), \
+             mock.patch("agent.llm.chat_ex", return_value=(reply, {})):
+            return autotrade.ask_review(autotrade.Cfg(review=True), pos,
+                                        3997.0, -3.0, NOW, NOW + 20 * 60,
+                                        exit_source=exit_source)
+
+    def test_sl_close_forces_scope_both(self):
+        res = self._review("sl", '{"scope":"exit","theme":"止损太晚",'
+                                 '"lesson":"接双底多单后破位，下次破位立刻止损"}')
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["scope"], "both")
+        self.assertEqual(res["src"], "sl")
+        self.assertEqual(res["theme"], "止损太晚")     # 主题不动，只放开端
+
+    def test_model_close_keeps_exit_scope(self):
+        """模型自己平的仓：出场确实是它的决策，照旧归出场端。"""
+        res = self._review("llm", '{"scope":"exit","theme":"止损太晚",'
+                                  '"lesson":"砍晚了"}')
+        self.assertEqual(res["scope"], "exit")
+        self.assertEqual(res["src"], "")
+
+    def test_sl_lesson_reaches_entry_prompt(self):
+        """端到端：这条教训必须出现在入场端，出场端也要在。"""
+        autotrade.append_lesson({
+            "ts": NOW, "lesson": "接双底多单后破位，下次破 4047.4 立刻止损",
+            "theme": "止损太晚", "scope": "both", "src": "sl",
+            "verdict": "late", "regime": "range"})
+        self.assertIn("4047.4", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("4047.4", autotrade.recent_lessons(scope="exit"))
+
+    def test_non_sl_exit_lesson_still_blocked(self):
+        """没有 sl 标记的出场教训，入场端照旧不许看到（分域规则不倒退）。"""
+        autotrade.append_lesson({
+            "ts": NOW, "lesson": "接双底多单后破位", "theme": "止损太晚",
+            "scope": "both", "regime": "range"})
+        self.assertIn("暂无", autotrade.recent_lessons(scope="entry"))
+        self.assertIn("接双底", autotrade.recent_lessons(scope="exit"))
+
+    def test_sl_lesson_says_who_closed_it(self):
+        """注入文本要说明"这笔不是你平的"，否则模型会读成"下次早点平"。"""
+        autotrade.append_lesson({
+            "ts": NOW, "lesson": "接双底多单后破位", "theme": "止损太晚",
+            "scope": "both", "src": "sl", "regime": "range"})
+        s = autotrade.recent_lessons(scope="entry")
+        self.assertIn("硬止损砍的", s)
+        self.assertIn("该不该进", s)
+
+    def test_exit_source_survives_the_queue(self):
+        """平仓 → 排队 → 复盘，exit_source 一路不许丢。"""
+        state = autotrade._empty_state()
+        pos = {"ticket": 88, "direction": 1, "lots": 0.01, "price_open": 4000.0,
+               "entry_reason": "贴下沿", "exit_reason": "硬止损：浮亏 -3.14",
+               "exit_source": "sl", "opened_at": NOW - 300}
+        autotrade.queue_review(state, autotrade.Cfg(review=True), pos, 3997.0,
+                               -3.14, NOW)
+        item = state["pending_reviews"][0]
+        self.assertEqual(item["exit_source"], "sl")
+        autotrade.save_state(state)
+        with mock.patch.object(autotrade, "ask_review",
+                               return_value={"ok": True, "lesson": "接刀破位",
+                                             "theme": "止损太晚", "scope": "both",
+                                             "src": "sl", "bars": 15,
+                                             "regime": "range"}) as spy:
+            autotrade.process_due_reviews(autotrade.Cfg(review=True),
+                                          NOW + 60 * 60)
+        self.assertEqual(spy.call_args.kwargs["exit_source"], "sl")
+        # 落盘的行和教训库都要带 src，否则注入端认不出来
+        row = [r for r in autotrade.read_log() if r.get("kind") == "review"][0]
+        self.assertEqual(row["src"], "sl")
+        self.assertEqual(autotrade.lesson_rows()[0]["src"], "sl")
+
+
+class TestBackfillSlSrc(TempLedger):
+    """老教训没有 src 字段：按流水的 close 行回填，救回被锁在出场端的那批。"""
+
+    def _seed(self, source, scope="exit"):
+        autotrade.append_log({"ts": NOW, "kind": "close", "ticket": 7,
+                              "direction": 1, "pnl": -3.0, "source": source})
+        autotrade.append_lesson({"ts": NOW, "ticket": 7, "lesson": "接刀后破位",
+                                 "theme": "止损太晚", "scope": scope,
+                                 "regime": "range"})
+
+    def test_sl_closed_ticket_gets_marked(self):
+        self._seed("sl")
+        res = autotrade.backfill_sl_src()
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["changed"], 1)
+        rows = autotrade.lesson_rows()
+        self.assertEqual(rows[0]["src"], "sl")
+        self.assertEqual(rows[0]["scope"], "both")   # 出场端锁死的话标记了也没用
+        self.assertIn("接刀后破位", autotrade.recent_lessons(scope="entry"))
+
+    def test_idempotent(self):
+        self._seed("sl")
+        self.assertEqual(autotrade.backfill_sl_src()["changed"], 1)
+        self.assertEqual(autotrade.backfill_sl_src()["changed"], 0)
+
+    def test_model_closed_ticket_untouched(self):
+        """模型自己平的仓，出场是它的决策，不许被回填成 sl。"""
+        self._seed("llm")
+        self.assertEqual(autotrade.backfill_sl_src()["changed"], 0)
+        self.assertFalse(autotrade.lesson_rows()[0].get("src"))
+
+    def test_no_lessons_file(self):
+        self.assertFalse(autotrade.backfill_sl_src()["ok"])
+
+
+class TestMtfConflictAdvice(unittest.TestCase):
+    """中期方向与这笔相反 → 给建议（默认不拦）。
+
+    实测 2026-10-28 本场：两笔亏损开仓时 M5 净变动 -7.72 / -7.11，
+    唯一赢的那笔（上沿做空）M5 只有 -2.45。M1 判震荡就允许"贴下沿做多"，
+    中期方向在这套打法里没有发言权——这是漏洞。
+    """
+
+    def _feat(self, regime="range", drift=-7.1, gap=-2.0):
+        return {"regime": regime, "pos": 0.34,
+                "mtf": {"tf": "M5", "drift": drift, "er": 0.37},
+                "ma28_gap": gap, "ma28_side": -1}
+
+    def test_long_against_m5_downtrend_is_flagged(self):
+        a = autotrade._entry_advice(autotrade.Cfg(), 1, self._feat(), "贴下沿做多", True)
+        self.assertIsNotNone(a)
+        self.assertEqual(a[0], "mtf_conflict")
+        self.assertIn("-7.10", a[1])
+        self.assertIn("逆着中期接刀", a[1])
+
+    def test_short_with_m5_downtrend_is_fine(self):
+        """顺着中期方向做空：赢的那笔就是这个形态，不许误伤。"""
+        a = autotrade._entry_advice(autotrade.Cfg(), -1, self._feat(drift=-2.45),
+                                    "贴上沿做空", True)
+        self.assertIsNone(a)
+
+    def test_mild_drift_is_not_flagged(self):
+        """M5 只有 -2.45 算走平，不到 5.0 的门槛就不开口。"""
+        a = autotrade._entry_advice(autotrade.Cfg(), 1, self._feat(drift=-2.45),
+                                    "贴下沿做多", True)
+        self.assertIsNone(a)
+
+    def test_short_against_m5_uptrend_is_flagged(self):
+        a = autotrade._entry_advice(autotrade.Cfg(), -1, self._feat(drift=6.2),
+                                    "贴下沿做空", True)
+        self.assertIsNotNone(a)
+        self.assertEqual(a[0], "mtf_conflict")
+        self.assertIn("上行", a[1])
+
+    def test_trend_regime_not_flagged(self):
+        """趋势市本来就是顺势打法，由 prog_dir 管，这条不插手。"""
+        a = autotrade._entry_advice(autotrade.Cfg(), 1, self._feat(regime="trend"),
+                                    "顺势做多", True)
+        self.assertIsNone(a)
+
+    def test_missing_mtf_is_not_flagged(self):
+        self.assertIsNone(autotrade._entry_advice(
+            autotrade.Cfg(), 1, {"regime": "range", "pos": 0.34}, "贴下沿", True))
+
+    def test_advice_only_unless_switch_is_on(self):
+        """默认只建议不拦；开关打开才升级成闸门。"""
+        cfg = autotrade.Cfg()
+        self.assertFalse(autotrade._gate_blocks(cfg, "mtf_conflict"))
+        self.assertTrue(autotrade._gate_blocks(
+            autotrade.Cfg(mtf_conflict=True), "mtf_conflict"))
+
+    def test_real_session_replay(self):
+        """本场三笔真实特征回放：两笔亏损命中，赢的那笔不命中。"""
+        losers = [
+            {"direction": 1, "regime": "range", "mtf": {"drift": -7.715},
+             "ma28_gap": -3.47},
+            {"direction": 1, "regime": "range", "mtf": {"drift": -7.105},
+             "ma28_gap": -1.98},
+        ]
+        winner = {"direction": -1, "regime": "range", "mtf": {"drift": -2.45},
+                  "ma28_gap": 0.17}
+        for f in losers:
+            a = autotrade._entry_advice(autotrade.Cfg(), f["direction"], f,
+                                        "贴下沿做多", True)
+            self.assertEqual(a[0] if a else None, "mtf_conflict")
+        self.assertIsNone(autotrade._entry_advice(
+            autotrade.Cfg(), winner["direction"], winner, "贴上沿做空", True))
+
+
 if __name__ == "__main__":
     unittest.main()

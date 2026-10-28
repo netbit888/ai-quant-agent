@@ -209,6 +209,9 @@ class Cfg:
     #   开仓行会带 `would_veto` 字段，事后能按这个分桶算"听了程序 vs 没听"的期望。
     act_guard: bool = False
     top_long_ban: bool = False
+    # mtf_conflict：M1 判震荡、但 M5 净变动明显和这笔方向相反时给建议。
+    # 同样默认关，理由同上。
+    mtf_conflict: bool = False
     # 是否把 tick 级（逐笔 bid/ask）数据喂给模型。关掉可省 token 和一次数据查询。
     ticks: bool = True
     # 信号强度门槛：|p_up - 0.5| 低于这个值就不开仓。
@@ -467,6 +470,50 @@ def migrate_lessons(login: int | str | None = None) -> dict:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
     return {"ok": True, "migrated": len(rows), "files": len(list(acc.glob("autotrade_log*.jsonl")))}
+
+
+def backfill_sl_src(login: int | str | None = None) -> dict:
+    """给历史上「被硬止损砍掉」的单留下的教训补 `src="sl"`（幂等）。
+
+    为什么要回填：分域注入在 2026-10-28 之前不分 sl，那一批教训的 scope
+    全是 exit，被 `_scope_ok` 永久挡在入场端外面——21:46 写下「破 4047.4
+    双底立即止损」，22:07 就在 4047.44 又接了一笔多，因为入场提示词里
+    根本读不到它。改代码只对新数据生效，库里那批老教训要靠回填才能救回来。
+
+    判据不猜文本，直接查流水：close 行 `source == "sl"` 的 ticket 就是硬止损平的。
+    幂等：`src` 已经有值的不动；重复跑不会重复计数。
+    """
+    p = lessons_path(login)
+    if not p.exists():
+        return {"ok": False, "error": "教训库文件不存在"}
+    acc = paths.account_dir(paths.resolve_login(login))
+    sl_tickets: set = set()
+    for f in sorted(acc.glob("autotrade_log*.jsonl")):
+        for r in _read_jsonl(f):
+            if r.get("kind") == "close" and r.get("source") == "sl":
+                t = r.get("ticket")
+                if t:
+                    sl_tickets.add(t)
+    if not sl_tickets:
+        return {"ok": True, "checked": 0, "changed": 0, "sl_tickets": 0}
+
+    rows = _read_jsonl(p)
+    changed = 0
+    for r in rows:
+        if r.get("src"):            # 已标过的不动，保证幂等
+            continue
+        if r.get("ticket") in sl_tickets:
+            r["src"] = "sl"
+            # 出场端锁死的话，标记了也进不了入场提示词（domain 端要 both）。
+            if r.get("scope") == "exit":
+                r["scope"] = "both"
+            changed += 1
+    if changed:
+        with p.open("w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    return {"ok": True, "checked": len(rows), "changed": changed,
+            "sl_tickets": len(sl_tickets)}
 
 
 # ------------------------------------------------------------------ 解析模型输出
@@ -1599,6 +1646,11 @@ def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
 # 实测赢单的 reason 里全是"收阳企稳""连阳止跌""回踩到位符合贴边做多"，
 # 把裸词收进来会把赚钱的单一起挡掉（10-27 那轮 +4.00 / +4.04 / +5.12 三笔
 # 的 reason 都含"企稳/止跌"，正好会被误伤）。
+# 跨周期冲突的判据阈值：M5 窗口净变动（drift）达到这个幅度，才算"中期有方向"。
+# M1 十四根窗口的振幅中位约 1.5 USD，M5 的 drift 到 5 USD 已经是单边推进。
+# **样本支撑很弱**（历史带 M5 字段的只有 26 笔），所以这条只做建议不做闸门。
+MTF_CONFLICT_DRIFT = 5.0
+
 _HESITATE_WORDS = (
     "等确认", "等企稳", "等止跌", "等收阳", "等收阴", "等回踩", "等反抽",
     "等回抽", "等放量", "等突破", "等信号",
@@ -1659,6 +1711,33 @@ def _entry_advice(cfg: Cfg, direction: int, feat: dict,
                     f"贴上沿做多：入场收盘位置 {float(pos):.2f} ≥ {line:.2f}，"
                     f"买在窗口最高处。上涨趋势里贴上沿是强势延续不是超买，"
                     f"此处追多＝接最后一棒；等回踩到下沿再低吸")
+    # 建议 3：中期方向与这笔相反（跨周期冲突）。
+    #
+    # 实测 2026-10-28 22:07 那笔：M1 ER=0.2359 判震荡 → 打法允许「贴下沿做多」，
+    # 而同一时刻 M5 净变动 -7.11、价格在 MA28 下方 -1.98——中期是单边下行，
+    # 所谓"下沿"其实是下跌途中的一个台阶。这笔 -3.15 硬止损，和 21:34 那笔
+    # （M5 -7.72 / ma28_gap -3.47，也是 -3.15）一模一样。
+    # 打法规则只看 M1 的 ER，中期方向在这套规则里没有发言权，这是漏洞不是噪音。
+    #
+    # 阈值定 5.0 的依据（**样本很小，只够当提示不够当规律**）：
+    # 历史带 M5 特征的 26 笔里，M5 ≤ -5 时做多 5 笔均值 -1.88、做空 4 笔 -1.03；
+    # 而赢的那笔（21:52 上沿做空）M5 只有 -2.45。
+    if feat.get("regime") == "range":
+        mtf = feat.get("mtf") or {}
+        drift = mtf.get("drift")
+        if drift is not None:
+            try:
+                drift = float(drift)
+            except (TypeError, ValueError):
+                drift = None
+        if drift is not None and abs(drift) >= MTF_CONFLICT_DRIFT and direction * drift < 0:
+            side = "下行" if drift < 0 else "上行"
+            act_text = "做多" if direction > 0 else "做空"
+            return ("mtf_conflict",
+                    f"中期方向冲突：M5 净变动 {drift:+.2f}（明显{side}），"
+                    f"与这笔{act_text}相反。M1 判震荡只是短期没方向，"
+                    f"中期在{side}，此时贴边{act_text}＝逆着中期接刀；"
+                    f"要么顺着中期做，要么等中期走平")
     return None
 
 
@@ -1672,6 +1751,8 @@ def _gate_blocks(cfg: Cfg, code: str) -> bool:
         return bool(cfg.act_guard)
     if code == "top_long_ban":
         return bool(cfg.top_long_ban)
+    if code == "mtf_conflict":
+        return bool(cfg.mtf_conflict)
     return False
 
 
@@ -2237,8 +2318,22 @@ def build_review_prompt(rows: list[dict], position: dict, exit_price: float,
 
 
 def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
-               opened_at: int, closed_at: int, login=None) -> dict:
-    """平仓满 7 根之后要一句复盘。失败就返回空，绝不影响主流程。"""
+               opened_at: int, closed_at: int, login=None,
+               exit_source: str = "") -> dict:
+    """平仓满 7 根之后要一句复盘。失败就返回空，绝不影响主流程。
+
+    `exit_source` = 谁发起的这次平仓（"sl" / "llm" / "timeout" / "panel"）。
+    **"sl"（程序硬止损）是特殊情况**：出场那一刻不是模型选的，是代码按
+    sl_usd 砍的，模型从头到尾没有出场决策权。这时候复盘却把它归成
+    「止损太晚 · scope=exit」——出场端的错误模型根本无从改起，
+    而真正该学的「这个位置/方向当初就不该开」被锁在出场端，
+    永远进不了下一次入场的提示词（实测 2026-10-28 22:07：上一笔 21:46
+    刚写下「破 4047.4 双底立即止损」，下一笔又在 4047.44 接多，
+    因为那条教训 scope=exit，入场端压根看不到）。
+
+    所以 sl 平仓强制升级成 scope="both"，并在返回里标 `src="sl"`，
+    注入端的 `_scope_ok` 凭这个标记放行到入场端。
+    """
     tf_sec = 60
     held_sec = max(0, int(closed_at) - int(opened_at or closed_at))
     # 要覆盖「平仓前 7 根 + 平仓后 7 根」，再留几根余量。
@@ -2294,10 +2389,19 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
     else:
         lesson_extra = ""
 
+    scope = parsed["scope"]
+    src = ""
+    if str(exit_source or "").lower() == "sl" and scope != "both":
+        # 出场不是模型决定的 → 这条教训不能只归出场端，否则入场永远学不到。
+        scope = "both"
+        src = "sl"
+    elif str(exit_source or "").lower() == "sl":
+        src = "sl"
+
     return {"ok": True, "lesson": parsed["lesson"], "theme": theme,
-            "scope": parsed["scope"], "bars": len(window),
+            "scope": scope, "bars": len(window),
             "verdict": verdict, "counterfact": cf, "lesson_extra": lesson_extra,
-            "regime": regime_of(pre_close)}
+            "regime": regime_of(pre_close), "src": src}
 
 
 def _norm_lesson(text: str) -> str:
@@ -2525,8 +2629,12 @@ def lesson_clusters(login=None) -> list[dict]:
         if b is None:
             b = buckets[key] = {"name": name, "domain": sc, "count": 0,
                                 "lesson": text, "ts": ts, "regimes": {},
-                                "verified": 0}
+                                "verified": 0, "sl": 0}
         b["count"] += 1
+        # sl = 这个桶里有几条是**被硬止损砍掉**的单留下的。
+        # 出场那一刻不是模型决定的，这类教训两端都要看（见 _scope_ok）。
+        if str(r.get("src") or "") == "sl":
+            b["sl"] += 1
         # verified = 这条桶里有几条**过了反事实检验**。
         # 只认落盘的 verdict 字段，不认 row_verdict 的文本推断——
         # 推断出来的方向没有对照行情，不能当"已验证"。
@@ -2572,7 +2680,12 @@ def _scope_ok(c: dict, scope: str) -> bool:
         return True
     td = THEME_DOMAIN.get(c.get("name") or "", "")
     if td and td != scope:        # 主题本身就是另一端的错，直接拦掉
-        return False
+        # 例外：硬止损留下的教训。出场时刻是程序按 sl_usd 砍的，模型没有
+        # 出场决策权，把这条锁在出场端等于它永远影响不到下一次入场——
+        # 实测 2026-10-28：21:46 写下「破 4047.4 双底立即止损」（scope=exit），
+        # 22:07 在 4047.44 又接了一笔多，因为入场提示词里根本没有这句话。
+        if not (scope == "entry" and c.get("sl")):
+            return False
     return c.get("domain") in ("both", scope)
 
 
@@ -2730,6 +2843,11 @@ def recent_lessons(login=None, n: int = 3, ignore_cost: bool = True,
             lt = _lesson_tail(c.get("name"))
             if lt:
                 line += f"\n  {lt}"
+            if c.get("sl"):
+                # 这条来自被硬止损砍掉的单：出场那一刻是程序决定的，
+                # 不写清楚，模型会把它读成"下次早点平"，而真正该问的是该不该开。
+                line += ("\n  （这笔是硬止损砍的，出场时机不是你选的——"
+                         "重点看当初这个位置/方向该不该进）")
             lines.append(line)
         blocks.append("你从自己的交易里总结出的教训，按重复次数排序（次数越多越可能是"
                       "真规律，只出现一次的别当铁律）：\n" + "\n".join(lines))
@@ -2751,7 +2869,8 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
     closed_at = int(closed_at)
     try:
         res = ask_review(cfg, pos, exit_price, pnl,
-                         int(pos.get("opened_at") or closed_at), closed_at, login)
+                         int(pos.get("opened_at") or closed_at), closed_at, login,
+                         exit_source=pos.get("exit_source") or "")
     except Exception as exc:  # noqa: BLE001
         res = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -2772,6 +2891,8 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
         # 追加一句校正，免得以后翻文本时又把它当成"该多拿"的证据。
         row["verdict"] = res.get("verdict") or ""
         row["counterfact"] = res.get("counterfact") or ""
+        # 平仓发起方（sl = 程序硬止损）。硬止损的教训两端都要看，见 _scope_ok。
+        row["src"] = res.get("src") or ""
         extra = res.get("lesson_extra") or ""
         if extra and row.get("lesson"):
             row["lesson"] = f"{row['lesson']}{extra}"
@@ -2788,7 +2909,7 @@ def _do_review(cfg: Cfg, pos: dict, exit_price: float, pnl: float,
             "counterfact": row.get("counterfact") or "",
             "regime": row.get("regime") or "", "pnl": row.get("pnl"),
             "direction": row.get("direction"), "source": "live",
-            "closed_at": closed_at,
+            "src": row.get("src") or "", "closed_at": closed_at,
         }, login)
     return row
 
@@ -2816,6 +2937,8 @@ def queue_review(state: dict, cfg: Cfg, pos: dict, exit_price: float,
         "price_open": pos.get("price_open"),
         "entry_reason": pos.get("entry_reason"),
         "exit_reason": pos.get("exit_reason"),
+        # 平仓发起方。复盘要拿它决定这条教训归出场端还是两端都看。
+        "exit_source": pos.get("exit_source") or "",
         "opened_at": pos.get("opened_at"),
         "closed_at": int(closed_at),
         "exit_price": float(exit_price),
@@ -2846,6 +2969,7 @@ def process_due_reviews(cfg: Cfg, now: int, login=None) -> list[dict]:
                "lots": item.get("lots"), "price_open": item.get("price_open"),
                "entry_reason": item.get("entry_reason"),
                "exit_reason": item.get("exit_reason"),
+               "exit_source": item.get("exit_source") or "",
                "opened_at": item.get("opened_at")}
         row = _do_review(cfg, pos, float(item.get("exit_price") or 0.0),
                          float(item.get("pnl") or 0.0),
@@ -3590,6 +3714,10 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         # 平仓之后才允许回看更长的一段，但**要等 7 根 K 线**才复盘：
         # 排进队列，这期间照常分析行情、照常开下一笔。
         pos["exit_reason"] = decision.get("reason") or ""
+        # 谁发起的平仓（sl / llm / timeout / panel）。复盘要靠它判断
+        # 「出场这一端到底有没有模型的决策」——被硬止损砍掉的单，
+        # 出场时机不是模型选的，复盘不能再把账算到出场头上（见 ask_review）。
+        pos["exit_source"] = decision.get("source") or ""
         queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
         save_state(state, login)
         return row
