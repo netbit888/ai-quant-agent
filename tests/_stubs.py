@@ -14,8 +14,12 @@ import 阶段直接抛 ModuleNotFoundError，测试套件永远红着——永�
 
 from __future__ import annotations
 
+import os
 import sys
 import types
+
+# 进程级临时数据根。None = 还没隔离过。
+_TEST_ROOT: str | None = None
 
 
 class _StubOpenAI:
@@ -23,6 +27,50 @@ class _StubOpenAI:
 
     def __init__(self, *args, **kwargs):
         raise RuntimeError("测试桩：不应真实创建 OpenAI 客户端，请 mock agent.llm.chat_ex")
+
+
+def isolate_test_data_root() -> str | None:
+    """把实盘数据根**默认**指到进程级临时目录。
+
+    为什么
+    ------
+    `_degrade`（`_point` / `_digits` 算不出来时的兜底留痕）会走 `append_log`，
+    直接写真实账本。2026-10-29 在 `autotrade_log.jsonl` 里查出 23 条
+    `symbol="WHATEVER"` 的 degrade 行，时间跨度 23:20→02:55，正是几次全量
+    测试跑出来的——**它们不难看，但会污染复盘检索**（按品种筛的时候混进来）。
+
+    靠每个 TestCase 自己在 setUp 里 `set_root` 是不现实的：漏一个就脏一次，
+    而且脏得毫无提示。所以反过来——**默认全隔离**，需要真实数据的用例显式
+    `paths.set_root(None)` 拿回默认路径。
+
+    `AQA_DATA_DIR` 已设（CI、手动排查、想复现真实账本）时一律尊重，不覆盖。
+
+    **必须走环境变量、不能只调 `paths.set_root(tmp)`**：几十个 TestCase 的
+    tearDown 都是 `paths.set_root(None)`，而 None 会重算 `appdirs.data_dir()`
+    ——只 set_root 的话，每跑完一个用例就被拉回真实账本，下一个用例在 setUp
+    之前触发的兜底留痕照样写脏。设了 AQA_DATA_DIR，`set_root(None)` 才落在
+    隔离目录里。
+
+    返回临时目录路径；已有隔离或用户显式指定时返回 None。
+    """
+    global _TEST_ROOT
+    if _TEST_ROOT is not None:
+        return None
+    if os.environ.get("AQA_DATA_DIR"):
+        return None
+
+    import atexit
+    import shutil
+    import tempfile
+
+    _TEST_ROOT = tempfile.mkdtemp(prefix="aqa-test-data-")
+    atexit.register(shutil.rmtree, _TEST_ROOT, True)
+
+    os.environ["AQA_DATA_DIR"] = _TEST_ROOT
+    from live import paths
+
+    paths.set_root(None)
+    return _TEST_ROOT
 
 
 def install_missing_stubs() -> None:
@@ -64,3 +112,12 @@ def install_missing_stubs() -> None:
             openai = types.ModuleType("openai")
             openai.OpenAI = _StubOpenAI
             sys.modules["openai"] = openai
+
+    # 顺手做数据隔离：所有测试模块 import 时都会走到这里，比逐文件加更可靠。
+    try:
+        isolate_test_data_root()
+    except Exception as exc:  # noqa: BLE001
+        # 隔离失败不能让整个套件在 import 阶段就崩，但必须喊一声——
+        # 静默失败的结果就是又往真实账本里写了一批脏记录。
+        print(f"WARN: 测试数据目录隔离失败，可能写入真实账本：{exc}",
+              file=sys.stderr)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests._stubs import install_missing_stubs
@@ -92,6 +93,41 @@ class TestSpreadCostHonesty(TempLedger):
         with mock.patch("backtest.symbols.spread_cost_usd", return_value=0.24):
             self.assertAlmostEqual(autotrade._spread_cost("XAUUSDm", 0.01), 0.24)
         self.assertEqual(self.degrade_rows(), [])
+
+
+class TestDataIsolation(unittest.TestCase):
+    """测试进程的数据根**不能**落在仓库的 data/ 下。
+
+    2026-10-29 的实际后果：`autotrade_log.jsonl` 里混进 24 条
+    `symbol="WHATEVER"` 的 degrade 行，`_digits` / `_point` 的兜底留痕直接写进
+    真实账本。它不影响任何统计，但按品种筛复盘时会混进来，且看日志的人无从
+    分辨哪些是测试造的。
+
+    根因不是"某个测试忘了 setUp"，而是几十个用例的 tearDown 都写
+    `paths.set_root(None)`——None 会重算 `appdirs.data_dir()`，没设
+    `AQA_DATA_DIR` 就等于把根拉回真实账本。所以这里钉两件事：默认根在临时
+    目录，且 `set_root(None)` 之后仍在临时目录。
+    """
+
+    def test_root_is_not_repo_data_dir(self):
+        repo_data = (Path(__file__).resolve().parent.parent / "data").resolve()
+        live = Path(paths.LIVE_DIR).resolve()
+        self.assertFalse(
+            str(live).startswith(str(repo_data)),
+            f"测试数据根落在仓库 data/ 下（{live}），会写脏真实账本")
+
+    def test_set_root_none_stays_isolated(self):
+        """各个 TestCase 的 tearDown 都是 set_root(None)，恢复后必须仍隔离。"""
+        repo_data = (Path(__file__).resolve().parent.parent / "data").resolve()
+        before = paths.LIVE_DIR
+        try:
+            paths.set_root(None)
+            live = Path(paths.LIVE_DIR).resolve()
+            self.assertFalse(
+                str(live).startswith(str(repo_data)),
+                f"set_root(None) 把数据根拉回了真实账本（{live}）")
+        finally:
+            paths.set_root(before)
 
 
 if __name__ == "__main__":
