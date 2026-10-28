@@ -79,11 +79,17 @@ def call(fn, *args, **kwargs):
         tick = mt5_call(_mt5().symbol_info_tick, symbol)
 
     比 `with mt5_lock():` 好在调用点短、不会漏掉 return 那一行。
+
+    **kwargs 为空时必须写成 `fn(*args)`，不能写 `fn(*args, **kwargs)`。**
+    MetaTrader5 是 C 扩展，`f(*a, **{})` 走的是带关键字字典的调用形式，
+    交易类函数（order_send / order_check）会直接返回 None 并把 last_error
+    置成 -2「Unnamed arguments not allowed」——不报异常，就是拿不到结果。
+    行情类函数侥幸不受影响，所以这个坑只在真下单时暴露。
     """
     if _connecting.is_set():
         raise MT5Busy("MT5 正在连接，稍后重试")
     with _lock:
-        return fn(*args, **kwargs)
+        return fn(*args, **kwargs) if kwargs else fn(*args)
 
 
 def call_quick(fn, *args, timeout: float = 0.4, default=None, **kwargs):
@@ -92,6 +98,8 @@ def call_quick(fn, *args, timeout: float = 0.4, default=None, **kwargs):
     专给「这一轮拿不到也没关系」的路径：止损快查、面板状态轮询。
     跳过的次数记在 `busy_stats()` 里——它接近 0 说明锁没成为瓶颈；
     持续增长说明有调用点忘了把慢活挪出锁。
+
+    参数转发的原因同上：空 kwargs 不能展开成 `**{}`。
     """
     if _connecting.is_set():
         _note_busy()
@@ -100,7 +108,7 @@ def call_quick(fn, *args, timeout: float = 0.4, default=None, **kwargs):
         _note_busy()
         return default
     try:
-        return fn(*args, **kwargs)
+        return fn(*args, **kwargs) if kwargs else fn(*args)
     finally:
         _lock.release()
 

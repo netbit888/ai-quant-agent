@@ -358,5 +358,51 @@ class TestOpenMarketKeepsDiskOutOfLock(unittest.TestCase):
         self.assertFalse(seen["owned"], "写盘时还持有 MT5 锁")
 
 
+class TestEmptyKwargsMustNotBeExpanded(unittest.TestCase):
+    """回归（2026-10-28 实盘事故）：空 kwargs 不能展开成 `**{}`。
+
+    MT5 是 C 扩展。`f(*a, **{})` 走的是带关键字字典的调用形式，交易类函数
+    （`order_send` / `order_check`）会直接返回 None，`last_error` 变成
+    -2「Unnamed arguments not allowed」——不抛异常，只是拿不到结果。
+
+    更麻烦的是**只读函数不敏感**：`symbol_info_tick` 照常返回报价，所以面板
+    看起来一切正常，只有下单静默失败（流水里是 `retcode=None`）。实盘上就
+    表现为"每笔开仓都失败、每笔平仓都失败"。
+
+    这里锁住实现形态：kwargs 为空必须退化成纯位置调用。用源码断言而不是
+    行为断言，是因为 Python 层区分不出 `f(x)` 和 `f(x, **{})`，只有 C 扩展
+    能感知——而 CI 里没有终端。
+    """
+
+    def test_call_degrades_to_positional(self):
+        import inspect
+
+        from live import mt5lock
+
+        self.assertIn("if kwargs else fn(*args)", inspect.getsource(mt5lock.call))
+
+    def test_call_quick_degrades_to_positional(self):
+        import inspect
+
+        from live import mt5lock
+
+        self.assertIn("if kwargs else fn(*args)", inspect.getsource(mt5lock.call_quick))
+
+    def test_arguments_still_reach_fn(self):
+        """退化成一位置调用不许把参数丢了。"""
+        from live import mt5lock
+
+        got: dict = {}
+
+        def fn(a, b=0):
+            got["a"], got["b"] = a, b
+            return a + b
+
+        self.assertEqual(mt5lock.call(fn, 1, b=2), 3)
+        self.assertEqual(got, {"a": 1, "b": 2})
+        self.assertEqual(mt5lock.call(fn, 5), 5)
+        self.assertEqual(mt5lock.call_quick(fn, 7, timeout=1.0), 7)
+
+
 if __name__ == "__main__":
     unittest.main()
