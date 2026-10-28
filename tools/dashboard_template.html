@@ -1399,6 +1399,8 @@
             title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。决策间隔是 60 秒，这中间价格能跑完一整根 M1，止损会超调">止损快查 <b id="atGateGuardV">每 5 秒</b></span>
       <span class="at-gate tp" id="atGateTp"
             title="浮盈没到这个数就不平、也不调模型（省 token）。到线才问模型要不要落袋">止盈门槛 <b id="atGateTpV">3.25</b></span>
+      <span class="at-gate" id="atGateStale"
+            title="峰值浮盈停滞 N 秒、且已掉到止盈门槛的 60% 以下，就把这一轮的决定权交回模型。阈值一个字没改，只是不再盲等——没有它，一笔摸到高点又吐回去的单子会被 tp_wait 全程挡着，模型一次都问不到">停滞唤醒 <b id="atGateStaleV">3 分钟</b></span>
       <span class="at-gate" id="atGateHold"
             title="到点无条件市价平，盈亏都平。防止震荡行情里拖成隔夜单">持仓上限 <b id="atGateHoldV">60 分钟</b></span>
     </div>
@@ -1420,8 +1422,10 @@
       <div class="at-rules-body">
         XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 30 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
         · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
-        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 止盈门槛，顺序写死。
-        只有浮盈 ≥ 止盈门槛时才会问模型要不要落袋。参数是用真实 M1 K 线回放 191 笔入场
+        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 峰值停滞唤醒 → 止盈门槛，顺序写死。
+        浮盈 ≥ 止盈门槛时才会问模型要不要落袋；峰值停滞（默认 3 分钟没再抬高、且浮盈已掉到
+        门槛的 60% 以下）也会把这一轮的决定权交回模型——<b>阈值一个字没改，只是不再盲等</b>
+        （10-28 那笔摸到 +1.85 之后 455 秒、7 轮 tick 模型一次没被问到）。参数是用真实 M1 K 线回放 191 笔入场
         扫出来的，不是拍的——见 <code>tools/replay_exit.py</code>；扫了 36 组，
         <b>全部负期望</b>，最优一组仍是 −0.09/笔，所以别指望调这两个数扭亏。
         <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；
@@ -2727,6 +2731,13 @@ function renderAutoTrade(a) {
   $('atGateSl').className = 'at-gate sl' + (gSl > 0 ? '' : ' off');
   $('atGateTpV').textContent = gTp > 0 ? fmt(gTp, 2) : '关闭';
   $('atGateTp').className = 'at-gate tp' + (gTp > 0 ? '' : ' off');
+  // 停滞唤醒（2026-10-29）：不改阈值，只在峰值停滞时把决定权交回模型。
+  // stale_wake=False 或窗口 <=0 显示「关闭」——面板不许把关掉的规则画成开着。
+  const gStale = Number(a.stale_sec || 0);
+  const staleOn = !!a.stale_wake && gStale > 0;
+  $('atGateStaleV').textContent = staleOn
+    ? '每 ' + fmt(Math.round(gStale / 60), 0) + ' 分钟' : '关闭';
+  $('atGateStale').className = 'at-gate' + (staleOn ? '' : ' off');
   // 快查要严于决策间隔才有意义：配得 >= interval_sec 时 _wait_next 会夹到
   // interval_sec，等于每轮只查一次，那就是旧行为，显示成「关闭」才诚实。
   const guardOn = gGuard > 0 && gGuard < ivSec;

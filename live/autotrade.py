@@ -145,6 +145,35 @@ class Cfg:
     # **参数没变，变的只是延迟**：模型从「最坏 60 秒后才被问到」变成「≤2 秒」。
     # False = 快查只记录峰值和止损，出场节奏完全回到老行为。
     tp_wake: bool = True
+    # ---------------------------------------------------------------
+    # 峰值停滞唤醒（2026-10-29）。**不改任何平仓阈值，只改"谁能说话"。**
+    #
+    # 起因（2026-10-28 23:22 那笔，多 0.01@4039.118，plan=range）：
+    #   开仓 feat atr=1.35 / span=2.864（2.12×ATR），而 tp_min_usd=3.25
+    #   = 2.41×ATR，比整个 14 根窗口振幅还大 13.5%。
+    #   浮盈摸到 peak=1.85（=1.37 ATR）之后 **455 秒、7 轮 tick，模型一次
+    #   没被问过**——_exit_gate 每轮只回一句"未达止盈门槛 3.25，本轮不调模型"，
+    #   于是从 +1.85 一路看回 +0.70，既没落袋也没让模型判断。
+    #
+    # 为什么不是直接改 tp：19 笔带 peak_pnl 的实测里，peak/atr 中位只有 1.38，
+    #   而 3.25/atr 的跨度是 1.21(波动大的单) ~ 3.75(波动小的单)——同一个数字
+    #   对不同笔根本是不同的规则。但**改阈值属于 P2/P3，必须先过 replay 闸门**
+    #   （见 autotrade.py L2325 记的历史负先验：峰2.0回撤1.0 -0.114/笔）。
+    #   这一组参数不碰阈值，只把"峰值停滞"做成一次唤醒，风险面小得多。
+    stale_wake: bool = True
+    # 峰值停滞多久算停滞（秒）。180 = 3 分钟：M1 上 3 根 K 线没能把峰值再抬高，
+    # 且浮盈已经掉到 tp 的 60% 以下，这笔就不该再盲等了。
+    stale_sec: int = 180
+    # 浮盈低于 tp 的这个比例才唤醒。已经接近门槛（≥60%）的单子不用救——
+    # 它马上就会因为 tp_wake 被问到，多问一次纯浪费 token。
+    stale_frac: float = 0.6
+    # 防抖：同一次唤醒之后至少隔这么久才允许再唤醒。没有它的话 peak_ts 不再
+    # 更新，_stale_hit 每分钟都为真 → 退化成"每轮都问模型"，正好把 tp_wait
+    # 省 token 的初衷废掉。300 秒 = 一笔 60 分钟的持仓最多问 ~10 次。
+    stale_reask_sec: int = 300
+    # 峰值下限（USD）：peak 只有 0.1 的单子不值得唤醒——那不是"摸到过利润又
+    # 吐回去"，是压根没赚过，该交给止损和持仓上限。
+    stale_min_peak: float = 0.5
     # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
@@ -3615,7 +3644,12 @@ def _tick_body(cfg: Cfg, login, now: int,
 
         # plan 在开仓时锁定（见 state["position"]），出场参数跟着这笔单打法走，
         # 中途 regime 跳变不换规则——见 exit_params 的注释。
-        gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"))
+        #
+        # stale 先判：它只决定"这一轮要不要问模型"，不决定平不平。
+        # 判定和 _wait_next 的快查共用 _stale_hit，两处同源。
+        stale = _stale_hit(cfg, pos, float_pnl, now)
+        gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"),
+                          stale_ready=stale)
 
         # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
         sig_id = None
@@ -3646,6 +3680,14 @@ def _tick_body(cfg: Cfg, login, now: int,
             decision = ask_exit(bars, pos, bid, ask, cfg, contract, login,
                                 ticks_text=_ticks_text(cfg, bars),
                                 mtf_text=mtf["text"])
+            # 峰值停滞唤醒的防抖标记：**只有真问到模型才记**。
+            # 写在调用之前的话，一次模型调用失败就会白白吃掉 300 秒唤醒窗口，
+            # 而这正是最需要人/模型看一眼的时候。
+            if stale and decision.get("source") != "error":
+                pos["stale_ts"] = now
+                # 留痕：这笔是"系统放行、模型判断"而不是"浮盈到门槛了"。
+                # 面板和复盘靠这个把两类决策分开算命中率。
+                decision["via"] = "stale"
             # 模型失败要计数：进场失败只是少做一笔，出场失败意味着仓位没人管，
             # 连错 3 次必须停下来让人接手，不能让它一直挂在那儿。
             if decision.get("source") == "error":
@@ -3655,10 +3697,13 @@ def _tick_body(cfg: Cfg, login, now: int,
             state["last_decision"] = {
                 "ts": now, "kind": "exit", "close": decision.get("close"),
                 "reason": decision.get("reason"), "source": decision.get("source"),
+                "via": decision.get("via"),
             }
             if not decision.get("close"):
                 row = {"ts": now, "kind": "hold", "reason": decision.get("reason"),
                        "source": decision.get("source")}
+                if decision.get("via"):
+                    row["via"] = decision["via"]
                 if decision.get("error"):
                     row["error"] = decision["error"]
                 _finish(state, row, login, ts=now)
@@ -3788,10 +3833,18 @@ def _tick_body(cfg: Cfg, login, now: int,
             "held_sec": held_sec,
             "peak_pnl": pos.get("peak_pnl"),
             "peak_ts": pos.get("peak_ts"),
+            # plan / atr 在 close 行冗余一份（open 行已有）：做「这笔 tp 是几倍
+            # ATR」的统计时不用再按 ticket 反查 open 行，少一次 join 就少一处漏。
+            "plan": pos.get("plan"),
+            "atr": pos.get("atr"),
             "entry_reason": pos.get("entry_reason"),
             "reason": decision.get("reason"), "source": decision.get("source"),
             "dry_run": cfg.dry_run,
         }
+        # 这笔是不是"峰值停滞唤醒"之后才平的。统计「靠唤醒救回来的单」时
+        # 只能靠这个字段，否则它和"浮盈到门槛后正常平"在流水里长得一模一样。
+        if decision.get("via"):
+            row["via"] = decision["via"]
         # 止损是程序发的，不是模型判断。必须能单独数出来，
         # 否则「模型平仓命中率」会被一堆止损单污染。
         if decision.get("source") == "sl":
@@ -4054,6 +4107,12 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 打法在开仓这一刻锁定（"range"/"trend"/"mid"），出场参数跟着 plan 走：
         # 趋势单止盈 7.0、上限 3 小时；震荡单维持老参数。中途行情怎么变都不换。
         "plan": regime,
+        # 开仓时刻的 ATR（价格，不是美元）也一起锁进持仓，理由和 plan 一样：
+        # 出场阈值一旦按 ATR 归一化，中途重算会让同一笔仓前后被两套门槛管。
+        # 现在（P0）只落盘不消费，唯一用途是把「这笔的 tp 相当于几倍 ATR」
+        # 变成可统计的量——以前要靠 ticket 反查 open 行的 feat，绕且容易漏。
+        # 取 0.0 表示当时算不出（bars 不足），消费方必须把它当"无数据"降级。
+        "atr": float((feat or {}).get("atr") or 0.0),
         # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
         "signal_id": sig_id, "exec_by": exec_by,
     }
@@ -4092,19 +4151,30 @@ def _tick_body(cfg: Cfg, login, now: int,
 
 
 def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
-               plan: str | None = None) -> dict | None:
+               plan: str | None = None, stale_ready: bool = False) -> dict | None:
     """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
 
-    这个函数只有三行逻辑，但顺序是致命的：**止损必须排在止盈门槛之前**。
+    顺序是致命的：**止损必须排在止盈门槛之前**。
     反过来写的话，一笔浮亏 -5 USD 的单子会因为「浮盈没到 2.50」被判成继续持有，
     止损永远不触发——参数越保守亏得越多。所以单独抽出来 + 单测钉住顺序。
+
+    现在的顺序是 **sl → timeout → stale → tp_wait**，四条各自的位置都有理由：
+      · sl 最前：兜底，任何时候都不许被别的规则挡住；
+      · timeout 第二：卡在 +2.0（没到门槛）的单子不能被无限持有，否则超短线拖成隔夜；
+      · stale（2026-10-29）第三：**只放行、不改阈值**。峰值停滞时返回 None 把决定
+        交给模型，但它必须排在 tp_wait 之前——否则 fp < tp 永远走不到这里，
+        "唤醒"就成了一句空话（10-28 那笔盲等 455 秒就是这么来的）；
+      · tp_wait 最后：fp 没到门槛就继续持有、不调模型，省 token。
+
+    `stale_ready` 由 `_stale_hit()` 判好再传进来，本函数**不碰时间**——
+    否则那 20 条钉顺序的单测全得跟着传 timestamp。
 
     `plan` 决定这一笔按哪套参数走（见 exit_params）：趋势单的止盈门槛是
     tp_min_trend（默认 7.0）、持仓上限 max_hold_trend（默认 3 小时）；震荡单
     维持 tp_min_usd / max_hold_sec 不变。plan 为空一律按震荡参数——
     旧 state 里没存 plan 的持仓也能继续被原规则管着，行为不变。
 
-    三条规则的来源（2026-10-23 第 3 场 191 笔的账）：
+    三条老规则的来源（2026-10-23 第 3 场 191 笔的账，别丢）：
       · 60 秒中位持仓 = min_hold 从下限变成了目标，150 笔 ≤90 秒平仓吃掉 90% 的亏损；
       · avgW 1.011 / avgL 1.026 → 盈亏比 0.99，扣掉每笔 0.24 点差和 35.6% 胜率，必亏；
       · 最大单笔 -6.08 是平均亏损的 5.9 倍，且它的 p_up=0.0（示例占位值被照抄，
@@ -4123,6 +4193,12 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
                 "reason": (f"持仓超上限：已 {held_sec}s / 上限 {ep['max_hold_sec']}s，"
                            f"浮盈亏 {float_pnl:+.2f}，无条件市价平")
                 }
+
+    # 峰值停滞：阈值一个字没改，只是把这一轮的决定权交回模型。
+    # 位置必须在 tp_wait 之前——见 docstring 第三条。返回 None 而不是
+    # {"close": True}：平不平仍由模型（辅助模式下再由人）判断。
+    if stale_ready:
+        return None
 
     if ep["tp_min_usd"] > 0:
         if float_pnl < ep["tp_min_usd"]:
@@ -4269,6 +4345,15 @@ def validate_cfg(cfg: Cfg) -> list[str]:
             f"趋势持仓上限 {cfg.max_hold_trend}s 比震荡上限 {cfg.max_hold_sec}s 还短："
             "宽止盈永远等不到，分 regime 形同虚设"
         )
+    # 峰值停滞唤醒（2026-10-29）：这条规则只"放行"、不改任何阈值，所以配歪了
+    # 最坏结果是「多问几次模型」或「完全不唤醒」，不会改变亏损结构。
+    # 校验只拦语义上不可能成立的组合，不去拦"激进"。
+    if getattr(cfg, "stale_sec", 0) < 0:
+        issues.append(f"停滞唤醒窗口不能为负（{cfg.stale_sec} 秒）")
+    if not 0.0 <= float(getattr(cfg, "stale_frac", 0.0)) <= 1.0:
+        issues.append(f"停滞唤醒的浮盈比例必须落在 0~1（{cfg.stale_frac}）")
+    if getattr(cfg, "stale_reask_sec", 0) < 0:
+        issues.append(f"停滞唤醒的重问间隔不能为负（{cfg.stale_reask_sec} 秒）")
     # 止损快查的间隔只有下限有意义：< 2 秒时 MT5 tick 读取的抖动开始比价格
     # 变化本身大，白白空转。**上界不在这里拦**——配得比决策间隔大也不报错，
     # _wait_next 会把它夹到 interval_sec（等于没开）。理由：这是个纯粹的
@@ -4348,6 +4433,73 @@ def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
     pos["peak_pnl"] = round(float_pnl, 2)
     pos["peak_ts"] = int(ts)
     return True
+
+
+def _stale_hit(cfg: Cfg, pos: dict | None, float_pnl: float, now: int) -> bool:
+    """峰值停滞判定。True = 这一轮把决定权交给模型（**不是**直接平仓）。
+
+    为什么单独一个函数、而不塞进 _exit_gate：判定需要 `now` 和整个 pos，
+    而 `_exit_gate` 是**纯函数**（只吃 cfg/held/fp/plan，单测里直接调）。
+    把时间依赖塞进去，那 20 条钉顺序的单测就全得传 timestamp。
+    所以分工是：这里算"该不该说话"，_exit_gate 只接一个 stale_ready 布尔。
+    tick() 和 _wait_next() 都调这一个函数——**两处不能各写一份判定**，
+    否则快查的唤醒点和闸门的放行点迟早对不上（tp_wake 当年就差点这么漂）。
+
+    六条同时成立才返回 True（顺序按"最容易为假"排，省得白算）：
+      1. stale_wake 打开；
+      2. 这笔单的 peak_pnl / peak_ts 都在（旧 state、测试里手写的 pos 没有，
+         直接判否——这是兼容旧持仓的关键，不能抛异常）；
+      3. peak_ts > 0 且 peak >= stale_min_peak（0.5）。峰值是负数或只有几毛钱
+         的单子不是"摸到过利润又吐回去"，那是止损和持仓上限的活；
+      4. 距峰值出现已 >= stale_sec（180 秒）；
+      5. 距上次因停滞唤醒已 >= stale_reask_sec（300 秒）——防抖。没有它，
+         peak_ts 不再更新会让本函数每轮都为真，正好把 tp_wait 省 token 的
+         初衷全废掉，退化成"每 60 秒问一次模型"；
+      6. 浮盈 < tp × stale_frac（0.6）。已经接近门槛的单子不用救，它马上就会
+         被 tp_wake 问到，多问一次是纯浪费。
+
+    副作用：无。只读，不写 pos["stale_ts"]——那个标记必须由**真正要调模型**
+    的调用方写，否则模型调用失败会白白吃掉一次防抖窗口。
+    """
+    if not pos or not bool(getattr(cfg, "stale_wake", False)):
+        return False
+
+    peak = pos.get("peak_pnl")
+    peak_ts = pos.get("peak_ts")
+    if peak is None or peak_ts is None:
+        return False
+    try:
+        peak = float(peak)
+        peak_ts = int(peak_ts)
+        now = int(now)
+    except (TypeError, ValueError):
+        return False
+
+    min_peak = float(getattr(cfg, "stale_min_peak", 0.0) or 0.0)
+    if peak_ts <= 0 or peak <= 0 or peak < min_peak:
+        return False
+
+    stale_sec = int(getattr(cfg, "stale_sec", 0) or 0)
+    if stale_sec <= 0 or now - peak_ts < stale_sec:
+        return False
+
+    reask = int(getattr(cfg, "stale_reask_sec", 0) or 0)
+    if reask > 0:
+        last = pos.get("stale_ts")
+        if last is not None:
+            try:
+                if now - int(last) < reask:
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+    frac = float(getattr(cfg, "stale_frac", 0.0) or 0.0)
+    if frac <= 0:
+        return False
+    tp = float(exit_params(cfg, pos.get("plan"))["tp_min_usd"] or 0.0)
+    if tp <= 0:
+        return False
+    return float(float_pnl) < tp * frac
 
 
 def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
@@ -4767,13 +4919,16 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
                stop_wait=None, sleeper=None, quote_fn=None) -> bool:
     """等下一轮决策。有仓时把长睡切成快查一格，过线就提前返回。
 
-    快查每格做三件事（一次报价、一次浮盈，全部复用）：
+    快查每格做四件事（一次报价、一次浮盈，全部复用）：
       1. **峰值更新**（_track_peak）：只在峰值被抬高时写一次 state——峰值只增
          不减，一笔持仓真正抬高的次数有限，无条件每格写盘不可接受。
       2. **止损判定**（_guard_hit）：浮亏过线提前返回。
       3. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ tp_min_usd 也提前返回。
          下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
          参数没变，变的只是模型被问到的延迟（最坏 60 秒 → ≤2 秒）。
+      4. **峰值停滞唤醒**（_stale_hit，2026-10-29）：浮盈摸到高点后停滞
+         stale_sec 秒、且已经掉到 tp×stale_frac 以下，也提前返回一次。
+         同样只是"把最坏 60 秒的无人看守缩到一格"，阈值一个字没改。
 
     步长是**自适应**的：fp 离止盈门槛远时按 guard_sec 粗看，进入
     [tp_min - tp_wake_band, ∞) 后切 guard_near_sec 细看。采样密度花在决策
@@ -4831,6 +4986,12 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
             return False       # 剩下的时间不要了，立刻进下一轮去平仓
         if wake and fp >= tp:
             return False       # tp 穿越唤醒：交模型决定，不等满一轮
+        if _stale_hit(cfg, pos, fp, int(time.time())):
+            # 峰值停滞唤醒（2026-10-29）：和止损快查一样只提前返回，不平仓。
+            # 判定用 tick 里同一个 _stale_hit，保证"快查认为该醒"和"闸门放行"
+            # 永远同步——两处各写一份条件，迟早会出现快查醒了但闸门还在 tp_wait
+            # 的空转（当年 tp_wake 的唤醒点和 tp_min 就是差点这么漂开的）。
+            return False
         fp_last = fp
     # 尾段不足 1 秒（或已经超时）：保底睡 1 秒，别空转
     return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
@@ -5362,6 +5523,14 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "guard_near_sec": saved_cfg.get("guard_near_sec", _defaults.guard_near_sec),
         "tp_wake_band": saved_cfg.get("tp_wake_band", _defaults.tp_wake_band),
         "tp_wake": saved_cfg.get("tp_wake", _defaults.tp_wake),
+        # 峰值停滞唤醒（2026-10-29）。同理必须上去：用户得能看见
+        # 「浮盈摸到高点后停滞 3 分钟会被问一次」这件事到底开着还是关着，
+        # 否则面板显示的和实际跑的又是两套。
+        "stale_wake": bool(saved_cfg.get("stale_wake", _defaults.stale_wake)),
+        "stale_sec": saved_cfg.get("stale_sec", _defaults.stale_sec),
+        "stale_frac": saved_cfg.get("stale_frac", _defaults.stale_frac),
+        "stale_reask_sec": saved_cfg.get("stale_reask_sec", _defaults.stale_reask_sec),
+        "stale_min_peak": saved_cfg.get("stale_min_peak", _defaults.stale_min_peak),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：

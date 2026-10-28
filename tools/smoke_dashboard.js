@@ -196,6 +196,9 @@ try {
     // sl_closes 必须和 closed 同源自洽：2 笔平仓里 1 笔是止损，
     // 写成 2 就会出现「1 胜 1 负，硬止损 2 笔」这种自相矛盾的副标题。
     sl_closes: 1, sl_usd: 3.0, tp_min_usd: 3.25,
+    // 停滞唤醒（2026-10-29）：默认开、180 秒。面板必须把它画出来，
+    // 否则「面板显示 3.25、实际还多一条放行规则」又是两套口径。
+    stale_wake: true, stale_sec: 180,
     max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60 },
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
@@ -365,6 +368,13 @@ try {
     && gGuard.includes('5') && gHold.includes('60');
   console.log(`  出场闸门胶囊 ${gateOk ? '✓' : '✗'} (止损 ${gSl} / 快查 ${gGuard} / 止盈 ${gTp} / 上限 ${gHold})`);
   if (!gateOk) failed = true;
+
+  // 停滞唤醒胶囊：180 秒 → 「每 3 分钟」。它不改阈值，但改变了「模型什么时候
+  // 能看到这笔单」，属于必须可见的那一类规则。
+  const gStale = String(made.atGateStaleV.textContent || '');
+  const staleOk = gStale.includes('3 分钟');
+  console.log(`  停滞唤醒胶囊 ${staleOk ? '✓' : '✗'} (${gStale})`);
+  if (!staleOk) failed = true;
 
   // 关掉的规则必须标 off 并显示「关闭」，不能留着一个不存在的数字
   const savedAt = { ...atSample };

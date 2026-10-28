@@ -13,7 +13,7 @@ from __future__ import annotations
 import unittest
 
 from live.autotrade import Cfg, _exit_gate, exit_params, validate_cfg
-from tools.replay_exit import replay_one, spec_of, summarize
+from tools.replay_exit import (_atr_at, replay_one, run_grid, spec_of, summarize)
 
 
 class TestExitGate(unittest.TestCase):
@@ -59,6 +59,47 @@ class TestExitGate(unittest.TestCase):
         """sl_usd=0 = 关掉止损（旧行为）。不能因为浮亏很大就强制平。"""
         d = _exit_gate(Cfg(sl_usd=0, tp_min_usd=0), 120, -9.0)
         self.assertIsNone(d)
+
+
+class TestStaleGate(unittest.TestCase):
+    """峰值停滞唤醒（2026-10-29）在闸门这一侧的契约。
+
+    要钉住的是两件事：
+      1. stale_ready=True 时**只放行不改变结论**——返 None（交模型），
+         绝不能返 {"close": True}，否则就变成"程序在停滞时直接平仓"，
+         那是另一条规则，不是这次要的东西；
+      2. 它必须排在 sl 和 timeout 之后。反过来的话，一笔已经该止损的单子
+         会因为"峰值停滞"被推给模型，止损被稀释成一次咨询。
+    """
+
+    def test_stale_defers_to_model_instead_of_tp_wait(self):
+        d = _exit_gate(Cfg(sl_usd=3.0, tp_min_usd=3.25), 600, 1.85,
+                       stale_ready=True)
+        self.assertIsNone(d)
+
+    def test_without_stale_flag_it_still_waits(self):
+        """同一个浮盈、同一个时点，不开 stale 就是老行为——这是回归线。"""
+        d = _exit_gate(Cfg(sl_usd=3.0, tp_min_usd=3.25), 600, 1.85,
+                       stale_ready=False)
+        self.assertEqual(d["source"], "tp_wait")
+        self.assertFalse(d["close"])
+
+    def test_stop_loss_still_wins_over_stale(self):
+        d = _exit_gate(Cfg(sl_usd=3.0, tp_min_usd=3.25), 600, -3.2,
+                       stale_ready=True)
+        self.assertEqual(d["source"], "sl")
+        self.assertTrue(d["close"])
+
+    def test_timeout_still_wins_over_stale(self):
+        d = _exit_gate(Cfg(sl_usd=3.0, tp_min_usd=3.25, max_hold_sec=3600),
+                       3660, 1.0, stale_ready=True)
+        self.assertEqual(d["source"], "timeout")
+        self.assertTrue(d["close"])
+
+    def test_stale_at_or_above_tp_is_moot(self):
+        """浮盈已经到门槛：本来就该交模型，stale 加不加都是 None。"""
+        self.assertIsNone(_exit_gate(Cfg(tp_min_usd=3.25), 600, 3.30,
+                                     stale_ready=True))
 
 
 class TestPlanExitParams(unittest.TestCase):
@@ -179,6 +220,95 @@ class TestReplay(unittest.TestCase):
         bars = [{"time": 1, "open": 4000, "high": 4001, "low": 3999, "close": 4000.5}]
         pnl, kind, _ = replay_one(bars, 0, 4000.0, 1, 1.5, 2.5, self.spread, self.unit)
         self.assertEqual((pnl, kind), (0.5, "timeout"))
+
+    def test_timeout_settles_at_window_end_not_dataset_end(self):
+        """老 bug：超时结算取的是整段数据最后一根（可能是几小时之后的价格）。
+        max_bars 截断后必须取第 max_bars 根，否则长持仓全按末价结算。"""
+        bars = [{"time": i, "open": 4000, "high": 4000.5, "low": 3999.5,
+                 "close": 4000.0} for i in range(10)]
+        bars[-1]["close"] = 4100.0          # 数据末尾远在未来
+        pnl, kind, n = replay_one(bars, 0, 4000.0, 1, 3.0, 3.25,
+                                  self.spread, self.unit, max_bars=3)
+        self.assertEqual((pnl, kind, n), (0.0, "timeout", 3))
+
+    # --- 峰值回吐保护（2026-10-29）----------------------------------------
+
+    def _gb_bars(self):
+        """先冲高到 +2.0，再回落收盘到 +1.1。"""
+        return [
+            {"time": 1, "open": 4000, "high": 4002.0, "low": 4000.5, "close": 4001.8},
+            {"time": 2, "open": 4001.8, "high": 4002.1, "low": 4001.0, "close": 4001.1},
+        ]
+
+    def test_giveback_exits_when_peak_fades(self):
+        """峰值 2.09、回撤 40% 线 1.25：收盘 1.1 破线 → 按 1.25 结算。"""
+        pnl, kind, n = replay_one(self._gb_bars(), 0, 4000.0, 1, 3.0, 4.0,
+                                  self.spread, self.unit, arm=1.5, frac=0.4)
+        self.assertEqual(kind, "giveback")
+        self.assertEqual(n, 2)
+        self.assertAlmostEqual(pnl, 2.1 * 0.6, places=2)
+
+    def test_giveback_off_keeps_old_result(self):
+        """不给 arm/frac 就是老行为——这是"新规则是否真的生效"的对照线。"""
+        pnl, kind, _ = replay_one(self._gb_bars(), 0, 4000.0, 1, 3.0, 4.0,
+                                  self.spread, self.unit)
+        self.assertEqual((pnl, kind), (1.1, "timeout"))
+
+    def test_giveback_never_steals_a_take_profit(self):
+        """同一根里既冲到 tp 又回落：按 tp 算。否则新规则会把大赢单
+        系统性改写成小赢，用回放工具自己制造一个更差的规则。"""
+        bars = [{"time": 1, "open": 4000, "high": 4004.2, "low": 4001.0, "close": 4001.2}]
+        pnl, kind, _ = replay_one(bars, 0, 4000.0, 1, 3.0, 4.0,
+                                  self.spread, self.unit, arm=1.5, frac=0.4)
+        self.assertEqual((pnl, kind), (4.0, "tp"))
+
+    def test_giveback_does_not_arm_below_arm_line(self):
+        """峰值只有 1.0，没到武装线 1.5：回吐也不管。"""
+        bars = [{"time": 1, "open": 4000, "high": 4001.0, "low": 3999.9, "close": 4000.1}]
+        pnl, kind, _ = replay_one(bars, 0, 4000.0, 1, 3.0, 4.0,
+                                  self.spread, self.unit, arm=1.5, frac=0.4)
+        self.assertEqual(kind, "timeout")
+
+    # --- ATR 归一化 --------------------------------------------------------
+
+    def test_atr_matches_live_formula(self):
+        """回放的 ATR 和 live 的 _atr 必须同源：两套算法各写一份，
+        算出来的 k 用到生产上就是错位。"""
+        from live.autotrade import _atr
+        rows = [{"time": i, "open": 4000 + i, "high": 4001 + i, "low": 3999.5 + i,
+                 "close": 4000.5 + i} for i in range(14)]
+        self.assertAlmostEqual(_atr_at(rows, 14, 14), _atr(rows)["atr"], places=9)
+
+    def test_atr_needs_no_future_bars(self):
+        """窗口必须只看入场那一刻之前的 14 根；把后面的价格改掉，结果不能变。"""
+        rows = [{"time": i, "open": 4000, "high": 4001 + (i % 3), "low": 3999,
+                 "close": 4000} for i in range(30)]
+        a = _atr_at(rows, 20, 14)
+        rows2 = [dict(r) for r in rows]
+        for r in rows2[20:]:
+            r["high"] += 50
+        self.assertAlmostEqual(a, _atr_at(rows2, 20, 14), places=9)
+
+    def test_atr_mode_uses_each_trade_own_atr(self):
+        """atr 模式：门槛按每笔自己的 ATR 算，行名要能看出是 ×ATR 而不是固定数。"""
+        bars = []
+        for i in range(80):
+            amp = 0.5 if i < 40 else 2.0      # 前段波动小、后段大
+            bars.append({"time": 1000 + i * 60, "open": 4000,
+                         "high": 4000 + amp, "low": 4000 - amp,
+                         "close": 4000 + amp * 0.3})
+        trades = [
+            {"ticket": 1, "ts": 1000 + 10 * 60, "price_open": 4000.0,
+             "direction": 1, "lots": 0.01, "actual_pnl": 0.0, "actual_held": 60},
+            {"ticket": 2, "ts": 1000 + 50 * 60, "price_open": 4000.0,
+             "direction": 1, "lots": 0.01, "actual_pnl": 0.0, "actual_held": 60},
+        ]
+        rows = run_grid(trades, bars, "XAUUSDm", [3.0], [0.0],
+                        mode="atr", atr_k_list=[1.0], atr_floor=0.4, atr_cap=3.25)
+        atr_rows = [r for r in rows if "×ATR" in r["name"]]
+        self.assertEqual(len(atr_rows), 1)
+        self.assertEqual(atr_rows[0]["n"], 2)
+        self.assertIn("mfe", atr_rows[0])     # 每笔都带回了峰值，能看 MFE
 
     def test_walks_forward_until_trigger(self):
         """前几根不动，第三根才触发：要能一路走下去。"""

@@ -486,6 +486,38 @@ class TestGuardFastCheck(TempLedger):
         # 峰值照记：测量不随行为开关关闭
         self.assertEqual(autotrade.load_state()["position"]["peak_pnl"], 3.5)
 
+    def test_stale_peak_wakes_up_before_the_round_ends(self):
+        """峰值停滞也走快查：不等到 60 秒，下一轮就能把决定权交出去。"""
+        pos = self._position()
+        st = autotrade.load_state()
+        st["position"] = {**pos, "peak_pnl": 1.85, "peak_ts": 1_000_000 - 240}
+        autotrade.save_state(st)
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            tp_min_usd=3.25)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            woke = autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (4000.7, 4000.94))
+        self.assertFalse(woke)
+        self.assertLessEqual(clock.t - 1_000_000.0, 5)
+
+    def test_stale_off_keeps_waiting_the_full_round(self):
+        """同一笔持仓、关掉 stale_wake 就要睡满 60 秒——
+        这才证明上面那条的提前返回真来自这条规则，而不是别的原因。"""
+        pos = self._position()
+        st = autotrade.load_state()
+        st["position"] = {**pos, "peak_pnl": 1.85, "peak_ts": 1_000_000 - 240}
+        autotrade.save_state(st)
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            tp_min_usd=3.25, stale_wake=False)
+        clock = self._Clock()
+        with mock.patch.object(autotrade.time, "time", clock.time):
+            autotrade._wait_next(
+                clock.t, {"kind": "hold"}, cfg, sleeper=clock.sleep,
+                quote_fn=lambda s: (4000.7, 4000.94))
+        self.assertGreaterEqual(clock.t - 1_000_000.0, 60)
+
     def test_band_zero_stays_far(self):
         """tp_wake_band=0 关闭近档：整轮都按远档 5 秒粗看。"""
         self._position()
@@ -565,6 +597,37 @@ class TestGuardFastCheck(TempLedger):
         self.assertEqual(row["source"], "sl")
         self.assertEqual(row["peak_pnl"], 2.0)
         self.assertLess(row["pnl"], -3.0)   # 止损按市价成交，超调是真实存在的
+
+    def test_close_row_carries_plan_and_atr(self):
+        """平仓行冗余 plan/atr：统计「这笔 tp 是几倍 ATR」不用再按 ticket
+        反查 open 行——少一次 join 就少一处漏。旧持仓没有 atr 时写 None。"""
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": -1, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 600,
+                             "p_up": 0.6, "entry_reason": "突破", "dry_run": True,
+                             "plan": "range", "atr": 1.35,
+                             "peak_pnl": 0.5, "peak_ts": NOW - 120}
+        autotrade.save_state(state)
+        cfg = autotrade.Cfg(dry_run=True, sl_usd=3.0, tp_min_usd=3.25)
+        row = autotrade.tick(cfg, now=NOW, quote=(3996.5, 3996.74),
+                             rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "close")
+        self.assertEqual(row["plan"], "range")
+        self.assertEqual(row["atr"], 1.35)
+
+    def test_old_position_without_atr_closes_with_none(self):
+        """旧 state 的持仓没有 atr 字段：平仓照走，字段落 None，不能 KeyError。"""
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": -1, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 600,
+                             "p_up": 0.6, "entry_reason": "突破", "dry_run": True}
+        autotrade.save_state(state)
+        cfg = autotrade.Cfg(dry_run=True, sl_usd=3.0, tp_min_usd=3.25)
+        row = autotrade.tick(cfg, now=NOW, quote=(3996.5, 3996.74),
+                             rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "close")
+        self.assertIsNone(row["atr"])
+        self.assertIsNone(row["plan"])
 
 
 # ------------------------------------------------------------------ 开仓闸门
@@ -3886,6 +3949,15 @@ class TestPlanRegime(TempLedger):
         self.assertEqual(row["plan"], "range")
         self.assertEqual(autotrade.load_state()["position"]["plan"], "range")
 
+    def test_open_locks_atr(self):
+        """开仓把当时的 ATR 锁进持仓：出场阈值以后要按它归一化，中途重算
+        会让同一笔仓前后被两套门槛管（和 plan 同一个原则）。"""
+        row = self._open(bars_range())
+        atr = float(row["feat"]["atr"])
+        self.assertGreater(atr, 0.0)
+        self.assertAlmostEqual(autotrade.load_state()["position"]["atr"], atr,
+                               places=6)
+
     def test_trend_position_holds_below_wider_tp(self):
         """趋势单浮盈 4.0：按震荡门槛早该问模型，按趋势门槛（7.0）继续持有。"""
         state = autotrade._empty_state()
@@ -4807,6 +4879,124 @@ class TestMtfConflictAdvice(unittest.TestCase):
             self.assertEqual(a[0] if a else None, "mtf_conflict")
         self.assertIsNone(autotrade._entry_advice(
             autotrade.Cfg(), winner["direction"], winner, "贴上沿做空", True))
+
+
+class TestStaleHit(unittest.TestCase):
+    """峰值停滞判定（2026-10-29）。纯函数：不碰 state、不读时钟。
+
+    背景那一笔（多 0.01@4039.118，atr=1.35，tp=3.25）：峰值 1.85 之后
+    455 秒、7 轮 tick 模型一次没被问过。这里每条用例都对应一个会让
+    "唤醒"变成"每分钟烧一次 token"或"对着旧持仓抛异常"的边界。
+    """
+
+    def _pos(self, peak=1.85, peak_ts=NOW - 200, **kw) -> dict:
+        p = {"ticket": -1, "direction": 1, "lots": 0.01,
+             "price_open": 4039.118, "plan": "range"}
+        if peak is not None:
+            p["peak_pnl"] = peak
+        if peak_ts is not None:
+            p["peak_ts"] = peak_ts
+        p.update(kw)
+        return p
+
+    def test_fires_when_peak_goes_stale_and_pnl_fades(self):
+        """峰值 200 秒没抬高、浮盈掉到 0.70（< 3.25×0.6）：该把决定权交出去。"""
+        self.assertTrue(autotrade._stale_hit(
+            autotrade.Cfg(tp_min_usd=3.25), self._pos(), 0.70, NOW))
+
+    def test_does_not_fire_while_peak_is_fresh(self):
+        self.assertFalse(autotrade._stale_hit(
+            autotrade.Cfg(tp_min_usd=3.25), self._pos(peak_ts=NOW - 60), 0.70, NOW))
+
+    def test_does_not_fire_when_pnl_still_close_to_tp(self):
+        """浮盈还在门槛 60% 以上：它马上会被 tp_wake 问到，多问一次是浪费。"""
+        self.assertFalse(autotrade._stale_hit(
+            autotrade.Cfg(tp_min_usd=3.25), self._pos(), 2.50, NOW))
+
+    def test_missing_peak_keys_are_safe(self):
+        """旧 state 和测试里手写的 pos 都没有 peak_ts —— 必须判否，不能抛。"""
+        cfg = autotrade.Cfg(tp_min_usd=3.25)
+        self.assertFalse(autotrade._stale_hit(cfg, {"direction": 1}, 0.5, NOW))
+        self.assertFalse(autotrade._stale_hit(cfg, None, 0.5, NOW))
+        self.assertFalse(autotrade._stale_hit(cfg, self._pos(peak=None), 0.5, NOW))
+
+    def test_negative_or_tiny_peak_is_not_our_business(self):
+        """从没赚过的单子不归它管——那是止损和持仓上限的活。"""
+        cfg = autotrade.Cfg(tp_min_usd=3.25)
+        self.assertFalse(autotrade._stale_hit(cfg, self._pos(peak=-0.5), -2.0, NOW))
+        self.assertFalse(autotrade._stale_hit(cfg, self._pos(peak=0.3), 0.1, NOW))
+
+    def test_reask_cooldown_prevents_asking_every_round(self):
+        """防抖：没有它 peak_ts 不再更新会让判定每轮为真，退化成每 60 秒问一次。"""
+        cfg = autotrade.Cfg(tp_min_usd=3.25)
+        p = self._pos(stale_ts=NOW - 10)
+        self.assertFalse(autotrade._stale_hit(cfg, p, 0.70, NOW))
+        self.assertTrue(autotrade._stale_hit(cfg, p, 0.70, NOW + 300))
+
+    def test_switch_off_restores_old_behavior(self):
+        cfg = autotrade.Cfg(tp_min_usd=3.25, stale_wake=False)
+        self.assertFalse(autotrade._stale_hit(cfg, self._pos(), 0.70, NOW))
+
+    def test_trend_plan_uses_its_own_tp(self):
+        """趋势单门槛 7.0：fp 3.0 < 4.2 仍算"离门槛很远"，4.5 就不该唤醒。"""
+        cfg = autotrade.Cfg(tp_min_usd=3.25, tp_min_trend=7.0)
+        p = self._pos(plan="trend", peak=4.0)
+        self.assertTrue(autotrade._stale_hit(cfg, p, 3.0, NOW))
+        self.assertFalse(autotrade._stale_hit(cfg, p, 4.5, NOW))
+
+
+class TestStaleWakeInTick(TempLedger):
+    """接线：纯函数再对，没接到 tick 上就等于没改。"""
+
+    def _seed(self, peak=1.85, peak_ts=NOW - 240, plan="range"):
+        st = autotrade._empty_state()
+        st["position"] = {
+            "ticket": -1, "direction": 1, "lots": 0.01, "price_open": 4000.0,
+            "opened_at": NOW - 400, "p_up": 0.6, "dry_run": True,
+            "plan": plan, "atr": 1.35,
+            "peak_pnl": peak, "peak_ts": peak_ts,
+        }
+        autotrade.save_state(st)
+
+    def test_stale_position_reaches_the_model_and_marks_via(self):
+        self._seed()
+        cfg = autotrade.Cfg(dry_run=True, tp_min_usd=3.25)
+        with mock.patch.object(autotrade, "ask_exit",
+                               return_value={"close": False,
+                                             "reason": "还没走坏，再拿一会",
+                                             "source": "llm"}) as m:
+            row = autotrade.tick(cfg, now=NOW, quote=(4000.7, 4000.94),
+                                 rows=bars_up(), positions=[])
+        m.assert_called_once()
+        self.assertEqual(row["kind"], "hold")
+        self.assertEqual(row.get("via"), "stale")
+        self.assertEqual(autotrade.load_state()["position"]["stale_ts"], NOW)
+
+    def test_cooldown_stops_the_next_round_from_asking_again(self):
+        """第一轮问过之后，紧接的下一轮必须回到"不调模型"的老节奏。"""
+        self._seed()
+        cfg = autotrade.Cfg(dry_run=True, tp_min_usd=3.25)
+        with mock.patch.object(autotrade, "ask_exit",
+                               return_value={"close": False, "reason": "拿",
+                                             "source": "llm"}):
+            autotrade.tick(cfg, now=NOW, quote=(4000.7, 4000.94),
+                           rows=bars_up(), positions=[])
+        with mock.patch.object(autotrade, "ask_exit") as m2:
+            row = autotrade.tick(cfg, now=NOW + 60, quote=(4000.7, 4000.94),
+                                 rows=bars_up(), positions=[])
+        m2.assert_not_called()
+        self.assertNotIn("via", row)
+        self.assertEqual(row["source"], "tp_wait")
+
+    def test_fresh_peak_keeps_the_old_quiet_behavior(self):
+        """峰值刚抬高（60 秒前）：不唤醒，仍然 tp_wait 且不调模型。"""
+        self._seed(peak_ts=NOW - 60)
+        cfg = autotrade.Cfg(dry_run=True, tp_min_usd=3.25)
+        with mock.patch.object(autotrade, "ask_exit") as m:
+            row = autotrade.tick(cfg, now=NOW, quote=(4000.7, 4000.94),
+                                 rows=bars_up(), positions=[])
+        m.assert_not_called()
+        self.assertEqual(row["source"], "tp_wait")
 
 
 if __name__ == "__main__":
