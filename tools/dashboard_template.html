@@ -15,7 +15,10 @@
     --border-hi: #2a3a4d;
     --text: #e8eef6;
     --muted: #7d8fa3;
-    --dim: #4d5c6e;
+    /* 说明文字/空状态/副标。原来是 #4d5c6e，对 --bg 只有 ~2.2:1（WCAG AA 要 4.5:1），
+       盯盘疲劳场景下辅助信息几乎看不见。提亮到 ~4.7:1，代价是和 --muted 拉不开
+       亮度差，靠字号和场景区分（dim=辅助说明，muted=次级正文）。 */
+    --dim: #6d7f95;
     /* 涨跌方向：绿涨红跌（用户指定，与 A 股默认的红涨绿跌相反） */
     --up: #2ecc71;
     --down: #ff4d4f;
@@ -24,6 +27,9 @@
     --bad: #ff4d4f;
     --warn: #f0b429;
     --info: #4a9eff;
+    /* --accent 之前没定义，三处使用全靠 fallback 兜底——等于隐式变量，
+       换肤时一定会漏。补成显式定义，使用点的 fallback 留着无害。 */
+    --accent: #4a9eff;
     --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     /* ---- 间距：4pt 网格。原来 9/10/11/12/13/14/15/17px 混用，
        相邻两个卡片的间距全靠手感，扫起来没有节奏。 ---- */
@@ -152,6 +158,10 @@
      只在首屏大数字（KPI 的 .v）上留一点点，用来标记"这一块是主数字"。 */
   .pos { color: var(--up); }
   .neg { color: var(--down); }
+  /* 语义色文字：与涨跌无关的"好坏"指标用（盈利年份占比、盈亏比……）。
+     颜色虽和 pos/neg 同值，但换肤/调盘时可以分开走，调用处不许混用。 */
+  .txt-good { color: var(--good); }
+  .txt-bad  { color: var(--bad); }
   .neut { color: var(--warn); }
   .idle { color: var(--muted); }
   .kpi .v.pos { text-shadow: 0 0 22px rgba(46,204,113,.28); }
@@ -619,10 +629,30 @@
   }
   .sig-head { display: flex; align-items: baseline; gap: 10px; flex: none; }
   .sig-head h4 { margin: 0; flex: none; }
-  .sig-head .sig-clock { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--good, #4ade80); }
-  .sig-head .sig-clock.warn { color: #f0b429; }
-  .sig-head .sig-clock.danger { color: #ff6b6b; }
-  .sig-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: 8px; padding-right: 6px; }
+  .sig-head .sig-clock { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--good); }
+  .sig-head .sig-clock.warn { color: var(--warn); }
+  .sig-head .sig-clock.danger { color: var(--bad); }
+  .sig-body { flex: none; }
+  /* 滚动提示：全局滚动条被藏（*::-webkit-scrollbar width:0），WebView2 的
+     悬浮滚动条静止时又不可见——内容一超高，用户不知道下面还有大模型判断/
+     程序判断两段。和更新弹窗同一套做法：把细滚动条放回来 + 底部渐隐
+     「↓ 向下滚动查看全部」，滚到底才消失。 */
+  .sig-body-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; margin-top: 8px; }
+  .sig-body-wrap::after {
+    content: '↓ 向下滚动查看全部'; position: absolute; right: 8px; bottom: 4px; z-index: 1;
+    font-size: 10.5px; color: var(--muted); letter-spacing: .3px;
+    pointer-events: none; opacity: 0; transition: opacity .15s;
+  }
+  .sig-body-wrap.more::after { opacity: 1; }
+  .sig-body {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    padding-right: 6px;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent;
+  }
+  .sig-body::-webkit-scrollbar { width: 8px; height: 8px; }
+  .sig-body::-webkit-scrollbar-track { background: transparent; }
+  .sig-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 4px; }
+  .sig-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); }
   .sig-sec { margin-top: 10px; }
   .sig-sec:first-child { margin-top: 0; }
   .sig-sec > b { display: block; font-size: 11px; letter-spacing: .6px; color: var(--muted); margin-bottom: 5px; }
@@ -637,12 +667,15 @@
     white-space: pre-line;
   }
   .sig-verdict { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
-  .sig-verdict.long { color: #ff6b6b; }   /* 中国习惯：涨/多为红 */
-  .sig-verdict.short { color: #4ade80; }
+  /* 方向色必须与全站 --up/--down 一致（绿涨红跌，用户指定）：做多=绿、做空=红。
+     原来这里自立"中国习惯：多=红"的第二套色，和标签行 .pos/.neg、概率条、
+     全站 KPI 的红绿语义直接冲突——同屏两种红绿，超短线决策场景是认知风险。 */
+  .sig-verdict.long { color: var(--up); }
+  .sig-verdict.short { color: var(--down); }
   .sig-prob { margin-top: 8px; }
   .sig-prob-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,.08); }
-  .sig-prob-bar .long { background: #ff6b6b; }
-  .sig-prob-bar .short { background: #4ade80; }
+  .sig-prob-bar .long { background: var(--up); }
+  .sig-prob-bar .short { background: var(--down); }
   .sig-prob-lab { display: flex; justify-content: space-between; font-size: 11.5px; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .sig-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .sig-tags span {
@@ -895,6 +928,8 @@
   .statusbar .sb-k { color: var(--dim); font-size: 11px; }
   .statusbar .sb-v { font-family: var(--mono); font-weight: 600; }
   .statusbar .btn-ghost { margin: 0; padding: 4px 10px; font-size: 11.5px; }
+  /* 静音态：不用危险红（那不是错误），用 dim 灰表示"这个通道被关了"。 */
+  .statusbar .btn-ghost.btn-mute.off { color: var(--dim); border-style: dashed; }
   /* 常驻状态带的第二行：最近一次判断的原话。
      为什么要有：空仓时最想知道"为什么没做"，而理由原来只躺在流水里，
      流水默认还隐藏跳过行 —— 等于要翻日志才知道它在等什么。
@@ -921,6 +956,20 @@
   .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
   .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
   .at-msg b { color: #fff; }
+
+  /* 全局 toast：alert() 的替代品。系统 alert 是原生模态——样式不随主题、
+     打断操作流、在 WebView2 里还慢一拍。toast 固定右下角，不切 tab 也看得见，
+     几秒后自己消失。错误/结果反馈统一走这里。 */
+  .qa-toast {
+    position: fixed; right: 18px; bottom: 18px; z-index: 12000;
+    max-width: min(420px, calc(100vw - 60px));
+    padding: 10px 14px; border-radius: 8px; font-size: 12.5px; line-height: 1.6;
+    background: var(--surf1); border: 1px solid var(--border-hi);
+    color: var(--text); white-space: pre-line; word-break: break-word;
+  }
+  .qa-toast.hidden { display: none; }
+  .qa-toast.err { border-color: rgba(255,77,79,.45); }
+  .qa-toast.ok  { border-color: rgba(46,204,113,.4); }
 
   /* ---- 全屏提醒幕布 ----
      目的只有一个：**别让人误操作这台电脑**。所以第一版把「AI 交易员正在交易」
@@ -1069,7 +1118,8 @@
       <span class="mini" id="sigSub"></span>
       <span class="sig-clock" id="sigClock">—</span>
     </div>
-    <div class="sig-body">
+    <div class="sig-body-wrap">
+    <div class="sig-body" id="sigBody">
       <div class="sig-sec">
         <b>最终裁决（大模型）</b>
         <div class="sig-verdict" id="sigVerdict">—</div>
@@ -1094,6 +1144,7 @@
         <b>程序判断（只给建议，不拦单）</b>
         <div class="sig-quote" id="sigProg">—</div>
       </div>
+    </div>
     </div>
     <div class="actions">
       <button class="btn-cancel" id="sigNo">不做</button>
@@ -1216,6 +1267,8 @@
     <span class="sb-sep"></span>
     <span class="sb-k" id="atBarStat">—</span>
     <span class="sb-grow"></span>
+    <button class="btn-ghost btn-mute" id="atBarMute" onclick="toggleMute()"
+            title="AI 信号/成交提示音开关。静音时弹窗、置顶、标题闪烁照常。">提示音：开</button>
     <button class="btn-ghost btn-danger" id="atBarStop" onclick="stopAutoTrade()"
             title="停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）">关闭并清仓</button>
     <div class="sb-why">
@@ -2007,7 +2060,7 @@ async function loadEvalDetail(file) {
   $('eNet').textContent = fmt(net);
   $('eNet').className = 'v mono ' + signClass(net);
   $('eYears').textContent = `${profitable}/${yearly.length}`;
-  $('eYears').className = 'v mono ' + (yearly.length && profitable / yearly.length >= 0.7 ? 'pos' : 'neg');
+  $('eYears').className = 'v mono ' + (yearly.length && profitable / yearly.length >= 0.7 ? 'txt-good' : 'txt-bad');
   $('ePf').textContent = pfs.length ? fmt(pfs.reduce((a, b) => a + b, 0) / pfs.length) : '—';
   $('eDd').textContent = worstDd ? fmt(worstDd) + '%' : '—';
 
@@ -2246,7 +2299,7 @@ function renderLive(d) {
     : '—';
 
   $('lvPf').textContent = s.pf != null ? fmt(s.pf) : '—';
-  $('lvPf').className = 'v mono ' + (s.pf != null && s.pf < 1 ? 'neg' : '');
+  $('lvPf').className = 'v mono ' + (s.pf != null && s.pf < 1 ? 'txt-bad' : '');
 
   // 回撤按「账户余额曲线」算，分母是峰值余额（不是净入金，也不是累计盈亏）
   $('lvDd').textContent = s.max_dd_pct != null ? fmt(s.max_dd_pct, 1) + '%' : '—';
@@ -2474,6 +2527,45 @@ function renderStatusBar(a) {
   $('atBarStop').disabled = !(a && (a.running || a.stale));
 }
 
+/* ---- 成交反馈：开/平仓是"钱动了"的时刻 ----
+   原来一笔真实单成交只在日志流里多一行字（日志还默认隐藏跳过行）——
+   盯盘时"我的单到底成没成"缺少强反馈。这里盯 /api/autotrade 的 recent 日志：
+   用每行 ts 去重，1 秒轮询下同一条只会被看到一次；开/平仓各响一声
+   （开仓中音、平仓低音，和信号铃的两声上行区分开）+ 写结果条。
+   首次加载只建基线不响：面板重启前攒下的旧成交翻出来再响一遍只会吓人。 */
+let fillLastTs = 0;
+function fillFeedback(a) {
+  const rows = (a && a.recent) || [];
+  if (!rows.length) return;
+  const ts = r => Number(r && r.ts) || 0;
+  if (!fillLastTs) {
+    fillLastTs = rows.reduce((m, r) => Math.max(m, ts(r)), 0);
+    return;
+  }
+  const fresh = rows.filter(r => ts(r) > fillLastTs);
+  if (!fresh.length) return;
+  fillLastTs = fresh.reduce((m, r) => Math.max(m, ts(r)), fillLastTs);
+  const opens = fresh.filter(r => r.kind === 'open');
+  const closes = fresh.filter(r => r.kind === 'close');
+  const fails = fresh.filter(r => r.kind === 'open_failed' || r.kind === 'close_failed');
+  if (fails.length) {
+    const f = fails[fails.length - 1];
+    atSay('<b>下单失败：</b>' + esc(String(f.error || f.reason || '未知原因').slice(0, 120)), 'err');
+  }
+  if (opens.length) {
+    const o = opens[opens.length - 1];
+    beepTrade(false);
+    atSay(`<b>已开仓</b> ${o.direction > 0 ? '多' : '空'} ${esc(String(o.lots || ''))} 手 @ ${fmt(o.price, 3)}`, 'ok');
+  }
+  if (closes.length) {
+    beepTrade(true);
+    const total = closes.reduce((s, r) => s + (Number(r.pnl) || 0), 0);
+    atSay(closes.length > 1
+      ? `<b>已平仓 ${closes.length} 笔</b>，合计 ${money(total)}`
+      : `<b>已平仓</b> ${closes[0].direction > 0 ? '多' : '空'}单 ${money(closes[0].pnl)}`, 'ok');
+  }
+}
+
 function renderAutoTrade(a) {
   renderStatusBar(a);
   const st = $('atState');
@@ -2511,6 +2603,7 @@ function renderAutoTrade(a) {
   }
 
   // 当前持仓
+  fillFeedback(a);
   const p = a.position;
   if (p) {
     $('atPos').textContent = (p.direction > 0 ? '多' : '空') + ' ' + p.lots + ' 手';
@@ -2874,6 +2967,22 @@ function fillSymbolOptions(a) {
   if (a.symbols.some(s => s.symbol === want)) el.value = want;
 }
 
+/* 全局 toast：alert() 的替代。区别：不打断操作流、样式随主题、
+   出现在任何 tab 都看得见的右下角，几秒后自己消失。 */
+let toastTimer = null;
+function qaToast(msg, kind) {
+  let el = $('qaToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'qaToast';
+    document.body.appendChild(el);
+  }
+  el.className = 'qa-toast ' + (kind === 'ok' ? 'ok' : 'err');
+  el.textContent = msg;   // textContent：消息常含后端返回的原文，不能进 innerHTML
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'qa-toast hidden'; }, 6000);
+}
+
 /* 操作结果条。和 atNote 分开：atNote 每 15 秒被轮询覆写一次，
    把「启动失败」写在那里等于没写——用户只会看到「点了没反应」。 */
 function atSay(msg, kind) {
@@ -3127,9 +3236,9 @@ async function lpScanAndImport() {
   if (isNative() && typeof window.pywebview.api.pick_lesson_file === 'function') {
     let picked;
     try { picked = await nativeApi('pick_lesson_file'); }
-    catch (e) { alert('打开文件选择器失败：' + String(e)); return; }
+    catch (e) { qaToast('打开文件选择器失败：' + String(e), 'err'); return; }
     if (!picked || !picked.ok) {
-      if (picked && picked.error) alert('无法打开文件选择器：' + picked.error);
+      if (picked && picked.error) qaToast('无法打开文件选择器：' + picked.error, 'err');
       return;
     }
     if (!picked.path) return;   // 用户在对话框里点了取消，不是错误
@@ -3140,23 +3249,23 @@ async function lpScanAndImport() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: picked.path, name: name || picked.name }),
       })).json();
-      if (!j.ok) { alert('导入失败：' + (j.error || '')); return; }
-      alert(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`);
+      if (!j.ok) { qaToast('导入失败：' + (j.error || ''), 'err'); return; }
+      qaToast(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`, 'ok');
       await loadLessonPacks();
       loadLessons();
-    } catch (e) { alert('导入请求失败：' + String(e)); }
+    } catch (e) { qaToast('导入请求失败：' + String(e), 'err'); }
     return;
   }
   // 浏览器模式拿不到系统对话框：走 import 目录的老流程。
   let scan;
   try {
     scan = await (await fetch('/api/lesson_packs/scan', { cache: 'no-store' })).json();
-  } catch (e) { alert('扫描请求失败：' + String(e)); return; }
-  if (!scan.ok) { alert('扫描失败：' + (scan.error || '')); return; }
+  } catch (e) { qaToast('扫描请求失败：' + String(e), 'err'); return; }
+  if (!scan.ok) { qaToast('扫描失败：' + (scan.error || ''), 'err'); return; }
   const dir = scan.import_dir || '';
   if (!(scan.files || []).length) {
-    alert('import 目录里还没有 .jsonl 文件。\n\n把经验库文件（.jsonl）放进：\n' + dir
-      + '\n\n然后再点一次「导入」。');
+    qaToast('import 目录里还没有 .jsonl 文件。\n\n把经验库文件（.jsonl）放进：\n' + dir
+      + '\n\n然后再点一次「导入」。', 'err');
     return;
   }
   const list = scan.files.map(f => `${f.name}（${f.count} 条）`).join('\n');
@@ -3169,11 +3278,11 @@ async function lpScanAndImport() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file, name: name || file }),
     })).json();
-    if (!j.ok) { alert('导入失败：' + (j.error || '')); return; }
-    alert(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`);
+    if (!j.ok) { qaToast('导入失败：' + (j.error || ''), 'err'); return; }
+    qaToast(`导入完成：${j.imported} 条经验${j.skipped_bad ? `（跳过 ${j.skipped_bad} 行坏数据）` : ''}，已设为当前使用。`, 'ok');
     await loadLessonPacks();
     loadLessons();
-  } catch (e) { alert('导入请求失败：' + String(e)); }
+  } catch (e) { qaToast('导入请求失败：' + String(e), 'err'); }
 }
 
 async function loadAppVersion() {
@@ -3189,7 +3298,7 @@ async function loadAppVersion() {
 async function lpExportActive() {
   const sel = $('lpSelect');
   const id = (sel || {}).value || '';
-  if (!id) { alert('先选一个要导出的经验库'); return; }
+  if (!id) { qaToast('先选一个要导出的经验库', 'err'); return; }
 
   // 原生窗口：先弹系统「另存为」，用户选哪里就写哪里——和「导入」对称。
   // 浏览器模式拿不到原生对话框，退回后端 export/ 目录（老行为不能丢）。
@@ -3200,9 +3309,9 @@ async function lpExportActive() {
     let picked;
     // 文件名清洗交给后端：那边已经有一份规则，前端再写一遍必然分叉
     try { picked = await nativeApi('pick_export_path', pack.name || 'lesson_pack'); }
-    catch (e) { alert('打开保存对话框失败：' + String(e)); return; }
+    catch (e) { qaToast('打开保存对话框失败：' + String(e), 'err'); return; }
     if (!picked || !picked.ok) {
-      if (picked && picked.error) alert('无法打开保存对话框：' + picked.error);
+      if (picked && picked.error) qaToast('无法打开保存对话框：' + picked.error, 'err');
       return;
     }
     if (!picked.path) return;   // 用户在对话框里点了取消，不是错误
@@ -3215,7 +3324,7 @@ async function lpExportActive() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(native ? { id, path: dest } : { id }),
     })).json();
-    if (!j.ok) { alert('导出失败：' + (j.error || '')); return; }
+    if (!j.ok) { qaToast('导出失败：' + (j.error || ''), 'err'); return; }
     // 不能用浏览器下载（WebView2 里 ALLOW_DOWNLOADS=False），路径就是交付物
     confirmApiCall({
       title: '导出完成',
@@ -3224,7 +3333,7 @@ async function lpExportActive() {
         : `已导出 ${j.count} 条到：\n${j.path}\n\n用文件管理器打开这个位置就能拿到 .jsonl 文件。`,
       okText: '知道了',
     });
-  } catch (e) { alert('导出请求失败：' + String(e)); }
+  } catch (e) { qaToast('导出请求失败：' + String(e), 'err'); }
 }
 
 async function lpCreate() {
@@ -3235,9 +3344,9 @@ async function lpCreate() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     })).json();
-    if (!j.ok) { alert('创建失败：' + (j.error || '')); return; }
+    if (!j.ok) { qaToast('创建失败：' + (j.error || ''), 'err'); return; }
     await loadLessonPacks();
-  } catch (e) { alert('创建请求失败：' + String(e)); }
+  } catch (e) { qaToast('创建请求失败：' + String(e), 'err'); }
 }
 
 /* ==================== 模型切换 ====================
@@ -3390,8 +3499,7 @@ function openSetup(payload) {
   $('setupKey').classList.remove('bad');
   $('setupMsg').textContent = '';
   $('setupMsg').className = 'mini';
-  $('setupMask').classList.remove('hidden');
-  setTimeout(() => $('setupKey').focus(), 80);
+  maskOpen($('setupMask'), { focus: $('setupKey') });
 }
 
 function autoModel(pid) {
@@ -3413,7 +3521,7 @@ async function skipSetup() {
       body: JSON.stringify({ skip: true }),
     });
   } catch (e) { /* 标记写不上也不该拦住用户 */ }
-  $('setupMask').classList.add('hidden');
+  maskClose($('setupMask'));
   loadLlm();
 }
 
@@ -3443,7 +3551,7 @@ async function saveSetup() {
       msg.className = 'mini setup-ok';
       $('setupKey').value = '';
       setTimeout(() => {
-        $('setupMask').classList.add('hidden');
+        maskClose($('setupMask'));
         loadLlm();
         loadAutoTrade();
       }, 1100);
@@ -3467,7 +3575,7 @@ async function quitApp() {
   // 第二个窗口（主程序在别人那里）：这里的按钮会打到对方进程，
   // 一点就把正在跑的那份关掉 —— 必须拦住。
   if (typeof window !== 'undefined' && window.__AQA_ATTACH__) {
-    alert('这份面板是第二个窗口，主程序在另一个窗口里运行。\n要退出请回到那个窗口。');
+    qaToast('这份面板是第二个窗口，主程序在另一个窗口里运行。\n要退出请回到那个窗口。', 'err');
     return;
   }
   let p = null;
@@ -3500,11 +3608,12 @@ async function quitApp() {
     : '纸面仓位只存在本地，强制退出等于直接丢弃。';
   $('quitForce').disabled = false;
   $('quitFlatten').disabled = false;
-  $('quitMask').classList.remove('hidden');
+  // 焦点落在「取消」上：退出是不可逆操作，Enter 误触的代价必须最小
+  maskOpen($('quitMask'), { focus: $('quitMask').querySelector('.btn-cancel') });
 }
 
 function quitMaskClose() {
-  $('quitMask').classList.add('hidden');
+  maskClose($('quitMask'));
   nativeApi('quit_dismissed');   // 窗口模式下告诉 Python：这次没退，别关窗
 }
 
@@ -3543,8 +3652,11 @@ async function postQuit(flatten) {
 // 前端只是状态机：检测/下载/安装全部在后端 updater。mode!=='full' 时
 // 整块 UI 隐藏（源码跑 git pull 重启即更新，绿色版没有升级通道）。
 
-function updateShow() { $('updateMask').classList.remove('hidden'); }
-function updateLater() { $('updateMask').classList.add('hidden'); }
+function updateShow() {
+  // 焦点落在「暂不」上：更新不着急，Enter 误触不该触发下载
+  maskOpen($('updateMask'), { focus: $('updateLater') });
+}
+function updateLater() { maskClose($('updateMask')); }
 
 async function updateProgress() {
   try {
@@ -3872,7 +3984,7 @@ function updateCurtain(a) {
 const PROG_DIR_TEXT = { 1: '做多', '-1': '做空', 0: '不动手（无建议）' };
 
 function tradeMaskClose() {
-  $('tradeMask').classList.add('hidden');
+  maskClose($('tradeMask'));
 }
 
 /* ==================== 图表最大化查看 ====================
@@ -3919,10 +4031,11 @@ function openChartMax(id) {
     : '数据截至最近一次刷新';
   $('chartMask').classList.remove('hidden');
   chartMaskDraw();
+  maskOpen($('chartMask'), { focus: $('chartMask').querySelector('.btn-cancel') });
 }
 
 function chartMaskClose() {
-  $('chartMask').classList.add('hidden');
+  maskClose($('chartMask'));
   chartMaxId = null;
   $('chartBig').innerHTML = '';
 }
@@ -3944,6 +4057,7 @@ function tradeRow(label, val, cls) {
 
 function tradeDetailShow(ticket) {
   $('tradeMask').classList.remove('hidden');
+  maskOpen($('tradeMask'), { focus: $('tradeMask').querySelector('.btn-cancel') });
   $('tdTitle').textContent = `交易详情 · #${ticket}`;
   $('tdBody').textContent = '读取中…';
   fetch(`/api/trade?ticket=${ticket}`)
@@ -4414,10 +4528,10 @@ async function genSessionAi(d) {
       if (j.api_calls) renderApiMeter(j.api_calls);
       renderSessions(d);
     } else {
-      alert(j.error || '生成失败');
+      qaToast(j.error || '生成失败', 'err');
     }
   } catch (e) {
-    alert(String(e));
+    qaToast(String(e), 'err');
   }
 }
 
@@ -4447,12 +4561,12 @@ async function deleteAccount() {
       body: JSON.stringify({ login: login, confirm: true }),
     });
     const j = await r.json();
-    if (!j.ok) { alert(j.error || '删除失败'); return; }
+    if (!j.ok) { qaToast(j.error || '删除失败', 'err'); return; }
     sessSel = null;
     liveData = null;
     await refreshLive(true);
   } catch (e) {
-    alert(String(e));
+    qaToast(String(e), 'err');
   }
 }
 
@@ -4836,6 +4950,54 @@ async function refreshAi() {
   }
 }
 
+/* ---------------- 弹窗焦点管理 ----------------
+   为什么要补这个：弹窗只是普通 div 盖着页面，Tab 顺序会落到遮罩背后的
+   页面元素上；信号弹窗又不响应 Esc，键盘用户会陷入"焦点在弹窗后面、
+   弹窗又关不掉"的状态。约定：
+     maskOpen  = 打开 + 记录来源焦点 + 把焦点移进弹窗（默认安全的那个按钮）
+     maskClose = 关闭 + 还原来源焦点
+   Tab 在弹窗内循环（栈顶弹窗生效）；Esc 语义各弹窗维持原样，不在这里统一。 */
+const modalStack = [];
+function focusablesIn(root) {
+  if (!root || !root.querySelectorAll) return [];
+  return Array.from(root.querySelectorAll('button, input, select, textarea, a[href], [tabindex]'))
+    .filter(el => el && !el.disabled && !el.classList.contains('hidden'));
+}
+function maskOpen(mask, opts) {
+  if (!mask) return;
+  mask.classList.remove('hidden');
+  modalStack.push({ mask, prev: document.activeElement });
+  const dlg = (mask.querySelector && mask.querySelector('[role="dialog"]')) || mask;
+  const target = (opts && opts.focus) || (dlg.querySelector && dlg.querySelector('[autofocus]'))
+    || focusablesIn(dlg)[0];
+  if (target && target.focus) setTimeout(() => { try { target.focus(); } catch (e) {} }, 30);
+}
+function maskClose(mask) {
+  if (!mask) return;
+  mask.classList.add('hidden');
+  const i = modalStack.findIndex(m => m.mask === mask);
+  if (i >= 0) {
+    const prev = modalStack.splice(i, 1)[0].prev;
+    if (prev && prev.focus && (!document.contains || document.contains(prev))) {
+      try { prev.focus(); } catch (e) {}
+    }
+  }
+}
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || !modalStack.length) return;
+  const top = modalStack[modalStack.length - 1].mask;
+  const dlg = (top.querySelector && top.querySelector('[role="dialog"]')) || top;
+  const f = focusablesIn(dlg);
+  if (!f.length) { e.preventDefault(); return; }
+  const first = f[0], last = f[f.length - 1];
+  const cur = document.activeElement;
+  if (e.shiftKey && (cur === first || !dlg.contains || !dlg.contains(cur))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && cur === last) {
+    e.preventDefault(); first.focus();
+  }
+});
+
 /* ---------------- 付费 API 确认弹窗 ---------------- */
 let modalResolve = null;
 
@@ -4848,12 +5010,13 @@ function confirmApiCall(opts) {
     $('modalOk').textContent = opts.okText || '继续';
     $('modalOk').disabled = false;
     $('modalCancel').disabled = false;
-    $('modalMask').classList.remove('hidden');
+    // 焦点落在「取消」上：Enter 误触的代价最小（确认类弹窗的统一约定）
+    maskOpen($('modalMask'), { focus: $('modalCancel') });
   });
 }
 
 function closeModal(result) {
-  $('modalMask').classList.add('hidden');
+  maskClose($('modalMask'));
   const fn = modalResolve;
   modalResolve = null;
   if (fn) fn(result);
@@ -4901,26 +5064,60 @@ function unlockAudio() {
 document.addEventListener('pointerdown', unlockAudio, { once: false });
 document.addEventListener('keydown', unlockAudio, { once: false });
 
-/* 提示音用振荡器合成，不新增音频文件：打包不用多收资产，
-   也不会因为找不到 wav 而静默失败。两声上行短音，够醒。 */
-function beepSignal() {
+/* 提示音静音开关。半夜挂着软件的人没法靠系统音量单独关这一个铃——
+   以前只能整机静音。状态持久化在 localStorage，重启面板保留。
+   localStorage 可能不可用（隐私模式/冒烟环境的假 DOM），全程 try 兜底。 */
+const MUTE_KEY = 'aqa_mute';
+function isMuted() {
+  try { return typeof localStorage !== 'undefined' && localStorage.getItem(MUTE_KEY) === '1'; }
+  catch (e) { return false; }
+}
+function toggleMute() {
+  const now = !isMuted();
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem(MUTE_KEY, now ? '1' : '0'); }
+  catch (e) { /* 写不进去也只影响本次会话 */ }
+  syncMuteButton();
+  if (!now) beepTone(880, 0, 0.12, 0.2);   // 打开时给一声确认，知道开关确实生效了
+}
+function syncMuteButton() {
+  const b = $('atBarMute');
+  if (!b) return;
+  const m = isMuted();
+  b.textContent = m ? '提示音：关' : '提示音：开';
+  b.classList.toggle('off', m);
+}
+
+/* 单音合成基元：hz 频率、dt 相对起始秒、dur 时长、vol 峰值增益。 */
+function beepTone(hz, dt, dur, vol) {
   try {
     unlockAudio();
     if (!audioCtx) return;
     const t0 = audioCtx.currentTime;
-    [[0, 880], [0.18, 1320]].forEach(([dt, hz]) => {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = hz;
-      gain.gain.setValueAtTime(0.0001, t0 + dt);
-      gain.gain.exponentialRampToValueAtTime(0.26, t0 + dt + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.16);
-      osc.connect(gain).connect(audioCtx.destination);
-      osc.start(t0 + dt);
-      osc.stop(t0 + dt + 0.18);
-    });
-  } catch (e) { /* 同上：声音是锦上添花 */ }
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = hz;
+    gain.gain.setValueAtTime(0.0001, t0 + dt);
+    gain.gain.exponentialRampToValueAtTime(vol, t0 + dt + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0 + dt);
+    osc.stop(t0 + dt + dur + 0.02);
+  } catch (e) { /* 声音是锦上添花 */ }
+}
+
+/* 信号铃：两声上行短音，够醒。静音时跳过（置顶和标题闪烁照常，视觉通道不缺）。 */
+function beepSignal() {
+  if (isMuted()) return;
+  beepTone(880, 0, 0.16, 0.26);
+  beepTone(1320, 0.18, 0.16, 0.26);
+}
+
+/* 成交反馈音：开仓一声中音，平仓一声低音，和信号铃（两声上行）明显不同。
+   真实单成交原来只在日志流里多一行字——"我的单到底成没成"缺少强反馈。 */
+function beepTrade(isExit) {
+  if (isMuted()) return;
+  beepTone(isExit ? 620 : 780, 0, 0.14, 0.22);
 }
 
 function flashTitle(on) {
@@ -4984,7 +5181,7 @@ function sigShow(sig) {
     : `${long ? '做多' : '做空'} · ${sig.price == null ? '' : fmt(sig.price, 3)}`;
 
   // 最终裁决：入场看 act/方向，出场就是"平"。
-  // 颜色按中国习惯：多/涨 = 红，空/跌 = 绿。
+  // 颜色走全站方向色（--up 绿涨 / --down 红跌），和标签行、概率条同一套语义。
   const v = $('sigVerdict');
   if (isExit) {
     v.textContent = `平掉 ${long ? '多单' : '空单'}`;
@@ -5036,15 +5233,31 @@ function sigShow(sig) {
         (lastAutoData && lastAutoData.assist_cfg && lastAutoData.assist_cfg.max_slip_usd) || 0.8
       } 美元，信号自动作废。`;
 
+  // 内容每次重填，滚动位置回顶（最终裁决永远在第一屏），并按实际溢出程度
+  // 切换"↓ 向下滚动查看全部"渐隐提示。提示是锦上添花，全程不抛。
+  try {
+    const sb = $('sigBody');
+    sb.scrollTop = 0;
+    const wrap = sb.parentElement;
+    if (wrap && wrap.classList) {
+      const syncFade = () => wrap.classList.toggle('more',
+        sb.scrollTop + sb.clientHeight < sb.scrollHeight - 4);
+      sb.onscroll = syncFade;            // onscroll 而不是 addListener：反复弹只留一个
+      requestAnimationFrame(syncFade);   // 排版完才知道有没有溢出
+    }
+  } catch (e) { /* 没提示也要能用 */ }
+
   $('sigMask').classList.remove('hidden');
   $('sigCard').classList.add('flash');
   beepSignal();
   flashTitle(true);
   raiseWindowForSignal();
+  // 焦点落在「不做」上——和"超时不点=不做"的默认语义一致，Enter 误触不会开仓。
+  maskOpen($('sigMask'), { focus: $('sigNo') });
 }
 
 function sigHide() {
-  $('sigMask').classList.add('hidden');
+  maskClose($('sigMask'));
   $('sigCard').classList.remove('flash');
   flashTitle(false);
   lastSigId = null;
@@ -5186,6 +5399,7 @@ refreshLive();
 loadAutoTrade();
 loadLlm();
 updateModeHint();
+syncMuteButton();   // 提示音开关的初始文案/样式（静音状态从 localStorage 恢复）
 // 启动后查一次要不要弹配置向导。放在 loadLlm 之后：向导要用到供应商列表。
 checkSetup();
 // 经验库选择器：列表 + 切换事件。切换是原子改 index，下一次决策就生效。
