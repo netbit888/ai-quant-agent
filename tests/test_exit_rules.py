@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 
-from live.autotrade import Cfg, _exit_gate, validate_cfg
+from live.autotrade import Cfg, _exit_gate, exit_params, validate_cfg
 from tools.replay_exit import replay_one, spec_of, summarize
 
 
@@ -59,6 +59,69 @@ class TestExitGate(unittest.TestCase):
         """sl_usd=0 = 关掉止损（旧行为）。不能因为浮亏很大就强制平。"""
         d = _exit_gate(Cfg(sl_usd=0, tp_min_usd=0), 120, -9.0)
         self.assertIsNone(d)
+
+
+class TestPlanExitParams(unittest.TestCase):
+    """分 regime 的出场参数（2026-10-28「先判行情，再选打法」）。
+
+    依据：85 个真实决策点上，tp 3.25 把固定持 10 根 +12.6 的信号变成 -5.0；
+    6×6 网格里 tp≥4.5 全部转正。止损宽度没有可靠结论（去重后单调性消失），
+    所以 sl 不动，只有 tp 和持仓上限分 plan。
+    """
+
+    def test_trend_plan_uses_trend_params(self):
+        ep = exit_params(Cfg(), "trend")
+        self.assertEqual(ep["tp_min_usd"], 7.0)
+        self.assertEqual(ep["max_hold_sec"], 10800)
+        self.assertEqual(ep["sl_usd"], 3.0)   # 止损不分 plan
+
+    def test_range_plan_unchanged(self):
+        cfg = Cfg()
+        ep = exit_params(cfg, "range")
+        self.assertEqual(ep["tp_min_usd"], cfg.tp_min_usd)
+        self.assertEqual(ep["max_hold_sec"], cfg.max_hold_sec)
+
+    def test_mid_plan_uses_range_params(self):
+        ep = exit_params(Cfg(), "mid")
+        self.assertEqual(ep["tp_min_usd"], 3.25)
+
+    def test_none_plan_defaults_to_range(self):
+        """旧 state 没有 plan 字段：按震荡参数管，行为与改前完全一致。"""
+        ep = exit_params(Cfg(), None)
+        self.assertEqual(ep["tp_min_usd"], 3.25)
+        self.assertEqual(ep["max_hold_sec"], 3600)
+
+    def test_tp_min_trend_zero_falls_back(self):
+        """tp_min_trend=0 关掉趋势宽止盈，趋势单退回老门槛。"""
+        ep = exit_params(Cfg(tp_min_trend=0.0), "trend")
+        self.assertEqual(ep["tp_min_usd"], 3.25)
+
+    def test_trend_gate_tp_is_wider(self):
+        """趋势单浮盈 4.0：震荡门槛（3.25）早该问模型，趋势门槛（7.0）继续拿。"""
+        cfg = Cfg()
+        d_range = _exit_gate(cfg, 600, 4.0, plan="range")
+        self.assertIsNone(d_range)              # 到 3.25 了 → 交给模型
+        d_trend = _exit_gate(cfg, 600, 4.0, plan="trend")
+        self.assertFalse(d_trend["close"])      # 没到 7.0 → 继续持有
+        self.assertEqual(d_trend["source"], "tp_wait")
+
+    def test_trend_gate_timeout_is_longer(self):
+        """趋势单持仓上限 3 小时：震荡单 61 分钟就该平，趋势单还拿着。"""
+        cfg = Cfg()
+        self.assertEqual(_exit_gate(cfg, 3660, 1.0, plan="range")["source"], "timeout")
+        d = _exit_gate(cfg, 3660, 1.0, plan="trend")
+        self.assertFalse(d["close"])
+
+    def test_trend_gate_stop_same_as_range(self):
+        """止损不分 plan：趋势单同样 -3.0 平。"""
+        d = _exit_gate(Cfg(), 600, -3.1, plan="trend")
+        self.assertEqual(d["source"], "sl")
+
+    def test_trend_gate_stop_still_before_tp(self):
+        """plan 分支不许破坏顺序：趋势单浮亏过线时，止盈门槛再宽也得先平。"""
+        d = _exit_gate(Cfg(), 600, -3.1, plan="trend")
+        self.assertTrue(d["close"])
+        self.assertEqual(d["source"], "sl")
 
 
 class TestValidateCfgExitParams(unittest.TestCase):

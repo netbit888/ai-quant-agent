@@ -2608,15 +2608,21 @@ function renderAutoTrade(a) {
   if (p) {
     $('atPos').textContent = (p.direction > 0 ? '多' : '空') + ' ' + p.lots + ' 手';
     $('atPos').className = 'v ' + (p.direction > 0 ? 'pos-long' : 'pos-short');
-    let sub = '开仓 ' + fmt(p.price_open, 3) +
+    // 打法标签（2026-10-28 分 regime）：这笔单开仓时锁定的 plan。
+    // 趋势单和震荡单的止盈门槛/持仓上限不是一套数，不看标签分不清
+    // 「浮盈 4.0 没到门槛该拿」和「早该问模型怎么不平」。
+    const PLAN = { trend: '趋势单', range: '震荡单', mid: '方向不明' };
+    const plan = p.plan || 'range';
+    let sub = (PLAN[plan] || plan) + ' · 开仓 ' + fmt(p.price_open, 3) +
       ' · p_up ' + fmt((p.p_up || 0) * 100, 0) + '%';
-    // 峰值浮盈：这一笔从开仓到现在摸到过的最高浮盈。必须和门槛放一起看——
+    // 峰值浮盈：这一笔从开仓到现在摸到过的最高浮盈。门槛必须按这笔单的
+    // plan 取（趋势单 7.0、震荡单 3.25），拿错参照系「差一口气」就看不出来。
     // 「峰值 +2.20 / 3.25」一眼就知道是差一口气，还是从头到尾没靠近过。
-    // 没有这个数的时候，一笔单跑到 −3.77 根本分不清是「摸到过没舍得走」
-    // 还是「一路不回头」，两种情况的处置完全相反。
+    const tpFor = plan === 'trend'
+      ? (Number(a.tp_min_trend) || 0) : (Number(a.tp_min_usd) || 0);
     if (p.peak_pnl != null && !Number.isNaN(Number(p.peak_pnl))) {
       sub += ' · 峰值 ' + money(Number(p.peak_pnl))
-        + (a.tp_min_usd ? ' / ' + fmt(a.tp_min_usd, 2) : '');
+        + (tpFor ? ' / ' + fmt(tpFor, 2) : '');
     }
     $('atPosSub').textContent = sub;
   } else {
@@ -2637,7 +2643,12 @@ function renderAutoTrade(a) {
       const verb = ld.act === false ? '不做'
         : (ld.act === true ? (ld.direction > 0 ? '→ 做多' : '→ 做空')
                            : (ld.direction > 0 ? '→ 偏多' : '→ 偏空'));
-      $('atCallSub').textContent = verb + ' · ' + hhmmss(ld.ts);
+      // 行情判定（2026-10-28）：这一轮模型是在哪种行情里做的决定。
+      // 「先判行情再选打法」落地后，不看这一格就没法验证 regime 分流对不对。
+      const REGIME = { trend: '趋势市', range: '震荡市', mid: '方向不明' };
+      const regimeTxt = REGIME[ld.regime] || '';
+      $('atCallSub').textContent = verb + (regimeTxt ? ' · ' + regimeTxt : '')
+        + ' · ' + hhmmss(ld.ts);
     } else {
       $('atCall').textContent = ld.close ? '平仓' : '继续持有';
       $('atCallSub').textContent = hhmmss(ld.ts);
@@ -2667,7 +2678,8 @@ function renderAutoTrade(a) {
       const w = ld.wait;
       if (w && w.level) {
         const FLAG = { set: '刚定', keep: '继续等', move: '下调', drift: '想上移·已拦',
-                       expired: '已作废', consumed: '到点未进·作废', cleared_open: '已进场' };
+                       expired: '已作废', consumed: '到点未进·作废', cleared_open: '已进场',
+                       disabled: '趋势市·停用' };
         const f = FLAG[ld.wait_flag] || '';
         waitTxt = '锚 ' + Number(w.level).toFixed(3) + (f ? ' · ' + f : '');
       }

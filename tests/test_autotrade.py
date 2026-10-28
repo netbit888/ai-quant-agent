@@ -1376,7 +1376,7 @@ class TestPromptLayout(unittest.TestCase):
 
     def test_rules_live_in_system_not_user(self):
         p = autotrade.build_entry_prompt(bars_up(20), 4040.0, 4040.24)
-        self.assertIn("超短线", autotrade.ENTRY_SYSTEM)
+        self.assertIn("日内交易员", autotrade.ENTRY_SYSTEM)
         self.assertIn("信息边界", autotrade.ENTRY_SYSTEM)
         # 规则不该混进动态数据里，否则每轮都当新内容重算
         self.assertNotIn("超短线的敌人是成本", p)
@@ -1493,14 +1493,14 @@ class TestStructure(unittest.TestCase):
         s = autotrade._structure(bars_from_closes([4000 + i for i in range(14)]))
         self.assertAlmostEqual(s["er"], 1.0, places=4)
         self.assertEqual(s["streak"], 13)
-        self.assertIn("单边趋势", autotrade._structure_text(
+        self.assertIn("趋势市", autotrade._structure_text(
             bars_from_closes([4000 + i for i in range(14)])))
 
     def test_zigzag_is_range(self):
         closes = [4000 + (2 if i % 2 else 0) for i in range(14)]
         s = autotrade._structure(bars_from_closes(closes))
         self.assertLess(s["er"], 0.30)
-        self.assertIn("窄幅震荡", autotrade._structure_text(bars_from_closes(closes)))
+        self.assertIn("震荡市", autotrade._structure_text(bars_from_closes(closes)))
 
     def test_position_percent(self):
         # 收盘在区间最上方 → 100%
@@ -1549,24 +1549,32 @@ class TestStructure(unittest.TestCase):
     # 变的是语气——模型可不同意，但要给出理由（拆掉逼出 p_up=0.0 的框）。
 
     def test_downtrend_lower_edge_forbids_long(self):
-        """下跌趋势里贴下沿是弱势延续，不是超卖——程序倾向不接多。
+        """下跌趋势里贴下沿是顺势做空位，不是超卖——程序倾向不接多。
 
         漏了这一条时，14 根窗口在跌势里永远处于区间下部，位置判定永远显示
         「可考虑做多」；同时想空又被「追破位」铁律按住，结果只会做多。
+        2026-10-28 起趋势市的标准动作是顺势直接做：跌势贴下沿给做空方向，
+        但明确要求当前根弱势收（长下影 = 有人接，不做）。
         """
         rows = bars_from_closes([4000 - i for i in range(14)])
         text = autotrade._structure_text(rows)
         self.assertIn("下跌趋势", text)
-        self.assertIn("倾向等反抽到上沿做空", text)
-        self.assertIn("你可以不同意", text)
+        self.assertIn("顺势做空", text)
+        self.assertIn("不是超卖", text)
+        self.assertIn("不要反手接多", text)
 
-    def test_uptrend_upper_edge_forbids_chasing(self):
+    def test_uptrend_upper_edge_allows_trend_long(self):
+        """涨势贴上沿：2026-10-28 起合法——趋势市顺势直接做，位置高不是理由。
+
+        旧话术（"此处不是买点，等回踩"）让趋势市 70 次决策只开 4 仓；
+        实测按它等回踩的单 47 笔均值 -1.21。现在改为：可顺势做多，
+        唯一否决依据是当前根形状（插针顶不做）。
+        """
         rows = bars_from_closes([4000 + i for i in range(14)])
         text = autotrade._structure_text(rows)
-        # 2026-10-27 起话术不再给"倾向等回踩低吸"——模型把它读成"可以买"，
-        # 当天在 94% 位置追了两笔。现在直接说此处不是买点。
-        self.assertIn("此处不是买点", text)
-        self.assertIn("你可以不同意", text)
+        self.assertIn("顺势做多", text)
+        self.assertIn("高位本身不是否决理由", text)
+        self.assertIn("插针顶", text)
 
     def test_range_keeps_symmetric_edges(self):
         """震荡里贴下沿仍然是买点，别把趋势线规则误用到震荡。"""
@@ -1581,32 +1589,45 @@ class TestStructure(unittest.TestCase):
 
     def test_zone_text_direct(self):
         """直接钉 pos/er/drift 的组合，绕开构造 K 线的麻烦。"""
-        # 跌势贴下沿 → 程序倾向等反抽做空
-        self.assertIn("倾向等反抽到上沿做空", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
-        # 涨势贴下沿 → 回踩到位倾向做多
-        self.assertIn("倾向做多", autotrade._zone_text(0.10, 0.70, 5.0, 0.35))
-        # 涨势贴上沿 → 程序不给方向（原来给 +1，等于给追高背书）
-        self.assertIn("此处不是买点", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
-        # 跌势贴上沿 → 反抽到位倾向做空
-        self.assertIn("倾向做空", autotrade._zone_text(0.90, 0.70, -5.0, 0.35))
+        # 跌势贴下沿 → 顺势做空（不是超卖，不接多）
+        self.assertIn("顺势做空", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
+        self.assertIn("不要反手接多", autotrade._zone_text(0.10, 0.70, -5.0, 0.35))
+        # 涨势贴下沿 → 回踩已发生，直接做多
+        self.assertIn("倾向：回踩已经发生，直接做多",
+                      autotrade._zone_text(0.10, 0.70, 5.0, 0.35))
+        # 涨势贴上沿 → 顺势做多，位置高不是否决理由（2026-10-28 改）
+        self.assertIn("顺势做多", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
+        self.assertIn("插针顶", autotrade._zone_text(0.90, 0.70, 5.0, 0.35))
+        # 跌势贴上沿 → 反抽已发生，直接做空
+        self.assertIn("倾向：反抽已经发生，直接做空",
+                      autotrade._zone_text(0.90, 0.70, -5.0, 0.35))
         # 震荡两边都对称
         self.assertIn("可考虑做多", autotrade._zone_text(0.10, 0.10, -5.0, 0.35))
         self.assertIn("可考虑做空", autotrade._zone_text(0.90, 0.10, 5.0, 0.35))
-        # 中间地带不动手
-        self.assertIn("不动手", autotrade._zone_text(0.50, 0.70, -5.0, 0.35))
+        # 趋势中间地带 → 可顺势做（2026-10-28：不再是"不动手"）
+        self.assertIn("可顺势做空", autotrade._zone_text(0.50, 0.70, -5.0, 0.35))
+        # 震荡中间地带不动手
+        self.assertIn("不动手", autotrade._zone_text(0.50, 0.10, -5.0, 0.35))
+        # trend_follow=False：趋势市整体不交易
+        self.assertIn("趋势打法已关闭",
+                      autotrade._zone_text(0.90, 0.70, 5.0, 0.35, trend_follow=False))
 
     def test_prog_direction_matches_zone_text(self):
         """_prog_direction 必须和 _zone_text 的建议同向——各算各的必然漂移。"""
-        # 跌势贴下沿 → 倾向空（等反抽）
+        # 跌势（任意位置）→ 顺势空（2026-10-28 起位置不决定方向）
         self.assertEqual(autotrade._prog_direction(
             bars_from_closes([4000 - i for i in range(14)]), 0.35), -1)
-        # 涨势贴下沿 → 倾向多（回踩到位）
+        # 涨势（任意位置）→ 顺势多（贴上沿不再返回 0）
         self.assertEqual(autotrade._prog_direction(
-            bars_from_closes([4000 + i for i in range(14)]), 0.35), 0)
+            bars_from_closes([4000 + i for i in range(14)]), 0.35), 1)
+        # 趋势打法关闭 → 趋势市不给方向
+        self.assertEqual(autotrade._prog_direction(
+            bars_from_closes([4000 + i for i in range(14)]), 0.35,
+            trend_follow=False), 0)
         # 震荡收在区间最低 → 倾向多
         self.assertEqual(autotrade._prog_direction(
             bars_from_closes([4002, 4000] * 7), 0.35), 1)
-        # 中间地带 → 无建议（bars_from_closes 每根带 ±1 影线，
+        # 震荡中间地带 → 无建议（bars_from_closes 每根带 ±1 影线，
         # 收盘要真落在区间 35%~65% 里，得用比影线更高的振幅）
         mid_rows = [{"time": NOW + i * 60, "open": 4000 + (2 if i % 2 else 0),
                      "high": 4000 + (2 if i % 2 else 0) + 3,
@@ -1614,17 +1635,18 @@ class TestStructure(unittest.TestCase):
                      "close": 4000 + (2 if i % 2 else 0)} for i in range(14)]
         self.assertEqual(autotrade._prog_direction(mid_rows, 0.35), 0)
 
-    def test_uptrend_upper_edge_gives_no_direction(self):
-        """涨势贴上沿：程序不给方向，而不是 +1。
+    def test_uptrend_gives_trend_direction(self):
+        """趋势市：程序给顺势方向，与位置无关（2026-10-28 改）。
 
-        2026-10-27 改。原来返回 +1，等于「看涨」；面板据此把模型在 94% 位置
-        的追多裁决成「一致」，程序在给追高背书。这一格必须回到 0——
-        位置在高位，既不建议追多，也不建议逆势空。
+        原来「涨势贴上沿」返回 0（不给追高背书），后果是趋势市里程序长期
+        没有方向，事后无法按 regime 对账。实测等回踩 47 笔均值 -1.21，
+        顺势直接做 85 点固定持 10 根 +0.148——方向判断有边际，该给。
+        追高与否交给当前根形状（_last_bar_shape）和提示词管，不由位置否决。
         """
         rows = bars_from_closes([4000 + i for i in range(14)])
         self.assertGreater(autotrade._structure(rows)["pos"], 0.65)
-        self.assertEqual(autotrade._prog_direction(rows, 0.35), 0)
-        # 同一格在震势里仍然给做空（这是标准动作，不能连坐）
+        self.assertEqual(autotrade._prog_direction(rows, 0.35), 1)
+        # 震荡贴上沿仍然给做空（这是标准动作，不能连坐）
         self.assertEqual(autotrade._prog_direction(
             bars_from_closes([4000 + (2 if i % 2 else 0) for i in range(14)]), 0.35), -1)
 
@@ -1658,13 +1680,15 @@ class TestStructure(unittest.TestCase):
         """
         sys = autotrade.ENTRY_SYSTEM
         self.assertIn("机会是对等的", sys)
-        # 震荡市必须显式允许贴边动手，这是唯一能"到了就做"的情形
-        self.assertIn("震荡市贴边就动手", sys)
+        # 震荡市必须显式允许贴边动手
+        self.assertIn("只有震荡市可以「贴边就动手」", sys)
         self.assertIn("贴着上沿做空不叫追空", sys)
         # 看跌 ≠ 不做，这句是把 p_up 语义钉死的
         self.assertIn("看跌就要考虑做空", sys)
-        # 趋势里"等反抽"不能被读成"永不出手"
-        self.assertIn("不等于永远不做", sys)
+        # 两套打法必须先判行情：趋势市"等回踩"不再合法，插针顶是当前根形状说了算
+        self.assertIn("先判行情，再选打法", sys)
+        self.assertIn("顺势直接做", sys)
+        self.assertIn("插针顶", sys)
 
 
 class TestMA28(unittest.TestCase):
@@ -3753,6 +3777,12 @@ class TestWaitAnchor(unittest.TestCase):
         self.assertIn("等待锚点·锁定", p)
 
 
+def bars_range(n=30):
+    """震荡 K 线（ER≈0.08）：锚点机制的活水场景。单边 bars_up/bars_down
+    从 2026-10-28 起是趋势市，锚点整体停用，不能拿来测锚点接线。"""
+    return bars_from_closes([4000 + (2 if i % 2 else 0) for i in range(n)])
+
+
 class TestWaitAnchorInTick(TempLedger):
     """锚点必须真的接到 tick 上：纯函数再对，没接线就是没改。"""
 
@@ -3768,7 +3798,7 @@ class TestWaitAnchorInTick(TempLedger):
                                              "reason": "等回踩4044附近",
                                              "source": "llm"}) as m:
             autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                           quote=(4050.0, 4050.24), rows=bars_up())
+                           quote=(4050.0, 4050.24), rows=bars_range())
         note = m.call_args.kwargs.get("wait_note", "")
         self.assertIn("等待锚点·锁定", note)
         self.assertIn("4044", note)
@@ -3781,7 +3811,7 @@ class TestWaitAnchorInTick(TempLedger):
                                              "source": "llm"}), \
              mock.patch.object(autotrade, "send_open"):
             row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                                 quote=(4050.0, 4050.24), rows=bars_up())
+                                 quote=(4050.0, 4050.24), rows=bars_range())
         self.assertEqual(row["wait_flag"], "drift")
         state = autotrade.load_state()
         self.assertEqual(state["wait"]["level"], 4044.0)   # 没被改走
@@ -3794,11 +3824,164 @@ class TestWaitAnchorInTick(TempLedger):
                                              "reason": "等回踩4044附近再进",
                                              "source": "llm"}) as m:
             autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
-                           quote=(4050.0, 4050.24), rows=bars_up())
+                           quote=(4050.0, 4050.24), rows=bars_range())
             self.assertEqual(m.call_args.kwargs.get("wait_note"), "")   # 第一轮没有
             autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW + 60,
-                           quote=(4050.0, 4050.24), rows=bars_up())
+                           quote=(4050.0, 4050.24), rows=bars_range())
         self.assertIn("等待锚点·锁定", m.call_args.kwargs.get("wait_note", ""))
+
+    def test_anchor_disabled_in_trend(self):
+        """趋势市里锚点整体停用（2026-10-28）：不清不楚的"等回踩"不留状态。
+
+        实测按锚点等回踩 47 笔均值 -1.21，等回踩是接刀不是低吸；趋势打法的
+        标准动作是顺势直接做。所以单边行情下：旧锚点被清、新锚点定不了、
+        模型也看不到任何 wait_note。
+        """
+        self._seed()
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": False, "p_up": 0.6,
+                                             "reason": "等回踩4044附近",
+                                             "source": "llm"}) as m:
+            row = autotrade.tick(autotrade.Cfg(dry_run=True), now=NOW,
+                                 quote=(4050.0, 4050.24), rows=bars_up())
+        self.assertEqual(row["wait_flag"], "disabled")
+        self.assertIsNone(autotrade.load_state().get("wait"))
+        self.assertEqual(m.call_args.kwargs.get("wait_note"), "")
+
+
+# ------------------------------------------------------------------ 分 regime 打法
+#
+# 2026-10-28「先判行情，再选打法」：regime 不再只给教训打标签，而是真正的
+# 分流开关。依据都是实测：等回踩 47 笔均值 -1.21（接刀）；同一批信号套
+# tp3.25 是 -5.0、套 tp≥4.5 全部转正。所以趋势市顺势直接做 + 宽止盈，
+# 震荡市维持老逻辑一个字不动。
+
+
+class TestPlanRegime(TempLedger):
+    def setUp(self):
+        super().setUp()
+        self.cfg = autotrade.Cfg(cooldown_sec=30, interval_sec=60, dry_run=False)
+
+    def _open(self, rows, price=4001.2, order=601):
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"p_up": 0.7, "reason": "顺势",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open",
+                               return_value={"ok": True, "price": price,
+                                             "order": order}):
+            return autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                                  rows=rows, positions=[])
+
+    def test_trend_open_locks_plan(self):
+        """趋势市开仓：position / open 行 / last_decision 三处都落 plan=trend。"""
+        row = self._open(bars_up())
+        self.assertEqual(row["kind"], "open")
+        self.assertEqual(row["plan"], "trend")
+        state = autotrade.load_state()
+        self.assertEqual(state["position"]["plan"], "trend")
+        self.assertEqual(state["last_decision"]["regime"], "trend")
+
+    def test_range_open_locks_plan(self):
+        row = self._open(bars_range())
+        self.assertEqual(row["plan"], "range")
+        self.assertEqual(autotrade.load_state()["position"]["plan"], "range")
+
+    def test_trend_position_holds_below_wider_tp(self):
+        """趋势单浮盈 4.0：按震荡门槛早该问模型，按趋势门槛（7.0）继续持有。"""
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": -1, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 600,
+                             "p_up": 0.6, "entry_reason": "顺势", "dry_run": True,
+                             "plan": "trend"}
+        autotrade.save_state(state)
+        cfg = autotrade.Cfg(dry_run=True)
+        with mock.patch.object(autotrade, "ask_exit") as m_exit:
+            row = autotrade.tick(cfg, now=NOW, quote=(4004.0, 4004.24),
+                                 rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "hold")
+        self.assertEqual(row["source"], "tp_wait")
+        self.assertIn("7.0", row["reason"])
+        m_exit.assert_not_called()
+
+    def test_position_without_plan_keeps_old_behavior(self):
+        """旧 state 没有 plan 字段：按震荡参数管（浮盈 4.0 > 3.25 → 问模型）。"""
+        state = autotrade._empty_state()
+        state["position"] = {"ticket": -1, "direction": 1, "lots": 0.01,
+                             "price_open": 4000.0, "opened_at": NOW - 600,
+                             "p_up": 0.6, "entry_reason": "x", "dry_run": True}
+        autotrade.save_state(state)
+        cfg = autotrade.Cfg(dry_run=True)
+        with mock.patch.object(autotrade, "ask_exit",
+                               return_value={"close": False, "reason": "继续拿",
+                                             "source": "llm"}) as m_exit:
+            row = autotrade.tick(cfg, now=NOW, quote=(4004.0, 4004.24),
+                                 rows=bars_up(), positions=[])
+        m_exit.assert_called_once()      # 到 3.25 门槛了，决定权交给模型
+        self.assertEqual(row["kind"], "hold")
+
+    def test_exit_system_renders_plan_params(self):
+        """system 里的门槛数字必须按 plan 渲染，不能骗模型。"""
+        cfg = autotrade.Cfg()
+        trend_sys = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg, plan="trend")
+        self.assertIn("浮盈不到 7 USD", trend_sys)
+        self.assertIn("持仓满 180 分钟", trend_sys)
+        range_sys = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg, plan="range")
+        self.assertIn("浮盈不到 3.25 USD", range_sys)
+        self.assertIn("持仓满 60 分钟", range_sys)
+
+
+class TestLastBarShape(unittest.TestCase):
+    def test_strong_close(self):
+        rows = [bar(4000, 4002, 3999, 4001.8, NOW)]
+        sh = autotrade._last_bar_shape(rows)
+        self.assertTrue(sh["ok"])
+        self.assertGreater(sh["clv"], 0.8)      # 收在自身区间顶部附近
+        self.assertLess(sh["upper_wick"], 0.2)
+
+    def test_shooting_star(self):
+        """冲高被打回来：上影长、收盘掉到下半——趋势市追这种就是接最后一棒。"""
+        rows = [bar(4000, 4002.5, 3999.5, 3999.8, NOW)]
+        sh = autotrade._last_bar_shape(rows)
+        self.assertTrue(sh["ok"])
+        self.assertGreater(sh["upper_wick"], 0.8)
+        self.assertLess(sh["clv"], 0.2)
+
+    def test_bad_data(self):
+        self.assertFalse(autotrade._last_bar_shape([])["ok"])
+        self.assertFalse(autotrade._last_bar_shape(
+            [{"time": NOW, "open": 0, "high": 0, "low": 0, "close": 0}])["ok"])
+
+    def test_feature_snapshot_carries_shape(self):
+        """shape 落盘是事后「追高单里形状占多大权重」的唯一数据来源。"""
+        feat = autotrade.feature_snapshot(bars_up(14), autotrade.Cfg())
+        self.assertTrue(feat["ok"])
+        self.assertTrue(feat["shape"]["ok"])
+        self.assertIn("clv", feat["shape"])
+
+
+class TestWaitStepRegime(unittest.TestCase):
+    def test_trend_disables_anchor(self):
+        """趋势市里连"set"都不接受——模型说"等回踩到 X"不留任何状态。"""
+        wait, flag = autotrade._wait_step(
+            None, "等回踩4044再进", False, 4050.0, 1.5, NOW, 1,
+            regime="trend")
+        self.assertIsNone(wait)
+        self.assertEqual(flag, "disabled")
+
+    def test_trend_clears_existing_anchor(self):
+        wait, flag = autotrade._wait_step(
+            {"level": 4044.0, "ts": NOW - 60, "side": 1, "drift": 0},
+            "继续等", False, 4050.0, 1.5, NOW, 1, regime="trend")
+        self.assertIsNone(wait)
+        self.assertEqual(flag, "disabled")
+
+    def test_range_unchanged(self):
+        """震荡市锚点逻辑一个字没动（回归保险）。"""
+        wait, flag = autotrade._wait_step(
+            None, "等回踩4044再进", False, 4050.0, 1.5, NOW, 1,
+            regime="range")
+        self.assertIsNotNone(wait)
+        self.assertEqual(flag, "set")
 
 
 # ---------------------------------------------------------------- AI 辅助做单

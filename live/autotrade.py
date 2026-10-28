@@ -149,6 +149,38 @@ class Cfg:
     # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
     zone_edge: float = 0.35
     # ---------------------------------------------------------------
+    # 趋势打法（2026-10-28）：先判行情，再选交易逻辑。
+    #
+    # 在这之前 regime 只用来给复盘教训打标签，进出场规则是**一套通吃**：
+    # 提示词里趋势市的写法是"等回踩到 X 再顺势"，而执行层只有市价单，
+    # 于是趋势市被降级成"永远等不到"——实测 70 次趋势市决策只开 4 仓（6%），
+    # 其中 31 次 p_up≥0.60 明确看多却全给 act=false。
+    #
+    # 关键证据（95 个"模型说等回踩到 X"的真实决策点，用历史 M1 回放）：
+    #   A 挂限价等回踩，触及后持 10 根：均值 **-1.21**/笔，胜率 36%，
+    #      MFE 仅 0.85 / MAE -3.35 —— 回踩真来了基本不反弹，是接刀不是低吸。
+    #   B 同一时刻直接市价同向做：固定持 10 根 **+0.148**/笔，胜率 60%。
+    # 所以趋势市的标准动作从"等回踩"改成"顺势直接做"。
+    #
+    # 出场为什么必须分 regime：同样这 85 个信号，
+    #   固定持 10 根          +12.6（胜率 60%）
+    #   套 sl3.0 / tp3.25     -5.0（胜率 47%）  ← 现有参数把正期望变负
+    #   套 sl3.0 / tp6~12     全部为负转正，6×6 网格里 tp≥4.5 整片为正
+    # 也就是说**出血点是止盈太窄，不是止损太窄**。止损不动：
+    # 全样本显示"止损越宽越好"，但同向 5 分钟去重后（29 点）单调性消失，
+    # sl=4.0 那行反而全面低于 3.0 —— 那是重复决策点造成的假象，不据此改参。
+    trend_follow: bool = True
+    # 趋势单的止盈门槛（USD）。取网格平台的中段而不是峰值（峰值 12.0 在
+    # 29 个去重点上挑出来等于拟合）。设 0 = 趋势单也退回 tp_min_usd。
+    tp_min_trend: float = 7.0
+    # 趋势单持仓上限。止盈放宽到 7.0 后中位持仓必然拉长，沿用 max_hold_sec
+    # 的 60 分钟会在行情刚展开时把它掐掉。默认 3 小时，仍受日内约束。
+    max_hold_trend: int = 10800
+    # 振幅余量上限（倍单根均幅）：14 根窗口的振幅超过这个数，说明这波在
+    # 可见范围内已经走得太远，趋势市也只允许"回踩后"的位置，不许再追。
+    # 理论上限约 13（每根都创新高）。实测趋势市 skip 点的中位是 4.9。
+    trend_span_atr_max: float = 8.0
+    # ---------------------------------------------------------------
     # 入场端的两个硬闸门（2026-10-27 复盘后加）。它们**不发明新规则**，
     # 只是把提示词里早就写着、模型却会违反的两条约束交给代码执行。
     #
@@ -862,10 +894,12 @@ def visible_bars(rows: list[dict]) -> list[dict]:
     return rows[-VISIBLE_BARS:] if rows else []
 
 
-ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的超短线交易员，看 M1 图。
-你赚的是 1~3 分钟内的那一小段价差——不是趋势、不是波段、更不是隔夜。
-目标是尽可能多地把市场里真实存在的利润拿下来：单笔目标小、出手频次高，
-所以每一笔都必须干净利落，不要指望"大行情"来救你。
+ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的日内交易员，看 M1 图定时机。
+每一单先判行情（震荡/趋势/不明），再选对应打法——两套打法在下面的
+「先判行情，再选打法」里，判错了行情，打法一定跟着错。
+震荡单赚的是区间内的来回，趋势单赚的是顺势的一段；两种单都可能持有
+几十分钟，单笔赚多少由行情结构决定，不由你预先框死。不要指望"大行情"
+来救一笔烂入场，也不要因为持仓超过几分钟就慌——持有本身就是计划的一部分。
 
 【信息边界】
 你只能看到三样东西：
@@ -876,12 +910,12 @@ ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的超短线交易员，看 M1 图。
 除此之外没有别的数据，也不要假装有：不要引用均线系统、其它技术指标、新闻、
 成交量、市场情绪——除了 MA28，别的均线你也看不到，编出来就是幻觉。
 
-M5 背景怎么用：它只回答"大方向偏哪一边"，**不参与 1~3 分钟的进出场判定**。
+M5 背景怎么用：它只回答"大方向偏哪一边"，**不参与这一根 K 线的进出场判定**。
 M1 决定时机，M5 决定你更愿意站在哪一侧。两者打架时（M1 位置提示做多、
 M5 却是下跌趋势），不是禁止交易，但你需要更强的理由，p_up 也不该给到激进的一端。
 
 MA28 怎么用：它是 28 分钟的价格中枢，回答"中期偏向哪边"，和 M5 同级，
-**同样不参与 1~3 分钟的时机判定**。
+**同样不参与这一根 K 线的时机判定**。
 - 收盘在均线**上方** → 中期偏多：做多是顺风，做空要更强理由。
 - 收盘在均线**下方** → 中期偏空：做空是顺风，做多要更强理由。
 - 标了「贴着均线」→ 中性，别拿它当方向依据，回到 M1 结构和位置判定。
@@ -895,33 +929,48 @@ MA28 怎么用：它是 28 分钟的价格中枢，回答"中期偏向哪边"，
 tick 级数据是辅助，只用来确认两件事：这一下是真突破还是插针，点差有没有异常放大。
 tick 不得单独构成开仓理由；K 线与 tick 冲突时，以 K 线为准。
 
-【先判行情，再选打法（两套打法，别用反）】
+【先判行情，再选打法（两套打法，先判后用，别用反）】
 用「结构 ER（净移动 ÷ 总行程，0~1）」判断这 14 根的性质，再选对应打法：
-- ER < 0.30 → 窄幅震荡（小波动）：低买高卖。
+
+▍震荡市（ER < 0.30）：低买高卖
   贴近区间下沿做多、贴近上沿做空（以数据里的「位置判定」为准），中间区域不动手；
   不要追着单根大阳线/大阴线跑，那通常是震荡里的假突破。
-  **这三条里只有震荡市可以「贴边就动手」**：区间没被突破，上沿就是卖压所在。
-  贴着上沿做空不叫追空，那是震荡市最标准的动作，别拿趋势市的"不追"来管它。
-- ER > 0.50 → 单边趋势（大波动）：不要逆势抄底摸顶。
-  等回踩到均势位置再顺势进——回踩位参考前一根实体的中位、
-  或最近 3~4 根的低点（上升趋势）/高点（下降趋势）。没回踩就等。
-- 0.30 ~ 0.50 → 方向不明确：只做位置明显的单（收盘位置贴近区间边缘），
+  **只有震荡市可以「贴边就动手」**：区间没被突破，上沿就是卖压所在。
+  贴着上沿做空不叫追空，那是震荡市最标准的动作，别拿趋势市的打法来管它。
+
+▍趋势市（ER > 0.50）：顺势直接做，**不等回踩、不等反抽**
+  方向就是 drift 的方向（ER 回答"走得多直"，drift 回答"往哪边走"）。
+  以前让你"等回踩到 X 再进"，实测那套做法接到的回踩大多是反转的开头：
+  等回踩的单 47 笔均值 -1.21，胜率 36%——是接刀，不是低吸。所以从这一版起：
+  · 方向明确就做，位置决定的是这笔质量，不是做不做；
+  · "等回踩到 XX 再进""等反抽再空"这类话在趋势市**不再合法**——
+    要么现在按现价做，要么这轮不做；
+  · 唯一否决顺势入场的依据是**当前根形状**（结构行里有：收盘在自身区间
+    的百分比、上/下影线占比）：趋势做多要求当前根强势收（收盘在自身区间上半、
+    上影线不长）；冲高回落（长上影＋收盘掉到下半）= 插针顶，这轮不做。
+    这一条管的是"这一根是不是见顶信号"，不是"位置高不高"——位置高本身不是理由。
+  · 逆势抄底摸顶在任何行情下都不做。趋势市里唯一的逆势单是：
+    结构 ER 已跌回 0.50 以下（趋势结束），那是新行情，按新行情重新判。
+
+▍方向不明（0.30 ~ 0.50）：只做位置明显的单（收盘位置贴近区间边缘），
   中间位置给 0.50，不开仓。
   数据里的「位置判定」已经替你算好了是否够边缘（默认阈值 35%/65%），直接按它走。
 
 【贴边怎么处理：先看行情，四种情况别混成一锅】
 「贴下沿」「贴上沿」本身不是买卖信号，要看这 14 根是什么性质：
-- **震荡（ER < 0.30）**：贴下沿做多、贴上沿做空。**这是唯一可以贴着边动手的情形。**
+- **震荡（ER < 0.30）**：贴下沿做多、贴上沿做空。**这是唯一"位置决定做不做"的情形。**
   区间没被突破，上沿就是卖压、下沿就是支撑。判据是 ER 破没破，不是"价格看起来太高"。
-- **下跌趋势（ER > 0.50 且 drift < 0）**：贴下沿是弱势延续不是超卖，**不接多**；
-  做空要等反抽到均势位置（前一根实体中位、或最近 3~4 根高点），没反抽就等。
-  **但"等反抽"不等于永远不做——反抽到位就是做空点。**
-- **上涨趋势（ER > 0.50 且 drift > 0）**：贴上沿是强势延续不是超买，**不追多**；
-  做多要等回踩，没回踩就等。同理，等到了该做就做。
+- **下跌趋势（ER > 0.50 且 drift < 0）**：顺势做空。贴下沿是弱势延续，**不是超卖，
+  不接多**；贴下沿做空不算追空，但当前根必须弱势收（收盘在自身区间下半、下影不长）——
+  长下影＝下方有人接，这种不做。
+- **上涨趋势（ER > 0.50 且 drift > 0）**：顺势做多。贴上沿是强势延续，**不是超买，
+  不因为"位置高"就放弃**；但当前根必须强势收（收盘在自身区间上半、上影不长）——
+  冲高回落的长上影＝插针顶，这种不做。
 - **方向不明（0.30 ~ 0.50）**：只做收盘位置够边缘的单，中间不动手。
 
-**一句话记法：震荡市贴边就动手（下沿买、上沿卖）；趋势市等回撤/反抽到位再顺势做；
-两种情形都不许逆势抄底摸顶。**
+**一句话记法：震荡市位置决定做不做（贴边做、中间不做）；趋势市方向决定做不做
+（顺势做、逆势不做），当前根形状决定这一根做不做（插针不做、推进做）；
+任何行情都不抄底摸顶。**
 
 - 多空都要有确认：做多要看到止跌（收阳，或收盘回到区间上半），
   做空要看到滞涨（收阴，或收盘回落到区间下半）。没有确认就等。
@@ -964,7 +1013,8 @@ tick 稀疏而安静 = 突破多半是假的。
 只输出一个 JSON 对象，不要解释、不要 markdown 代码块、不要前后缀：
 {"act": true, "p_up": 0.58, "agree": true, "reason": ""}
 act —— 这笔到底做不做。false 就是"不做"，这是允许的、也是常见的选择。
-p_up —— 未来 1~3 分钟内价格上涨的概率，0 到 1 之间的小数。
+p_up —— 接下来这段行情里（几分钟到几十分钟，取决于你判的打法）价格上涨的概率，
+        0 到 1 之间的小数。
         **它是方向概率，不是信心分。** 写 0.32 的意思是"我判断有 68% 的概率下跌"，
         这本身就是做空的理由——不要把它翻译成"看不准所以不做"。
         看跌和"要开空单"之间只差一个位置确认，不差勇气。
@@ -994,14 +1044,20 @@ reason —— 不超过 40 字的中文依据，必须引用输入里的具体�
   ① reason 里出现"等确认""等企稳""等收阳""回踩再""挂多""挂空""不追"这类
      字眼，却给了 act=true —— 那就等于说"我说要等，但我现在就买"。系统只有
      市价单，成交价会是你写下等待价的那一刻的现价，两者必然对不上。
-  ② 做多时收盘位置 ≥ {ZONE_UP}%（贴上沿）。这个组合在任何行情分类下都不成立
-     ——震荡市上沿是做空位，上涨趋势里贴上沿该等回踩低吸，下跌趋势里更不该追。
-     真要做，就明写"我知道这是贴上沿，理由是 XXX"。
-- **等待锚点是锁定的。** 你说"等回踩到 X"，系统就记住 X；下一轮会把 X、
-  离现价还差多少、已经等了多久一起给你。往后把 X 改成更靠近现价的数字
-  **不算数**（那只是把"追"改写成"等"），system 不会采纳。要改只有两种
-  合法走向：往离现价更远的方向调（更保守），或者直接说"这一波不做"。
-  锚点 15 分钟没成交会自动作废，到时候重新按结构判断，别顺着旧价位往下说。
+     例外：**趋势市里这些词根本不该出现**——趋势打法的标准动作就是顺势直接做，
+     你在趋势市写"等回踩"等于自己放弃，而此时等待锚点也已停用，写了也没人记住。
+  ② 震荡市里做多且收盘位置 ≥ {ZONE_UP}%（贴上沿）。震荡市上沿是做空位，贴它
+     做多就是买在区间顶，这个组合不成立。趋势市里贴上沿做多**合法**，但当前根
+     必须强势收（收盘在自身区间上半、上影不长）——理由里引用的应该是形状证据，
+     不是"我觉得还会涨"。
+- **等待锚点只在震荡市生效，而且是锁定的。** 震荡市里你说"等回踩到 X"，
+  系统就记住 X；下一轮会把 X、离现价还差多少、已经等了多久一起给你。往后
+  把 X 改成更靠近现价的数字**不算数**（那只是把"追"改写成"等"），system
+  不会采纳。要改只有两种合法走向：往离现价更远的方向调（更保守），或者
+  直接说"这一波不做"。锚点 15 分钟没成交会自动作废，到时候重新按结构判断，
+  别顺着旧价位往下说。**趋势市里锚点整体停用**：你说"等回踩到 Y"不会留下
+  任何记录，下一轮也看不到——趋势市的标准动作是顺势直接做，"等一个价位"
+  在这里不是合法选项。
 
 【判断原则】
 - **不做交易是允许的，而且经常是对的。** 给出 `"act": false` 即可，
@@ -1010,17 +1066,19 @@ reason —— 不超过 40 字的中文依据，必须引用输入里的具体�
   一个是做空、一个是做多，没有哪个方向"更安全"、也不需要更高门槛。
   只要与 0.5 的距离够 0.06（系统闸门）且位置确认过，就该动手，
   别拿"还不够有把握"当借口把机会放过去。
-- **act=false 只用于两件事：方向不清，或位置不到。** 不用于"我有方向但不敢"。
-  如果你算出来 p_up ≤ 0.40（明确看跌）却给 act=false，reason 里必须写清
-  是哪个具体数字让这个位置不能做空（比如"贴下沿做空等于追空"），
-  不许只写"等企稳""再观察"这种没有落点的话。
+- **act=false 的理由必须分行情，不许只写"再看看"：**
+  · 震荡市：方向不清，或位置不在边缘（这是老规矩）；
+  · 趋势市：方向不清，或当前根是插针顶/接刀形状——**唯独不能是"位置高/低"**。
+    趋势市里 p_up ≤ 0.40（明确顺势方向）却给 act=false，reason 里必须写清
+    是当前根的哪个具体形状让你不做（比如"上影 62%、收盘掉到区间 38%，插针"），
+    不许写"等回踩""等企稳"这种没有落点的话——趋势市没有"等"这个选项。
 - 即使 act=true，p_up 与 0.50 的差距不到 0.06 时系统仍会跳过——
   那是因为成本不值，不是你的判断有问题。
 - 上面的教训是你自己的历史，不是摆设：当前情形如果和某条教训说的是同一回事，
   就按它做——包括"这种情况不要做"。
 - **成本不由你负责。** 点差和手续费由系统承担，你已经知道这一点，不需要计算它。
   不要以"点差太高""成本吃掉利润""利润空间不够覆盖成本"为由拒绝开仓，
-  也不要因此偏移方向判断。你只回答一件事：接下来 1~3 分钟往哪边走。"""
+  也不要因此偏移方向判断。你只回答一件事：按你判的打法，接下来这段行情往哪边走。"""
 
 ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 13 根）
 【主】K线（序号 / 时间 UTC / 开 / 高 / 低 / 收）
@@ -1093,6 +1151,7 @@ EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}
 持仓 {direction_text} {lots} 手  开仓 {entry}  已持仓 {held_text}  浮动 {pnl_text}
+本笔打法 {plan_text}
 开仓依据 {entry_reason}
 你从自己交易里总结的教训
 {lessons}
@@ -1157,6 +1216,65 @@ def regime_of(rows: list[dict]) -> str:
     if s["er"] > ER_TREND_MIN:
         return "trend"
     return "mid"
+
+
+def exit_params(cfg: Cfg, plan: str | None) -> dict:
+    """这一笔持仓按哪套出场参数走。**由开仓时的行情决定，持仓期间不换**。
+
+    为什么不跟着当前行情实时切：一笔单在震荡里开、十分钟后变成趋势，
+    如果出场参数跟着跳，同一笔仓会先后被两套互相矛盾的规则管——
+    窄止盈的场子里它该走了，宽止盈的场子里它该留，面板和复盘都说不圆。
+    开仓那一刻锁定，和等待锚点锁定是同一个原则。
+
+    返回 dict 而不是 tuple：调用方只取自己关心的键，以后加参数不用改签名。
+    `plan` 为空（旧数据、state 里没存）一律按震荡参数，保持历史行为不变。
+    """
+    if plan == "trend":
+        return {
+            "plan": "trend",
+            "sl_usd": float(cfg.sl_usd),
+            "tp_min_usd": (float(cfg.tp_min_trend) if cfg.tp_min_trend > 0
+                           else float(cfg.tp_min_usd)),
+            "max_hold_sec": int(cfg.max_hold_trend or cfg.max_hold_sec),
+        }
+    return {
+        "plan": plan or "range",
+        "sl_usd": float(cfg.sl_usd),
+        "tp_min_usd": float(cfg.tp_min_usd),
+        "max_hold_sec": int(cfg.max_hold_sec),
+    }
+
+
+def _last_bar_shape(rows: list[dict]) -> dict:
+    """当前这根 K 线自己的形状：收盘在自身区间的位置、上下影线占比。
+
+    趋势打法需要它来区分「强势推进」和「插针见顶」——两者在 14 根窗口里
+    的 ER、drift、pos 可以完全一样，区别只在最后一根长什么样。
+    只看当前根，不引入新指标，也不碰可见窗口之外的数据。
+
+    clv（close location value）= (收-低)/(高-低)，1 = 收在最高，0 = 收在最低。
+    上影线占比大 + clv 低 = 冲高被打回来，趋势市追这种就是接最后一棒。
+    """
+    w = visible_bars(rows)
+    if not w:
+        return {"ok": False}
+    b = w[-1]
+    try:
+        h, l = float(b.get("high") or 0.0), float(b.get("low") or 0.0)
+        c, o = float(b.get("close") or 0.0), float(b.get("open") or 0.0)
+    except (TypeError, ValueError):
+        return {"ok": False}
+    rng = h - l
+    if rng <= 0 or min(h, l, c, o) <= 0:
+        return {"ok": False}
+    return {
+        "ok": True,
+        "clv": round((c - l) / rng, 4),
+        "upper_wick": round((h - max(c, o)) / rng, 4),
+        "lower_wick": round((min(c, o) - l) / rng, 4),
+        "body": round(abs(c - o) / rng, 4),
+        "bull": c > o,
+    }
 
 
 def _structure(rows: list[dict]) -> dict:
@@ -1310,7 +1428,8 @@ def _atr(rows: list[dict]) -> dict:
             "span_atr": ratio}
 
 
-def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
+def _zone_text(pos: float, er: float, drift: float, edge: float,
+               trend_follow: bool = True) -> str:
     """位置判定：同一个「贴下沿」，在震荡里是买点，在下跌趋势里是弱势延续。
 
     为什么必须分方向（实测教训）：以前这里只输出「贴下沿（可考虑做多）」，
@@ -1329,61 +1448,78 @@ def _zone_text(pos: float, er: float, drift: float, edge: float) -> str:
     lo, hi = edge, 1 - edge
     downtrend = er > ER_TREND_MIN and drift < 0
     uptrend = er > ER_TREND_MIN and drift > 0
+    if (uptrend or downtrend) and not trend_follow:
+        return ("趋势市，但趋势打法已关闭（trend_follow=False）→ 本程序不建议开仓。"
+                "震荡贴边那一套不适用于这里，别拿 ER 高当成抄底摸顶的理由")
     if pos <= lo:
         if downtrend:
-            return ("贴下沿＋下跌趋势（程序倾向：弱势延续，不是超卖，倾向等反抽到上沿做空）——"
-                    "你可以不同意，但理由里必须说清为什么")
+            return ("贴下沿＋下跌趋势（程序倾向：顺势做空。贴下沿在这里是弱势延续，"
+                    "不是超卖，**不要反手接多**；但当前根必须弱势收——收盘在自身区间下半、"
+                    "下影线不长，长下影＝有人接盘，不做）")
         if uptrend:
-            return "贴下沿＋上涨趋势（程序倾向：回踩到位，倾向做多，需止跌确认）"
+            return ("贴下沿＋上涨趋势（程序倾向：回踩已经发生，直接做多，"
+                    "条件是当前根止跌——收阳或收盘回到自身区间上半。**不要再等更低的价位**）")
         return f"贴下沿（程序倾向：可考虑做多，阈值 {edge:.0%}）"
     if pos >= hi:
         if uptrend:
-            # 2026-10-27 话术再收紧：原文是「倾向等回踩到下沿低吸」，模型把
-            # 「低吸」读成了「可以买」，当天在 94% / 91% 位置连追两笔多单
-            # （reason 原文写"等回踩 4017…不追高"，成交却在 4019.841）。
-            # 高位追多的亏法是硬止损，不是错过——所以这里不再留"倾向"二字，
-            # 直接说明此位置不是买点，并把"要等什么"写死。
-            return ("贴上沿＋上涨趋势（程序倾向：强势延续但已在窗口高位，**此处不是买点**——"
-                    "追高即接最后一棒；等回踩到前一根实体中位或下沿再考虑做多）——"
-                    "你可以不同意，但理由里必须说清为什么")
+            # 2026-10-28 改：原文是「此处不是买点，等回踩到前一根实体中位」。
+            # 实测那句话让趋势市 94% 的时间空仓（70 次决策只开 4 仓），而
+            # 按它等来的回踩单 47 笔均值 -1.21、胜率 36% —— 等回踩在这批样本里
+            # 是负期望。现在允许顺势直接做，但用**当前根的形状**代替"等一个价位"
+            # 来挡插针顶：这条不拦"位置高"，只拦"冲高被打回来"。
+            return ("贴上沿＋上涨趋势（程序倾向：顺势做多。高位本身不是否决理由，"
+                    "但当前根必须是强势收——收盘在自身区间上半、上影线不超过区间一半；"
+                    "若冲高回落（长上影＋收盘掉到下半）就是插针顶，不做）")
         if downtrend:
-            return "贴上沿＋下跌趋势（程序倾向：反抽到位，倾向做空，需滞涨确认）"
+            return ("贴上沿＋下跌趋势（程序倾向：反抽已经发生，直接做空，"
+                    "条件是当前根滞涨——收阴或收盘回落到自身区间下半。不要再等更高的价位）")
         return f"贴上沿（程序倾向：可考虑做空，阈值 {1 - edge:.0%}）"
+    if uptrend or downtrend:
+        # 趋势市的中间地带不再是"不动手"：方向已经由 ER+drift 给出来了，
+        # 位置只影响好坏、不决定有无。震荡市中间不动手的规矩不搬到这里。
+        side = "做多" if uptrend else "做空"
+        return (f"中间地带（{edge:.0%}~{1 - edge:.0%}）＋{'上涨' if uptrend else '下跌'}趋势"
+                f"（程序倾向：可顺势{side}，位置一般，所以 p_up 别给激进值；"
+                f"当前根形状必须同向）")
     return f"中间地带（{edge:.0%}~{1 - edge:.0%}，程序倾向不动手）"
 
 
-def _prog_direction(rows: list[dict], zone_edge: float = 0.35) -> int:
-    """程序的位置判定折算成方向建议：+1 多 / -1 空 / 0 不动手。
+def _prog_direction(rows: list[dict], zone_edge: float = 0.35,
+                    trend_follow: bool = True) -> int:
+    """程序对方向的**建议**：+1 多 / -1 空 / 0 不动手。
 
     与 _zone_text 用同一套数（_structure + zone_edge），保证「模型看到的建议」
     和「落盘的 prog_dir」永远一致——各算各的必然漂移。
-    返回 0 有两处：中间地带，以及「涨势贴上沿」。后者见下面的注释——
-    那不是漏算，是 2026-10-27 特意改的。0 的语义是"程序这一格没有方向建议"，
-    模型选哪个方向都记为"程序无建议，模型自选"（见 trade_detail 的裁决）。
+    0 的语义是"程序这一格没有方向建议"，模型选哪个方向都记为
+    "程序无建议，模型自选"（见 trade_detail 的裁决）。
+
+    分 regime（2026-10-28）：
+      · 震荡：贴下沿 +1、贴上沿 -1、中间 0（老逻辑，一个字没改）；
+      · 趋势：一律给顺势方向，位置不再决定是否给建议；
+      · 趋势但 trend_follow=False：返回 0，趋势市不交易（不是退回"等回踩"，
+        那条路实测 47 笔均值 -1.21，没有保留价值）。
     """
     s = _structure(rows)
     if not s.get("ok"):
         return 0
     edge = max(0.0, min(0.49, float(zone_edge)))
     pos = s["pos"]
-    if pos > edge and pos < 1 - edge:
-        return 0
     downtrend = s["er"] > ER_TREND_MIN and s["drift"] < 0
     uptrend = s["er"] > ER_TREND_MIN and s["drift"] > 0
-    if pos <= edge:
-        if downtrend:
-            return -1          # 跌势贴下沿：倾向等反抽做空
-        return 1               # 震荡或涨势贴下沿：倾向做多
-    # pos >= 1-edge
-    if uptrend:
-        # 这里原来返回 +1，注释写的是"涨势贴上沿：倾向等回踩低吸"。
-        # 问题在于 _zone_text 那句话里有两个成分——"做多"和"等回踩"——
-        # 折算成一个方向数时，条件被丢掉，只剩方向。后果是实测可见的：
-        # 模型在 94% / 91% 位置追多，面板「程序判断 vs 模型判断」裁决成
-        # "一致"，等于程序在给追高背书（20:27、20:37 两笔都是这样）。
-        # 现在返回 0：位置在高位，程序既不建议追多，也不建议逆势做空。
+    # 趋势市：方向由 ER + drift 决定，**位置不再决定是否给建议**。
+    # 2026-10-28 之前这里在「涨势贴上沿」返回 0（不背书追高），中间地带也返回 0。
+    # 后果是趋势市里程序长期没有方向，模型每次顺势开仓都被面板记成
+    # 「程序无建议，模型自选」，事后根本没法按 regime 算谁的判断更准。
+    # 现在趋势市一律给顺势方向，追高与否交给当前根形状和提示词去管。
+    if uptrend or downtrend:
+        if not trend_follow:
+            return 0
+        return 1 if uptrend else -1
+    if pos > edge and pos < 1 - edge:
         return 0
-    return -1                  # 震荡或跌势贴上沿：倾向做空
+    if pos <= edge:
+        return 1               # 震荡贴下沿：倾向做多
+    return -1                  # 震荡贴上沿：倾向做空
 
 
 def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
@@ -1437,7 +1573,12 @@ def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
         "atr": round(a.get("atr") or 0.0, 5),
         "span_atr": round(a.get("span_atr") or 0.0, 3),
         "regime": regime_of(rows),
-        "prog_dir": _prog_direction(rows, edge),
+        "prog_dir": _prog_direction(
+            rows, edge,
+            cfg.trend_follow if cfg is not None else True),
+        # 当前根形状：趋势打法的入场确认全靠它（强势收 vs 插针顶），必须落盘
+        # 才能事后回答「追高的单里，形状占多大权重」。
+        "shape": _last_bar_shape(rows),
     }
     if mtf:
         out["mtf"] = mtf
@@ -1606,7 +1747,8 @@ def _wait_note(wait: dict | None, price: float, atr: float, symbol: str,
 
 def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
                now: int, side: int, ttl: int = WAIT_TTL_SEC,
-               tol_atr: float = WAIT_DRIFT_ATR) -> tuple[dict | None, str]:
+               tol_atr: float = WAIT_DRIFT_ATR,
+               regime: str = "") -> tuple[dict | None, str]:
     """推进锚点状态机，返回 (新状态, 本轮标记)。
 
     标记：
@@ -1617,7 +1759,15 @@ def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
       expired   —— 超过 ttl，作废
       consumed  —— 已经踩到锚点却仍不进，锚点作废（不敢做就别占着）
       cleared_open —— 这轮进场了，等待结束
+      disabled  —— 趋势市里锚点整体停用（2026-10-28），连"set"都不接受
+
+    disabled 的理由：锚点是「等回踩到 X 低吸」的配套，实测这批等回踩的单
+    47 笔均值 -1.21（接刀）。趋势打法改成直接顺势后，模型在趋势市说
+    "等回踩到 Y" 不应再产生任何状态——下一轮它自己也不会看到锚点，
+    从机制上断了"名义上等、实际上追"的老路。
     """
+    if regime == "trend":
+        return None, "disabled"
     old = wait if isinstance(wait, dict) and wait.get("level") else None
     if act is True:
         return None, "cleared_open"
@@ -1640,16 +1790,19 @@ def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
 
 
 def _structure_text(rows: list[dict], zone_edge: float = 0.35,
-                    digits: int = 3) -> str:
+                    digits: int = 3, trend_follow: bool = True) -> str:
     s = _structure(rows)
     if not s.get("ok"):
         return "结构 数据不足"
     if s["er"] < ER_RANGE_MAX:
-        regime = "窄幅震荡（小波动）→ 低买高卖"
+        regime = "震荡市 → 低买高卖（贴下沿做多、贴上沿做空，中间不动手）"
     elif s["er"] > ER_TREND_MIN:
-        regime = ("单边趋势（大波动）→ 等回踩再顺势"
-                  if s["drift"] > 0 else
-                  "单边趋势（大波动）→ 等反抽再顺势做空")
+        if not trend_follow:
+            regime = "趋势市，趋势打法已关闭 → 不交易"
+        else:
+            regime = ("趋势市·上行 → 顺势做多，不等回踩"
+                      if s["drift"] > 0 else
+                      "趋势市·下行 → 顺势做空，不等反抽")
     else:
         regime = "方向不明确 → 只做位置明显的单"
 
@@ -1657,7 +1810,7 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35,
     # 阈值改一次就得让它跟着变，各算各的必然对不上。
     pos = s["pos"]
     edge = max(0.0, min(0.49, float(zone_edge)))
-    zone = _zone_text(pos, s["er"], s["drift"], edge)
+    zone = _zone_text(pos, s["er"], s["drift"], edge, trend_follow)
 
     streak = s["streak"]
     streak_text = f"连阳 {streak} 根" if streak > 0 else (
@@ -1671,9 +1824,18 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35,
     a = _atr(rows)
     atr_text = (f"（= {a['span_atr']:.1f} 倍单根均幅 {a['atr']:.{d}f}）"
                 if a.get("ok") and a.get("atr", 0) > 0 else "")
+    # 当前根形状：趋势打法就靠它分辨「强势推进」和「插针见顶」。
+    # 只描述事实、不下结论——结论在上面 zone 里，两处必须说同一件事。
+    sh = _last_bar_shape(rows)
+    if sh.get("ok"):
+        shape = (f"｜当前根：收盘在自身区间 {sh['clv']:.0%}"
+                 f"（{'收阳' if sh['bull'] else '收阴'}，实体占 {sh['body']:.0%}，"
+                 f"上影 {sh['upper_wick']:.0%}，下影 {sh['lower_wick']:.0%}）")
+    else:
+        shape = ""
     return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.{d}f}（{dir_text}）/ 总行程 {s['path']:.{d}f}）"
             f"｜振幅 {s['span']:.{d}f}{atr_text}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
-            f"｜{streak_text}｜位置判定：{zone}｜行情判定：{regime}")
+            f"｜{streak_text}{shape}｜位置判定：{zone}｜行情判定：{regime}")
 
 
 def _regime_word(er: float, drift: float) -> str:
@@ -1844,7 +2006,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
                        ticks_text: str = "", zone_edge: float = 0.35,
                        mtf_text: str = "",
                        recent_close: dict | None = None,
-                       wait_note: str = "") -> str:
+                       wait_note: str = "", trend_follow: bool = True) -> str:
     w = visible_bars(rows)
     r1, r5, r13, span = _returns(w)
     st = stats or {}
@@ -1878,7 +2040,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         symbol=symbol, clock=clock, bid=_px(symbol, bid), ask=_px(symbol, ask),
         spread_pts=spread_pts,
         n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
-        structure=_structure_text(w, zone_edge, dg),
+        structure=_structure_text(w, zone_edge, dg, trend_follow),
         r1=r1, r5=r5, r13=r13, span=_px(symbol, span),
         n_closed=n_closed, hit=hit,
         lessons=lessons or "暂无复盘笔记。",
@@ -1894,7 +2056,7 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
                       tf: str = "M1", contract: float = 100.0,
                       ticks_text: str = "", symbol: str = "XAUUSDm",
                       lessons: str = "", zone_edge: float = 0.35,
-                      mtf_text: str = "") -> str:
+                      mtf_text: str = "", trend_follow: bool = True) -> str:
     w = visible_bars(rows)
     r1, r5, r13, _ = _returns(w)
     direction = int(position.get("direction") or 1)
@@ -1907,6 +2069,14 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
     held_text = f"{held // 60} 分 {held % 60} 秒" if held >= 60 else f"{max(held, 0)} 秒"
     dg = _digits(symbol)
     pnl_text = f"{pnl:+.2f} USD（{cur - entry:+.{dg}f}）"
+    # 打法在开仓那一刻就定死了（见 exit_params）。这里只是把它讲给模型听：
+    # 不知道自己是趋势单还是震荡单，模型会拿震荡的"贴反向沿就走"去管趋势单。
+    plan = position.get("plan") or "range"
+    plan_text = ("趋势单（开仓时判为趋势市）：拿的是一段行情，不是一次抖动。"
+                 "别因为回到区间中位、或刚浮盈就想跑——只有结构走完才平"
+                 if plan == "trend" else
+                 "震荡单（开仓时判为震荡或方向不明）：赚的是区间内的来回，"
+                 "贴到反向沿、形态被打断就走，别指望它变成趋势")
 
     return EXIT_PROMPT.format(
         symbol=symbol, clock=time.strftime("%Y-%m-%d %H:%M", time.gmtime()),
@@ -1914,8 +2084,9 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
         lots=lots, entry=_px(symbol, entry), held_text=held_text,
         bid=_px(symbol, bid), ask=_px(symbol, ask), pnl_text=pnl_text,
         entry_reason=(position.get("entry_reason") or "未记录")[:120],
+        plan_text=plan_text,
         n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
-        structure=_structure_text(w, zone_edge, dg),
+        structure=_structure_text(w, zone_edge, dg, trend_follow),
         r1=r1, r5=r5, r13=r13,
         lessons=lessons or "暂无复盘笔记。",
         mtf=mtf_text or "",
@@ -2759,7 +2930,8 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                 ticks_text=ticks_text,
                                 mtf_text=mtf_text,
                                 recent_close=recent_close,
-                                wait_note=wait_note)
+                                wait_note=wait_note,
+                                trend_follow=cfg.trend_follow)
     try:
         text, usage = _chat(prompt, system_for(ENTRY_SYSTEM, cfg))
     except Exception as exc:  # noqa: BLE001
@@ -2795,10 +2967,12 @@ def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
                                    login, ignore_cost=cfg.ignore_spread,
                                    regime=regime_of(rows), scope="exit"),
                                zone_edge=cfg.zone_edge,
-                               mtf_text=mtf_text)
+                               mtf_text=mtf_text,
+                               trend_follow=cfg.trend_follow)
     held = int(time.time()) - int(position.get("opened_at") or time.time())
     try:
-        text, usage = _chat(prompt, system_for(EXIT_SYSTEM, cfg))
+        text, usage = _chat(prompt, system_for(
+            EXIT_SYSTEM, cfg, plan=position.get("plan")))
     except Exception as exc:  # noqa: BLE001
         _log_call(False, None, f"{type(exc).__name__}: {exc}", login)
         return _exit_hold(f"模型调用失败（{type(exc).__name__}: {exc}）")
@@ -2856,7 +3030,7 @@ def _symbol_label(symbol: str) -> str:
     return name or symbol
 
 
-def system_for(template: str, cfg: Cfg) -> str:
+def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
     """把 system 模板里的占位符换成**当前配置的实际值**。
 
     除了品种名，出场阈值也必须换：`sl_usd` / `tp_min_usd` / `max_hold_sec`
@@ -2867,10 +3041,13 @@ def system_for(template: str, cfg: Cfg) -> str:
     用 str.replace 而不是 str.format：system 里含 JSON 示例的花括号，
     format 会把它当占位符直接炸。
     """
+    # 出场参数按**这笔单的打法**取（趋势单和震荡单不是一套数字）。
+    # plan 为空 = 震荡参数，老调用方不用改。
+    ep = exit_params(cfg, plan)
     out = template.replace("{SYMBOL_LABEL}", _symbol_label(cfg.symbol))
-    out = out.replace("{SL_USD}", f"{float(cfg.sl_usd):g}")
-    out = out.replace("{TP_MIN_USD}", f"{float(cfg.tp_min_usd):g}")
-    out = out.replace("{MAX_HOLD_MIN}", f"{int(cfg.max_hold_sec) // 60}")
+    out = out.replace("{SL_USD}", f"{ep['sl_usd']:g}")
+    out = out.replace("{TP_MIN_USD}", f"{ep['tp_min_usd']:g}")
+    out = out.replace("{MAX_HOLD_MIN}", f"{int(ep['max_hold_sec']) // 60}")
     # 贴上沿做多的分位门槛（= 1 - zone_edge）。写成 100-... 而不是硬编码 65：
     # 面板上一改 zone_edge，system 里那句话就必须跟着变，否则又是"说一套做一套"。
     out = out.replace("{ZONE_UP}",
@@ -3201,7 +3378,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         # 两处共用 _track_peak，峰值逻辑同源。
         _track_peak(pos, float_pnl, now)
 
-        gate = _exit_gate(cfg, held_sec, float_pnl)
+        # plan 在开仓时锁定（见 state["position"]），出场参数跟着这笔单打法走，
+        # 中途 regime 跳变不换规则——见 exit_params 的注释。
+        gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"))
 
         # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
         sig_id = None
@@ -3440,8 +3619,11 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             return row
 
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
-    # 落盘后才能事后对账「程序对 vs 模型对」。
-    prog_dir = _prog_direction(bars, cfg.zone_edge)
+    # 落盘后才能事后对账「程序对 vs 模型对」。trend_follow 决定趋势市给不给方向。
+    prog_dir = _prog_direction(bars, cfg.zone_edge, cfg.trend_follow)
+    # 行情判定：这一步就是「先判行情，再选打法」的分流点。
+    # 同一个 regime 会同时喂给程序建议、提示词、锚点开关、开仓时的 plan。
+    regime = regime_of(bars)
     # M5 背景只查一次：text 进 prompt，info 进特征快照。
     mtf = _mtf_bundle(cfg.symbol, cfg.zone_edge, _digits(cfg.symbol))
     # 刚平仓上下文：只在前 5 分钟（报复单窗口）传。让模型知道自己在
@@ -3457,9 +3639,15 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             }
     # 等待锚点：把上一轮它自己定的回踩价写回 prompt（它没有跨轮记忆，
     # 不喂回去就必然跟着价格漂——见 _wait_step 上面的注释）。
-    wait_prev = state.get("wait")
+    #
+    # 2026-10-28：趋势市停用锚点。锚点是"等回踩到 X 低吸"的配套机制，而趋势打法
+    # 已经改成"顺势直接做、不等回踩"——实测按锚点挂限价等回踩 47 笔均值 -1.21，
+    # 是接刀不是低吸。趋势市里继续注入旧锚点只会引诱模型继续"等"，所以连注带
+    # 锁一起清：wait 置 None，状态机收到 None 就是"没有锚点"。
+    wait_prev = None if regime == "trend" else state.get("wait")
     atr_now = float(_atr(bars).get("atr") or 0.0)
-    wait_note = _wait_note(wait_prev, bid, atr_now, cfg.symbol, now)
+    wait_note = (_wait_note(wait_prev, bid, atr_now, cfg.symbol, now)
+                 if wait_prev else "")
     decision = ask_entry(bars, bid, ask, cfg, state, login,
                          ticks_text=_ticks_text(cfg, bars),
                          mtf_text=mtf["text"],
@@ -3474,8 +3662,11 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     agree = decision.get("agree")
     # 推动锚点状态机。放在 last_decision 之前：act=false 的三个分支和
     # 后面的开仓分支都要能读到最新的 wait，否则面板上看到的还是上一轮的。
+    # 趋势市里 wait_prev 已经是 None，状态机直接走"清除"分支——
+    # 旧锚点（震荡市留下的）不会在趋势市继续挂着误导。
     state["wait"], wait_flag = _wait_step(
-        state.get("wait"), decision.get("reason"), act, bid, atr_now, now, direction)
+        wait_prev, decision.get("reason"), act, bid, atr_now, now, direction,
+        regime=regime)
     if wait_flag == "drift":
         state["wait_drift"] = int(state.get("wait_drift") or 0) + 1
     state["last_decision"] = {
@@ -3483,6 +3674,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "act": act, "prog_dir": prog_dir, "agree": agree,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "wait": state.get("wait"), "wait_flag": wait_flag,
+        "regime": regime,
     }
 
     # 模型明确说不做，就别做。以前只能靠 p_up≈0.5 暗示，结果常常
@@ -3667,6 +3859,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         # 分歧记账：程序建议方向 + 模型是否自称同意。
         # 事后按 (prog_dir, direction) 分格算期望，谁该拥有判断权让数据判。
         "prog_dir": prog_dir, "agree": agree,
+        # 打法在开仓这一刻锁定（"range"/"trend"/"mid"），出场参数跟着 plan 走：
+        # 趋势单止盈 7.0、上限 3 小时；震荡单维持老参数。中途行情怎么变都不换。
+        "plan": regime,
         # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
         "signal_id": sig_id, "exec_by": exec_by,
     }
@@ -3679,6 +3874,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         "lots": cfg.lots, "price": price, "p_up": p_up,
         "confidence": round(max(p_up, 1 - p_up), 4),
         "prog_dir": prog_dir, "agree": agree,
+        # plan 冗余在 feat.regime 之外单列一行：统计工具按 kind=open 取 plan 时
+        # 不用钻 feat 字典，和 close 行取法对称。
+        "plan": regime,
         "feat": feat,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "dry_run": cfg.dry_run,
@@ -3703,12 +3901,18 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     return row
 
 
-def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float) -> dict | None:
+def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
+               plan: str | None = None) -> dict | None:
     """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
 
     这个函数只有三行逻辑，但顺序是致命的：**止损必须排在止盈门槛之前**。
     反过来写的话，一笔浮亏 -5 USD 的单子会因为「浮盈没到 2.50」被判成继续持有，
     止损永远不触发——参数越保守亏得越多。所以单独抽出来 + 单测钉住顺序。
+
+    `plan` 决定这一笔按哪套参数走（见 exit_params）：趋势单的止盈门槛是
+    tp_min_trend（默认 7.0）、持仓上限 max_hold_trend（默认 3 小时）；震荡单
+    维持 tp_min_usd / max_hold_sec 不变。plan 为空一律按震荡参数——
+    旧 state 里没存 plan 的持仓也能继续被原规则管着，行为不变。
 
     三条规则的来源（2026-10-23 第 3 场 191 笔的账）：
       · 60 秒中位持仓 = min_hold 从下限变成了目标，150 笔 ≤90 秒平仓吃掉 90% 的亏损；
@@ -3716,24 +3920,25 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float) -> dict | None:
       · 最大单笔 -6.08 是平均亏损的 5.9 倍，且它的 p_up=0.0（示例占位值被照抄，
         又被 confidence 记成 1.0 的"最自信"，实际是没做判断）。
     """
-    if cfg.sl_usd > 0 and float_pnl <= -abs(cfg.sl_usd):
+    ep = exit_params(cfg, plan)
+    if ep["sl_usd"] > 0 and float_pnl <= -abs(ep["sl_usd"]):
         return {"close": True, "source": "sl",
-                "reason": (f"硬止损：浮亏 {float_pnl:+.2f} 触及 -{abs(cfg.sl_usd):.2f}")
+                "reason": (f"硬止损：浮亏 {float_pnl:+.2f} 触及 -{abs(ep['sl_usd']):.2f}")
                 }
 
     # 持仓上限排在止盈门槛之前：否则一笔卡在 +2.0（没到门槛 3.25）的单子
     # 可以一直挂到天荒地老，把「超短线」拖成隔夜单。
-    if cfg.max_hold_sec > 0 and held_sec >= cfg.max_hold_sec:
+    if ep["max_hold_sec"] > 0 and held_sec >= ep["max_hold_sec"]:
         return {"close": True, "source": "timeout",
-                "reason": (f"持仓超上限：已 {held_sec}s / 上限 {cfg.max_hold_sec}s，"
+                "reason": (f"持仓超上限：已 {held_sec}s / 上限 {ep['max_hold_sec']}s，"
                            f"浮盈亏 {float_pnl:+.2f}，无条件市价平")
                 }
 
-    if cfg.tp_min_usd > 0:
-        if float_pnl < cfg.tp_min_usd:
+    if ep["tp_min_usd"] > 0:
+        if float_pnl < ep["tp_min_usd"]:
             return {"close": False, "source": "tp_wait",
                     "reason": (f"浮盈 {float_pnl:+.2f} 未达止盈门槛 "
-                               f"{cfg.tp_min_usd:.2f}，继续持有（本轮不调模型）")
+                               f"{ep['tp_min_usd']:.2f}，继续持有（本轮不调模型）")
                     }
         return None   # 到门槛了，让模型决定平还是继续跑
 
@@ -3852,6 +4057,26 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         issues.append(
             f"止盈门槛 {cfg.tp_min_usd:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
             "盈亏比仍 ≤ 1，这套参数没解决必亏问题"
+        )
+    # 趋势单的止盈门槛同一套盈亏比约束。0 = 关掉宽止盈（退回 tp_min_usd），
+    # 是合法配置；但只要开了，就不能比止损还窄——趋势打法赚的本来就是
+    # 「拿够一段」和震荡单不同，门槛比止损窄等于把趋势单削成震荡单。
+    if cfg.tp_min_trend < 0:
+        issues.append(f"趋势止盈门槛不能为负（{cfg.tp_min_trend:.2f}）")
+    if cfg.tp_min_trend > 0 and cfg.sl_usd > 0 and cfg.tp_min_trend <= cfg.sl_usd:
+        issues.append(
+            f"趋势止盈门槛 {cfg.tp_min_trend:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
+            "趋势单被削成盈亏比 ≤ 1 的震荡单，分 regime 就白分了"
+        )
+    if cfg.max_hold_trend < 0:
+        issues.append(f"趋势持仓上限不能为负（{cfg.max_hold_trend} 秒）")
+    # 趋势上限比震荡上限还短 = 配置矛盾：趋势单拿的波段比震荡单还短，
+    # tp_min_trend 再宽也永远等不到，等于悄悄退回震荡参数。
+    if cfg.max_hold_trend > 0 and cfg.max_hold_sec > 0 \
+            and cfg.max_hold_trend < cfg.max_hold_sec:
+        issues.append(
+            f"趋势持仓上限 {cfg.max_hold_trend}s 比震荡上限 {cfg.max_hold_sec}s 还短："
+            "宽止盈永远等不到，分 regime 形同虚设"
         )
     # 止损快查的间隔只有下限有意义：< 2 秒时 MT5 tick 读取的抖动开始比价格
     # 变化本身大，白白空转。**上界不在这里拦**——配得比决策间隔大也不报错，
@@ -4904,6 +5129,11 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "sl_usd": saved_cfg.get("sl_usd", _defaults.sl_usd),
         "tp_min_usd": saved_cfg.get("tp_min_usd", _defaults.tp_min_usd),
         "max_hold_sec": saved_cfg.get("max_hold_sec", _defaults.max_hold_sec),
+        # 趋势打法（2026-10-28 分 regime）。这三个字段旧 state 里没有，
+        # 回退到当前默认值；面板持仓行按 position.plan 选用哪套显示。
+        "tp_min_trend": saved_cfg.get("tp_min_trend", _defaults.tp_min_trend),
+        "max_hold_trend": saved_cfg.get("max_hold_trend", _defaults.max_hold_trend),
+        "trend_follow": bool(saved_cfg.get("trend_follow", _defaults.trend_follow)),
         # 止损快查间隔。0 = 关（每 interval_sec 才看一次止损）。面板要显示，
         # 否则用户没法判断「止损会不会超调」这件事现在到底有没有生效。
         "guard_sec": saved_cfg.get("guard_sec", _defaults.guard_sec),
@@ -5000,8 +5230,10 @@ def trade_detail(ticket: int, login: int | str | None = None,
             if len(eligible) >= VISIBLE_BARS:
                 window = eligible[-VISIBLE_BARS:]
                 bars = _fmt_bar_lines(window)
-                structure = _structure_text(window, cfg.zone_edge)
-                prog_dir = _prog_direction(window, cfg.zone_edge)
+                structure = _structure_text(window, cfg.zone_edge,
+                                            trend_follow=cfg.trend_follow)
+                prog_dir = _prog_direction(window, cfg.zone_edge,
+                                           cfg.trend_follow)
                 try:
                     ticks_block = _ticks_text(cfg, window)
                 except Exception:  # noqa: BLE001
@@ -5028,7 +5260,7 @@ def trade_detail(ticket: int, login: int | str | None = None,
         try:
             prog_dir = _prog_direction(
                 _bars(cfg.symbol, cfg.tf, cfg.bars + 120)[-VISIBLE_BARS:],
-                cfg.zone_edge)
+                cfg.zone_edge, cfg.trend_follow)
         except Exception:  # noqa: BLE001
             pass
     if prog_dir is not None and model_dir is not None:
