@@ -188,6 +188,36 @@ class Cfg:
     max_trades: int = 0
     max_loss_usd: float = 0.0
     max_minutes: int = 0
+    # ---------------------------------------------------------------
+    # AI 辅助做单（2026-10-28）：第三种模式，与纸面 / 真实并列。
+    #
+    # 决策链一个字没改，只在**下单前停住等人点一下**：模型说做多 → 弹窗 →
+    # 你点同意才发单。硬止损（sl_usd）和持仓上限（max_hold_sec）仍然由程序
+    # 无条件执行，不弹窗、不等人——「人手确认」不等于「人肉止损」，
+    # 一旦允许人挡住止损，一次走神就是 20 美元而不是 3 美元。
+    #
+    # 为什么必须有这道人工闸：模型在「说要等回踩、实际追在顶上」这类
+    # 言行不一的单子上，肉眼几乎看不出来（reason 写得头头是道，成交价高
+    # 6~7 美元）。弹窗把「程序倾向 / 模型判断 / 成交价」摆在一起，
+    # 人只需要判断"这个位置我现在愿不愿意买"，比翻日志快两个数量级。
+    assist: bool = False
+    # 入场弹窗的时效。90 秒不是拍脑袋：M1 上 60 秒能跑 1~2 美元，超过一分半
+    # 的信号，弹窗里那个价格已经是历史；而太短（30 秒）又不够看清理由。
+    assist_entry_wait_sec: int = 90
+    # 出场弹窗的宽限期。**到点无人应答就执行模型的平仓决定**（人只有否决权）。
+    # 入场默认"不做"、出场默认"照做"，这个不对称是有意的：错过一笔开仓
+    # 只是少赚，持仓没人管会从 +3 拖成 -3。
+    assist_exit_wait_sec: int = 120
+    # 价格漂移保护：点了同意，但成交价已经在**不利方向**跑掉超过这个数，
+    # 信号作废不下单。只判不利方向——有利方向（买得更便宜 / 空得更高）
+    # 拦掉它没道理。0.80 ≈ 3 倍点差，也约等于半个 M1 ATR。
+    assist_max_slip_usd: float = 0.80
+    # 否决 / 超时之后的静默期：这段时间内不再弹窗（入场连模型调用一起省）。
+    # 不设它的话，模型每 60 秒会重提同一次机会，人不在电脑前就会被铃声轰炸。
+    assist_deny_cooldown: int = 180
+    # 弹窗时是否把面板窗口还原并置顶 5 秒。面板被最小化 / 压在别的窗口后面时，
+    # 光有提示音找不到窗口，信号 90 秒就作废了。
+    assist_raise_window: bool = True
     comment: str = "aqa_ai"
 
 
@@ -248,6 +278,16 @@ def _empty_state() -> dict:
         # 已平仓、但还没到复盘时机的单子。平仓后要等 7 根 K 线走完才复盘，
         # 这段时间里系统照常做下一笔——复盘不能挡住交易。
         "pending_reviews": [],
+        # 正在等人点的那条信号（AI 辅助模式）。面板每秒轮询 state，
+        # 拿到它就弹窗；人点完由 HTTP 线程写答复文件 + 唤醒等待者。
+        # 只在等待期间有值，结案后立即清空——所以它的存在本身就是
+        # 「现在有一个弹窗该显示」的信号。
+        "pending_signal": None,
+        # 否决 / 超时后的静默期，按信号类型分槽。入场否决后连模型调用
+        # 一起省掉（和冷却同性质）；出场否决只是不再弹窗，模型照问——
+        # 否则仓位会有 3 分钟没人评估。
+        "assist_deny_until": {},
+        "last_signal_ts": None,
         # 谁在跑：panel = 面板线程，cli = 命令行进程。面板重启后 state 里可能
         # 还留着 running=True，靠这两个字段判断那条记录是不是已经作废了。
         "owner": None,
@@ -3064,6 +3104,17 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
 
     state = load_state(login)
 
+    # 孤儿信号：state 里挂着一条待确认信号，但这个进程里没有人在等它
+    # （面板重启过、或者上一轮异常退出）。不清理的话面板会一直弹一个
+    # 点了也没用的窗，而且 answer_signal 那边会一直拒绝。
+    orphan = state.get("pending_signal")
+    if orphan and not DESK.waiting((orphan or {}).get("id")):
+        _log_signal(orphan, {"answer": "orphan", "waited_sec": 0,
+                             "bid": orphan.get("bid"), "ask": orphan.get("ask")},
+                    cfg, login)
+        state["pending_signal"] = None
+        save_state(state, login)
+
     if state.get("stop_reason"):
         return {"kind": "stop", "stop": True, "reason": state["stop_reason"]}
 
@@ -3152,6 +3203,11 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
 
         gate = _exit_gate(cfg, held_sec, float_pnl)
 
+        # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
+        sig_id = None
+        exec_by = "auto"
+        sig_slip = None
+
         # 闸门说不平：直接记 hold，不调模型（省 token，也断了"每轮问一次要不要跑"）
         if gate is not None and not gate.get("close"):
             row = {"ts": now, "kind": "hold", "reason": gate["reason"],
@@ -3204,6 +3260,104 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                                  now, login)
                 return row
 
+        # 辅助模式：模型说平仓，先问人。
+        #
+        # 只拦"模型主动要平"这一条路；止损（gate.source == "sl"）和持仓上限
+        # 根本走不到这里——它们在 gate 阶段就定了结论。这是刻意的：
+        # **人手确认不等于人肉止损**，一次走神就是 20 美元而不是 3 美元。
+        if cfg.assist and gate is None and decision.get("close"):
+            until = _assist_deny_until(state, "exit")
+            now_real = int(time.time())
+            if until and now_real < until:
+                row = {"ts": now, "kind": "hold", "source": "human",
+                       "reason": (f"人工刚否决平仓，{until - now_real} 秒内不再弹窗"
+                                  f"（模型仍在评估，止损照旧）"),
+                       "held_sec": held_sec, "float_pnl": round(float_pnl, 2),
+                       "peak_pnl": pos.get("peak_pnl")}
+                state["last_decision"] = {
+                    "ts": now, "kind": "exit", "close": False,
+                    "reason": row["reason"], "source": "human",
+                }
+                state["last_tick_ts"] = now
+                append_log(row, login)
+                save_state(state, login)
+                return row
+
+            sig = _new_signal(
+                "exit", cfg, direction=int(pos.get("direction") or 1),
+                p_up=pos.get("p_up"), prog_dir=pos.get("prog_dir"),
+                agree=pos.get("agree"), act=False,
+                reason=decision.get("reason"), bid=bid, ask=ask,
+                price=(bid if int(pos.get("direction") or 1) > 0 else ask),
+                ticket=pos.get("ticket"), held_sec=held_sec,
+                fp=round(float_pnl, 2), wait_sec=cfg.assist_exit_wait_sec)
+            state["pending_signal"] = sig
+            state["last_tick_ts"] = now
+            save_state(state, login)
+            if cfg.assist_raise_window:
+                _notify_signal(sig)
+
+            ans = _await_human(cfg, sig, login=login, pos=pos)
+            sig_id = sig["id"]
+            fp_new = ans.get("fp")
+            if fp_new is not None:
+                sig_slip = round(float(fp_new) - float(float_pnl), 2)
+            _log_signal(sig, ans, cfg, login,
+                        extra=({"slip": sig_slip} if sig_slip is not None else None))
+            state["pending_signal"] = None
+            state["last_signal_ts"] = int(time.time())
+
+            if ans["answer"] in ("sl", "timeout"):
+                # 事实优先：等待期间触发硬止损 / 持仓上限，程序直接平。
+                # 走原路径（source 仍是 sl/timeout），sl_closes 计数、复盘口径不变。
+                decision = {
+                    "close": True, "source": ans["answer"],
+                    "reason": (f"等待人工确认期间触发"
+                               f"{'硬止损' if ans['answer'] == 'sl' else '持仓上限'}，"
+                               f"程序直接平仓（信号 {sig_id} 被打断）"),
+                }
+            elif ans["answer"] == "gone":
+                row = {"ts": now, "kind": "hold", "source": "external_pending",
+                       "signal_id": sig_id,
+                       "reason": "等待确认期间仓位已在终端消失，下一轮按外部平仓记账",
+                       "held_sec": held_sec}
+                state["last_tick_ts"] = now
+                append_log(row, login)
+                save_state(state, login)
+                return row
+            elif ans["answer"] in ("deny", "cancelled"):
+                if ans["answer"] != "cancelled":
+                    _set_assist_deny(state, "exit", cfg.assist_deny_cooldown)
+                why_txt = ("人工否决平仓，继续持有" if ans["answer"] == "deny"
+                           else "做单线程已停止，本轮不平")
+                row = {"ts": now, "kind": "hold", "source": "human",
+                       "signal_id": sig_id, "answer": ans["answer"],
+                       "reason": why_txt,
+                       "held_sec": held_sec, "float_pnl": round(float_pnl, 2),
+                       "peak_pnl": pos.get("peak_pnl")}
+                state["last_decision"] = {
+                    "ts": now, "kind": "exit", "close": False,
+                    "reason": why_txt, "source": "human",
+                }
+                state["last_tick_ts"] = now
+                append_log(row, login)
+                save_state(state, login)
+                return row
+            else:                       # approve / expired
+                exec_by = "human" if ans["answer"] == "approve" else "assist_expired"
+                # 用答复瞬间的价格重算：等了 120 秒，浮盈早就不是原来那个数，
+                # 拿旧价写平仓行等于记错账。
+                bid, ask = float(ans["bid"] or bid), float(ans["ask"] or ask)
+                if fp_new is not None:
+                    float_pnl = float(fp_new)
+                else:
+                    float_pnl = _realized_pnl(cfg, pos, bid, ask)
+                _track_peak(pos, float_pnl, now)
+                tail = ("人工确认平仓" if exec_by == "human"
+                        else f"{cfg.assist_exit_wait_sec} 秒无人应答，按模型决定执行")
+                decision = {**decision,
+                            "reason": f"{decision.get('reason') or ''}（{tail}）"}
+
         # 纸面模式没有真实的平仓单可发，直接本地结算。
         # 不去调 send_close：券商那边根本没这个 ticket，只会得到「持仓不存在」，
         # 然后仓位永远卡在 state 里，冷却也永远不触发。
@@ -3246,6 +3400,13 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
         if decision.get("error"):
             row["error"] = decision["error"]
+        if sig_id:
+            # `source` 不动（模型仍是发起方），谁按的按钮记在 exec_by。
+            # 面板的 llm_hit_rate 分母挂在 source 上，改它会让统计静默变形。
+            row["signal_id"] = sig_id
+            row["exec_by"] = exec_by
+            if sig_slip is not None:
+                row["slip"] = sig_slip
         append_log(row, login)
         # 平仓之后才允许回看更长的一段，但**要等 7 根 K 线**才复盘：
         # 排进队列，这期间照常分析行情、照常开下一笔。
@@ -3262,6 +3423,21 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         append_log(row, login)
         save_state(state, login)
         return row
+
+    # 辅助模式的静默期：刚被否决 / 刚超时，这一段时间既不弹窗也不调模型。
+    # 放在 ask_entry **之前**是刻意的——省的是 token，不是版面。
+    # 用真实时钟比：`now` 是可注入的测试值，拿它和真实时间戳比会算错。
+    if cfg.assist:
+        until = _assist_deny_until(state, "entry")
+        now_real = int(time.time())
+        if until and now_real < until:
+            row = {"ts": now, "kind": "skip", "assist": True,
+                   "reason": (f"上一条信号未获批准，{until - now_real} 秒内不再弹窗"
+                              f"（也不重复问模型）")}
+            state["last_tick_ts"] = now
+            append_log(row, login)
+            save_state(state, login)
+            return row
 
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
     # 落盘后才能事后对账「程序对 vs 模型对」。
@@ -3364,6 +3540,107 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         state["last_decision"]["advice"] = advice_code
         state["last_decision"]["advice_text"] = advice[1]
 
+    # 辅助模式：**开仓前停住，等人点一下**。
+    #
+    # 插在这里是有讲究的：前面所有闸门（act=false / min_edge / 建议闸门）都
+    # 已经过完，所以弹窗只弹"模型确实要开、且程序没否掉"的单子——不会拿
+    # 一堆半成品信号去轰炸人。后面 send_open 之前的复核是另一件事：
+    # 等 90 秒之后世界变了，价格、持仓、刹车都可能不再允许。
+    sig_id = None
+    exec_by = "auto"
+    sig_slip = None
+    sig_ts = None
+    sig_wait = None
+    if cfg.assist:
+        sig = _new_signal("entry", cfg, direction=direction, p_up=p_up,
+                          prog_dir=prog_dir, agree=agree, act=act,
+                          advice=advice_code,
+                          advice_text=(advice[1] if advice_code else None),
+                          reason=decision.get("reason"), bid=bid, ask=ask,
+                          price=(ask if direction > 0 else bid),
+                          feat=feat, wait_sec=cfg.assist_entry_wait_sec)
+        state["pending_signal"] = sig
+        state["last_tick_ts"] = now
+        save_state(state, login)          # 面板 1 秒轮询，落盘才看得见
+        if cfg.assist_raise_window:
+            _notify_signal(sig)
+
+        ans = _await_human(cfg, sig, login=login)
+        sig_id, sig_ts = sig["id"], sig["ts"]
+        sig_wait = round(float(ans["waited_sec"]), 1)
+        if ans["answer"] == "approve":
+            # 漂移只判**不利方向**：买得更便宜 / 空得更高，拦掉它没道理
+            cur = float(ans["ask"] if direction > 0 else ans["bid"])
+            sig_slip = round((cur - float(sig["price"])) * direction, 2)
+        _log_signal(sig, ans, cfg, login,
+                    extra=({"slip": sig_slip} if sig_slip is not None else None))
+        state["pending_signal"] = None
+        state["last_signal_ts"] = int(time.time())
+
+        if ans["answer"] != "approve":
+            # 取消不写冷却：那是"关程序"，不是"这单不该做"
+            if ans["answer"] != "cancelled":
+                _set_assist_deny(state, "entry", cfg.assist_deny_cooldown)
+            why_txt = {
+                "deny": "人工否决，不下单",
+                "expired": f"{cfg.assist_entry_wait_sec} 秒无人应答，按不做处理",
+                "cancelled": "做单线程已停止，这条信号作废（不会补单）",
+                "blocked": "等待期间品种上已出现持仓（你手动开的），信号作废",
+            }.get(ans["answer"], str(ans["answer"]))
+            row = {"ts": now, "kind": "skip", "p_up": p_up,
+                   "direction": direction, "prog_dir": prog_dir,
+                   "agree": agree, "feat": feat, "assist": True,
+                   "signal_id": sig_id, "answer": ans["answer"],
+                   "reason": why_txt}
+            state["last_tick_ts"] = now
+            append_log(row, login)
+            save_state(state, login)
+            return row
+
+        if sig_slip is not None and sig_slip > float(cfg.assist_max_slip_usd):
+            _set_assist_deny(state, "entry", cfg.assist_deny_cooldown)
+            row = {"ts": now, "kind": "skip", "p_up": p_up,
+                   "direction": direction, "prog_dir": prog_dir,
+                   "agree": agree, "feat": feat, "assist": True,
+                   "signal_id": sig_id, "answer": "void_slip",
+                   "slip": sig_slip,
+                   "reason": (f"已同意，但价已朝不利方向跑了 {sig_slip:.2f} > "
+                              f"{float(cfg.assist_max_slip_usd):.2f}，"
+                              f"信号作废不下单")}
+            state["last_tick_ts"] = now
+            append_log(row, login)
+            save_state(state, login)
+            return row
+
+        # 复核：这 90 秒里你完全可能自己开了一笔，或者刹车已经踩了
+        has_pos = False
+        if not cfg.dry_run:
+            ps = _positions(cfg.symbol)
+            if ps is None:
+                row = {"ts": now, "kind": "skip", "p_up": p_up,
+                       "direction": direction, "prog_dir": prog_dir,
+                       "agree": agree, "feat": feat, "assist": True,
+                       "signal_id": sig_id, "answer": "void_unknown",
+                       "reason": "已同意，但读不到持仓状态，无法确认没有叠仓，信号作废"}
+                state["last_tick_ts"] = now
+                append_log(row, login)
+                save_state(state, login)
+                return row
+            has_pos = bool(ps)
+        ok2, why2 = can_open(state, int(time.time()), has_pos, cfg)
+        if not ok2:
+            row = {"ts": now, "kind": "skip", "p_up": p_up,
+                   "direction": direction, "prog_dir": prog_dir,
+                   "agree": agree, "feat": feat, "assist": True,
+                   "signal_id": sig_id, "answer": "void_state",
+                   "reason": f"已同意，但此刻已不可开仓：{why2}"}
+            state["last_tick_ts"] = now
+            append_log(row, login)
+            save_state(state, login)
+            return row
+        exec_by = "human"
+        bid, ask = float(ans["bid"] or bid), float(ans["ask"] or ask)
+
     res = send_open(cfg, direction)
     if not res.get("ok"):
         row = {"ts": now, "kind": "open_failed", "p_up": p_up, "direction": direction,
@@ -3390,6 +3667,8 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         # 分歧记账：程序建议方向 + 模型是否自称同意。
         # 事后按 (prog_dir, direction) 分格算期望，谁该拥有判断权让数据判。
         "prog_dir": prog_dir, "agree": agree,
+        # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
+        "signal_id": sig_id, "exec_by": exec_by,
     }
     state["trades"] = int(state.get("trades") or 0) + 1
     state["last_open_ts"] = now
@@ -3410,6 +3689,15 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         row["would_veto"] = advice_code
     if decision.get("error"):
         row["error"] = decision["error"]
+    if sig_id:
+        # 人工确认的痕迹。`source` 保持原值（模型仍然是发起方），
+        # 谁执行记在 exec_by —— 面板的命中率口径全挂在 source 上，不能动。
+        row["signal_id"] = sig_id
+        row["exec_by"] = exec_by
+        row["sig_ts"] = sig_ts
+        row["sig_wait_sec"] = sig_wait
+        if sig_slip is not None:
+            row["slip"] = sig_slip
     append_log(row, login)
     save_state(state, login)
     return row
@@ -3511,6 +3799,19 @@ def _fmt(row: dict) -> str:
         return f"{clock} 跳过：{row.get('reason')}"
     if kind == "stop":
         return f"{clock} 停止：{row.get('reason')}"
+    if kind == "signal":
+        ANS = {"approve": "同意", "deny": "否决", "expired": "超时未答",
+               "cancelled": "已取消", "blocked": "等待期已有持仓",
+               "gone": "仓已不在", "sl": "被硬止损抢占",
+               "timeout": "被持仓上限抢占", "void_slip": "价格漂移作废",
+               "orphan": "孤儿信号（已清理）"}
+        what = "入场" if row.get("sig_kind") == "entry" else "出场"
+        ans = ANS.get(str(row.get("answer")), str(row.get("answer")))
+        wait = row.get("waited_sec")
+        wait_txt = f"，等 {float(wait):.0f}s" if wait is not None else ""
+        slip = row.get("slip")
+        slip_txt = f"，漂移 {float(slip):.2f}" if slip is not None else ""
+        return f"{clock} 人工确认 [{what}] {ans}{wait_txt}{slip_txt}"
     return f"{clock} {kind} {row.get('reason') or row.get('error') or ''}"
 
 
@@ -3571,6 +3872,27 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         issues.append(
             f"近门槛快查间隔 {cfg.guard_near_sec:.1f} 秒不能比远档 {cfg.guard_sec:.1f} 秒还粗"
         )
+    # 辅助模式的参数。**不校验 assist 与 dry_run 的互斥**：
+    # 「辅助 + 纸面」是合法且有用的组合（弹窗照弹、同意只记账），
+    # 用来先把流程和手感跑顺，再上真钱。
+    if cfg.assist:
+        if cfg.assist_entry_wait_sec < 5:
+            issues.append(
+                f"入场确认时限 {cfg.assist_entry_wait_sec} 秒太短：弹窗刚出现就过期，"
+                "等于替你把所有单子都否了"
+            )
+        if cfg.assist_exit_wait_sec < 5:
+            issues.append(
+                f"出场确认时限 {cfg.assist_exit_wait_sec} 秒太短：同上，"
+                "到点会自动按模型决定平仓，太短会变成「实际上没人看过」"
+            )
+        if cfg.assist_max_slip_usd <= 0:
+            issues.append(
+                f"价格漂移阈值 {cfg.assist_max_slip_usd:.2f} 必须大于 0："
+                "设 0 等于任何价格变动都作废，一单也开不出去"
+            )
+        if cfg.assist_deny_cooldown < 0:
+            issues.append("否决冷却不能是负数")
     return issues
 
 
@@ -3633,6 +3955,370 @@ def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
     return ""
 
 
+# ---------------------------------------------------------- 人工确认通道
+#
+# AI 辅助模式的全部机制就是这一块：worker 在开/平仓前停住，等人给一个答复。
+# 四个约束，每一个都是踩过的坑：
+#
+#  1. **答复不能只靠内存 Event**。面板的 HTTP 线程与 worker 同进程时内存够用，
+#     但 CLI 跑辅助模式、或面板重启后状态还在，Event 就不在了。所以权威通道
+#     是账户目录下的 autotrade_signal.json（读一次就删），内存只做加速。
+#  2. **不能写进 autotrade_state.json**。state 是整文件覆盖写，HTTP 线程
+#     读改写会把 worker 期间写进去的 position/peak_pnl 覆盖回旧值。
+#  3. **等待必须可被抢占**。硬止损、持仓上限、仓在终端消失，这三件事优先于
+#     人的点击——人不在电脑前，不能让一个弹窗把止损卡住。
+#  4. **取消优先于一切**。「关闭并清仓」时先取消等待再停线程，否则 join 超时
+#     后 close_all 已经平完仓，worker 醒来拿到「同意」会再开一笔。
+
+
+def signal_answer_path(login: int | str | None = None) -> Path:
+    """人工答复的落地文件。独立小文件，不与 state 抢写。"""
+    return paths.account_file(paths.resolve_login(login), "autotrade_signal.json")
+
+
+class _SignalDesk:
+    """进程内的单槽收发。
+
+    一个进程只有一个 worker 线程，所以单槽就够——多槽只会引入"答复该给谁"
+    的歧义。`id` 匹配是唯一的安全边界：过期的答复（上一轮弹窗）绝不作用于
+    这一轮信号。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._evt = threading.Event()
+        self._id: str | None = None
+        self._answer: dict | None = None
+        self._cancelled = False
+
+    # ---- 等待方（worker 线程）----
+    def open(self, sig_id: str) -> None:
+        with self._lock:
+            self._id, self._answer, self._cancelled = str(sig_id), None, False
+            self._evt.clear()
+
+    def close(self) -> None:
+        with self._lock:
+            self._id, self._answer = None, None
+            self._evt.clear()
+
+    def waiting(self, sig_id: str) -> bool:
+        with self._lock:
+            return self._id == str(sig_id)
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def take_answer(self) -> dict | None:
+        """取一次即消费。同一条信号不会被结算两次。"""
+        with self._lock:
+            ans, self._answer = self._answer, None
+            return ans
+
+    def wait(self, sec: float) -> bool:
+        """返回 True = 有事发生（答复或取消）。"""
+        return bool(self._evt.wait(max(0.0, float(sec))))
+
+    # ---- 答复方（HTTP 线程 / CLI）----
+    def post(self, sig_id: str, approve: bool, source: str = "human") -> bool:
+        with self._lock:
+            if str(sig_id) != (self._id or ""):
+                return False           # 不是当前在等的那条，丢弃
+            self._answer = {"approve": bool(approve), "source": source,
+                            "ts": int(time.time())}
+            self._evt.set()
+            return True
+
+    def cancel(self) -> None:
+        """Worker.stop() 在 `_stop.set()` **之前**调用。
+
+        先取消再停，是为了让等待者立刻醒来、看到"已取消"然后什么都不做；
+        反过来的话 join(15) 会超时，close_all 已经把仓平了，worker 醒来
+        才拿到答复，于是「关闭并清仓」之后又开一笔。
+        """
+        with self._lock:
+            self._cancelled = True
+            self._evt.set()
+
+
+DESK = _SignalDesk()
+
+# 窗口提醒回调。面板启动时注册（把窗口还原并置顶几秒）；CLI 下没人注册。
+#
+# 为什么提醒不能只靠前端轮询：面板被最小化或在别的标签页时，浏览器会把
+# setInterval 节流到每分钟一次，而入场信号只活 90 秒——可能一次都轮不到。
+# 窗口层面的提醒必须由发信号的那一侧直接触发。
+_SIGNAL_NOTIFIER = None
+
+
+def register_signal_notifier(fn) -> None:
+    """面板注册提醒回调。回调在 worker 线程里被调，必须自己异步化。"""
+    global _SIGNAL_NOTIFIER
+    _SIGNAL_NOTIFIER = fn
+
+
+def _notify_signal(sig: dict) -> None:
+    fn = _SIGNAL_NOTIFIER
+    if fn is None:
+        return
+    try:
+        fn(sig)
+    except Exception:  # noqa: BLE001
+        pass          # 喊不动人也不能打断下单流程
+
+
+def pending_signal_view(login=None) -> dict:
+    """轻量接口：只读 state，不读日志、不碰 MT5、不算浮盈。
+
+    面板每秒无条件轮询它（不判页面可见性），所以开销必须小到"窗口最小化
+    也敢每秒问一次"——这正是它在隐藏状态下仍然生效的前提。
+    """
+    try:
+        state = load_state(login)
+    except Exception:  # noqa: BLE001
+        state = {}
+    now = int(time.time())
+    sig = state.get("pending_signal")
+    return {
+        "ok": True,
+        "server_ts": now,
+        "assist": bool((state.get("cfg") or {}).get("assist")),
+        "running": bool(state.get("running")),
+        "signal": ({**sig, "remain_sec": max(0, int(sig.get("expires_at") or 0) - now)}
+                   if sig else None),
+    }
+
+
+def _read_answer(path: Path, sig_id: str) -> dict | None:
+    """读一次性答复文件。id 不匹配 = 上一轮遗留，当作没有。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or str(raw.get("id") or "") != str(sig_id):
+        return None
+    return {"approve": bool(raw.get("approve")), "source": raw.get("source") or "human"}
+
+
+def _clear_answer(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def answer_signal(signal_id: str, approve: bool, login=None,
+                  source: str = "human") -> dict:
+    """面板按钮的唯一入口。**幂等**：同一条信号重复提交不会造成第二笔。
+
+    先校验再写：`pending_signal` 不存在、id 不匹配、已过期，一律拒绝并说明
+    原因——面板要拿这句话显示"这条信号已经失效"，而不是静默失败。
+    """
+    sid = str(signal_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "缺少信号编号"}
+    state = load_state(login)
+    sig = state.get("pending_signal") or {}
+    if str(sig.get("id") or "") != sid:
+        return {"ok": False, "expired": True,
+                "error": "这条信号已失效或已处理"}
+    if int(time.time()) > int(sig.get("expires_at") or 0):
+        return {"ok": False, "expired": True, "error": "已过答复时限"}
+    row = {"id": sid, "approve": bool(approve), "ts": int(time.time()),
+           "source": source}
+    # 权威通道先落盘再从内存唤醒：内存通道在跨进程/重启时不存在，
+    # 文件在两种情况下都可靠。
+    paths.write_json(paths.resolve_login(login), "autotrade_signal.json", row)
+    DESK.post(sid, bool(approve), source)
+    return {"ok": True, "id": sid, "approve": bool(approve)}
+
+
+def _new_signal(kind: str, cfg: Cfg, *, direction: int, p_up: float | None,
+                prog_dir: int | None, reason: str | None, bid: float,
+                ask: float, price: float, wait_sec: int,
+                agree=None, advice: str | None = None,
+                advice_text: str | None = None, act=None,
+                feat: dict | None = None, ticket=None,
+                held_sec: int | None = None, fp: float | None = None) -> dict:
+    """造一条待确认信号。
+
+    **时间戳用真实时钟**，不用 tick 的 `now`：`now` 是可注入的测试值
+    （单测传 2026-09 的固定秒），拿它算 expires_at，真实时钟会当场判超时，
+    面板倒计时也会算成负数。
+    """
+    now = int(time.time())
+    return {
+        "id": os.urandom(6).hex(), "kind": kind,
+        "ts": now, "expires_at": now + max(5, int(wait_sec)),
+        "direction": int(direction), "p_up": p_up, "prog_dir": prog_dir,
+        "agree": agree, "act": act,
+        "advice": advice, "advice_text": advice_text,
+        "reason": reason, "bid": float(bid), "ask": float(ask),
+        "price": round(float(price), 3),
+        "feat": feat or {}, "ticket": ticket,
+        "held_sec": held_sec, "fp": fp,
+        "dry_run": bool(cfg.dry_run), "wait_sec": max(5, int(wait_sec)),
+    }
+
+
+def _log_signal(sig: dict, ans: dict, cfg: Cfg, login=None,
+                extra: dict | None = None) -> dict:
+    """每次信号结案落一行，无论人点了什么。
+
+    为什么连"同意"也要单独记一行：open/close 行只说明"发生了成交"，
+    说明不了"人看过、等了 12 秒、点了同意"。事后想算「人点 vs 模型自己走」
+    的期望差，必须有这一行。
+    """
+    row = {
+        "ts": int(time.time()), "kind": "signal",
+        "signal_id": sig.get("id"), "sig_kind": sig.get("kind"),
+        "answer": ans.get("answer"),
+        "waited_sec": round(float(ans.get("waited_sec") or 0.0), 1),
+        "direction": sig.get("direction"), "p_up": sig.get("p_up"),
+        "prog_dir": sig.get("prog_dir"), "agree": sig.get("agree"),
+        "act": sig.get("act"), "advice": sig.get("advice"),
+        "advice_text": sig.get("advice_text"),
+        "price": sig.get("price"),
+        "bid": round(float(ans.get("bid") or sig.get("bid") or 0), 3),
+        "ask": round(float(ans.get("ask") or sig.get("ask") or 0), 3),
+        "reason": sig.get("reason"), "drv": "assist",
+        "dry_run": bool(sig.get("dry_run")),
+    }
+    if sig.get("ticket") is not None:
+        row["ticket"] = sig["ticket"]
+    if sig.get("held_sec") is not None:
+        row["held_sec"] = sig["held_sec"]
+    if ans.get("late"):
+        row["late"] = True          # 人在止损生效的同一瞬间才点，留痕
+    if extra:
+        row.update(extra)
+    append_log(row, login)
+    return row
+
+
+def _assist_deny_until(state: dict, kind: str) -> int:
+    """取某个信号类型的静默期截止时间。旧 state 没有这个字段时返回 0。"""
+    raw = state.get("assist_deny_until")
+    if not isinstance(raw, dict):
+        return 0
+    try:
+        return int(raw.get(kind) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_assist_deny(state: dict, kind: str, sec: int) -> None:
+    raw = state.get("assist_deny_until")
+    if not isinstance(raw, dict):
+        raw = {}
+    raw[kind] = int(time.time()) + max(0, int(sec))
+    state["assist_deny_until"] = raw
+
+
+def _await_human(cfg: Cfg, sig: dict, login=None, pos: dict | None = None,
+                 *, clock=None, quote_fn=None, positions_fn=None,
+                 sleeper=None) -> dict:
+    """阻塞等人点，返回 {"answer", "waited_sec", "bid", "ask", "fp", "src", "late"}。
+
+    answer 取值与含义：
+
+        approve   人点了同意
+        deny      人点了否决
+        expired   到期无人应答（入场=不做；出场=按模型决定执行）
+        cancelled Worker.stop()（**只落日志，绝不下单**）
+        blocked   入场等待期间品种上出现了持仓（这 90 秒里你自己开了一笔）
+        gone      出场等待期间仓在终端消失（交给下一轮的"外部平仓"分支）
+        sl        出场等待期间浮亏触及硬止损（程序抢跑）
+        timeout   出场等待期间越过持仓上限（程序抢跑）
+
+    **判定顺序每片都一样：取消 → 超时 → 行情抢占 → 人的答复。**
+    事实优先于意愿：同一片里人的点击和止损同时到，按止损处理，把那次点击
+    记成 `late=True` 留痕。反过来的话，人点得稍慢一点就能让浮亏突破 3 美元。
+    """
+    clock = clock or time.time
+    q_fn = quote_fn or _quote
+    p_fn = positions_fn or _positions
+    sid = str(sig.get("id"))
+    deadline = float(sig.get("expires_at") or 0)
+    started = float(clock())
+    is_exit = sig.get("kind") == "exit"
+    bid = float(sig.get("bid") or 0.0)
+    ask = float(sig.get("ask") or 0.0)
+    fp = sig.get("fp")
+    ans_path = signal_answer_path(login)
+    # 行情检查节流。0.2 秒查一次 = 120 秒里打 600 次终端，而**答复延迟仍只有
+    # 0.2 秒**——答复走 Event，行情走定时器，两件事的密度没必须一样。
+    # 入场侧只在"这期间是否多出一笔持仓"上关心行情，10 秒足够。
+    guard = max(2.0, min(float(getattr(cfg, "guard_sec", 0.0) or 5.0), 5.0)) \
+        if is_exit else 10.0
+    next_mkt = started
+    head = {"bid": bid, "ask": ask, "fp": fp, "src": None, "late": False}
+
+    def ret(answer: str, t: float, **kw) -> dict:
+        out = dict(head)
+        out.update(kw)
+        out["answer"] = answer
+        out["waited_sec"] = max(0.0, float(t) - started)
+        return out
+
+    DESK.open(sid)
+    try:
+        while True:
+            t = float(clock())
+
+            # 1) 取消：最高优先。此刻 close_all 可能已经在平仓，任何下单都是灾难
+            if DESK.cancelled():
+                return ret("cancelled", t)
+
+            # 2) 超时：到点即结论。迟到的答复由 answer_signal 那边拦住
+            if deadline and t >= deadline:
+                return ret("expired", t)
+
+            # 3) 行情抢占：客观事实优先于人的意愿
+            if t >= next_mkt:
+                next_mkt = t + guard
+                q = q_fn(cfg.symbol)
+                if q:
+                    bid, ask = float(q[0]), float(q[1])
+                    head["bid"], head["ask"] = bid, ask
+                if is_exit and pos:
+                    ps = p_fn(cfg.symbol)
+                    # 读不到持仓（None）是"不知道"，不是"没有"——照 _positions
+                    # 的约定，不能据此判断已经平了。
+                    if ps is not None and not any(
+                            int(p.get("ticket") or 0) == int(pos.get("ticket") or -1)
+                            for p in ps):
+                        return ret("gone", t)
+                    if q:
+                        fp = _realized_pnl(cfg, pos, bid, ask)
+                        head["fp"] = fp
+                        if _guard_hit(cfg, pos, bid, ask, fp=fp):
+                            return ret("sl", t, late=bool(DESK.take_answer()))
+                    opened = int(pos.get("opened_at") or t)
+                    if cfg.max_hold_sec and (t - opened) >= cfg.max_hold_sec:
+                        return ret("timeout", t, late=bool(DESK.take_answer()))
+                elif not is_exit and not cfg.dry_run:
+                    ps = p_fn(cfg.symbol)
+                    if ps:                     # 这 90 秒里你自己开了一笔
+                        return ret("blocked", t)
+
+            # 4) 人的答复：先内存（同进程零延迟），再文件（跨进程 / 面板重启）
+            ans = DESK.take_answer() or _read_answer(ans_path, sid)
+            if ans is not None:
+                return ret("approve" if ans["approve"] else "deny", t,
+                           src=ans.get("source"))
+
+            # 5) 睡一小片。有答复/取消都会 set Event，立刻醒来
+            if sleeper is not None:
+                sleeper(0.2)
+            else:
+                DESK.wait(0.2)
+    finally:
+        DESK.close()
+        _clear_answer(ans_path)       # 一次性消费，防止下一轮误读上一条
+
+
 def _nap(sec: float, stop_wait=None, sleeper=None) -> bool:
     """睡一段。传了 stop_wait（面板线程的 Event.wait）时返回是否收到停止信号。"""
     sec = max(0.0, sec)
@@ -3666,6 +4352,12 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
     无人看守缩到一格**，剩下的原样交给下一轮。
     """
     deadline = started + next_wait_sec(row, cfg)
+    # 辅助模式下 tick 可能被人等拖长（入场 90 秒 / 出场 120 秒），deadline
+    # 在 tick 结束时早就过期了，下面会退化成"睡 1 秒再问一次模型"——刚问完人
+    # 立刻又问，既费 token 又会在冷却生效前反复落 skip 行。这种情况下从
+    # **现在**重新计时。非辅助模式不受影响（tick 本身就 < 1 秒）。
+    if getattr(cfg, "assist", False) and time.time() - started > 1.0:
+        deadline = time.time() + next_wait_sec(row, cfg)
     # 夹一道：配得比决策间隔大就等于没开，不如直接退回旧行为，别让短周期
     # 配置（interval_sec=3）里一个默认的 5 秒快查把节奏搅乱。
     guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
@@ -3720,8 +4412,13 @@ def run(cfg: Cfg, login=None) -> None:
     save_state(state, login)
 
     mode = "纸面（不发单）" if cfg.dry_run else "真实下单"
+    if cfg.assist:
+        mode = f"AI 辅助（{mode}）"
     print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策 | "
           f"平仓后 {cfg.cooldown_sec} 秒冷却 | 不挂 SL/TP | {mode}")
+    if cfg.assist:
+        print("⚠ 辅助模式在命令行里没有面板可点：所有信号都会超时 → "
+              "入场一律不做、出场按模型决定平。要人点请用面板。")
     print("Ctrl-C 停止。状态与流水在账户目录下 autotrade_state.json / autotrade_log.jsonl")
 
     try:
@@ -3877,6 +4574,8 @@ class Worker:
         self.cfg = cfg
         self.login = login
         self._stop.clear()
+        # 上一轮异常退出可能留下残状态：清掉，免得新线程把旧信号当成自己在等
+        DESK.close()
 
         state = load_state(login)
         state["running"] = True
@@ -3891,7 +4590,8 @@ class Worker:
                                         daemon=True)
         self._thread.start()
         return {"ok": True, "dry_run": cfg.dry_run, "symbol": cfg.symbol,
-                "lots": cfg.lots, "interval_sec": cfg.interval_sec}
+                "lots": cfg.lots, "interval_sec": cfg.interval_sec,
+                "assist": cfg.assist}
 
     def _loop(self) -> None:
         cfg, login = self.cfg, self.login
@@ -3915,6 +4615,12 @@ class Worker:
     def stop(self, login=None, cfg: Cfg | None = None,
              flatten: bool = False) -> dict:
         """停线程。flatten=True 时顺带清仓（面板的「关闭并清仓」）。"""
+        # **先取消再停**，顺序不能反。辅助模式下 worker 可能正卡在
+        # _await_human 里（最长 120 秒），只 set _stop 的话 join(15) 必然超时，
+        # 而 close_all 已经把仓平完了——worker 随后醒来拿到「同意」，会在
+        # 「已关闭并清仓」之后重新开一笔。取消让等待者立刻返回 cancelled，
+        # 那条路径只落日志、绝不下单。
+        DESK.cancel()
         self._stop.set()
         thread = self._thread
         if thread and thread.is_alive():
@@ -4089,7 +4795,35 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 旧 state 没有这个字段时回退到**当前**默认（默认真实），
     # 写死 True 会让面板显示"真实"而实际按纸面跑，是最坏的那种谎。
     dry_run = bool(saved_cfg.get("dry_run")) if "dry_run" in saved_cfg else Cfg.dry_run
+    # 辅助模式同理：旧 state 里没有这个字段时回退到当前默认（False）。
+    # 写死 True 会让面板显示"辅助"而实际按真实单跑——那是最坏的一种谎。
+    assist = bool(saved_cfg.get("assist")) if "assist" in saved_cfg else Cfg.assist
     pending = state.get("pending_reviews") or []
+
+    # 人工确认统计：从日志现算，不做缓存——和这个函数里其它指标一个口径。
+    # 关心的不是"弹了几次"，而是 aprove_rate：人点同意的比例长期偏低，
+    # 说明模型的信号质量差；偏高但期望差，说明人只是跟着模型走。
+    signal_now = state.get("pending_signal")
+    sig_rows = [r for r in rows if r.get("kind") == "signal"]
+    sig_ans: dict[str, int] = {}
+    for r in sig_rows:
+        key = str(r.get("answer") or "?")
+        sig_ans[key] = sig_ans.get(key, 0) + 1
+    _waits = [float(r.get("waited_sec") or 0) for r in sig_rows
+              if r.get("waited_sec") is not None]
+    _decided = (sig_ans.get("approve", 0) + sig_ans.get("deny", 0)
+                + sig_ans.get("expired", 0))
+    signal_stats = {
+        "n": len(sig_rows),
+        "approve": sig_ans.get("approve", 0),
+        "deny": sig_ans.get("deny", 0),
+        "expired": sig_ans.get("expired", 0),
+        "void_slip": sig_ans.get("void_slip", 0),
+        "cancelled": sig_ans.get("cancelled", 0),
+        "avg_wait_sec": round(sum(_waits) / len(_waits), 1) if _waits else None,
+        "approve_rate": (round(sig_ans.get("approve", 0) / _decided, 4)
+                         if _decided else None),
+    }
     # 旧 state 里没有新加的字段，缺的时候要回退到当前默认值
     _defaults = Cfg()
 
@@ -4198,6 +4932,28 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 前端写死一份、后端校验另一份，加品种时必然漂移。
         "symbols": symbol_options(),
         "symbol": saved_cfg.get("symbol", _defaults.symbol),
+        # ---------------- AI 辅助做单 ----------------
+        # pending_signal 的存在本身就是「现在该弹窗」。面板 1 秒轮询这一格，
+        # 不去另开接口——多一个请求就多一处会不同步的地方。
+        "assist": assist,
+        "pending_signal": (
+            {**signal_now, "remain_sec": max(0, int(signal_now.get("expires_at") or 0)
+                                             - int(time.time()))}
+            if signal_now else None),
+        # 倒计时基准用服务端时钟：客户端时钟偏几分钟的话，弹窗会显示负秒数。
+        "server_ts": int(time.time()),
+        "signal_stats": signal_stats,
+        "assist_cfg": {
+            "entry_wait_sec": saved_cfg.get("assist_entry_wait_sec",
+                                            _defaults.assist_entry_wait_sec),
+            "exit_wait_sec": saved_cfg.get("assist_exit_wait_sec",
+                                           _defaults.assist_exit_wait_sec),
+            "max_slip_usd": saved_cfg.get("assist_max_slip_usd",
+                                          _defaults.assist_max_slip_usd),
+            "deny_cooldown": saved_cfg.get("assist_deny_cooldown",
+                                           _defaults.assist_deny_cooldown),
+        },
+        "assist_deny_until": state.get("assist_deny_until") or {},
         "recent": rows[-recent:],
     }
 
@@ -4339,6 +5095,14 @@ def main() -> None:
     # 用户 10-26 要求默认真实下单，所以这个开关反过来了：
     # 以前要 --live 才发真单，现在要 --paper 才不发单。
     parser.add_argument("--paper", action="store_true", help="只记账不发单（纸面模式）")
+    # AI 辅助模式：CLI 也能跑，但没有面板就没有人点，所有信号都会超时。
+    # 保留这个开关是为了无界面调试（配 --once 可以走一遍完整链路）。
+    parser.add_argument("--assist", action="store_true",
+                        help="AI 辅助：开/平仓前等人确认（无面板时会全部超时）")
+    parser.add_argument("--assist-wait", type=int, default=Cfg.assist_entry_wait_sec,
+                        help=f"入场确认时限秒数（默认 {Cfg.assist_entry_wait_sec}）")
+    parser.add_argument("--assist-slip", type=float, default=Cfg.assist_max_slip_usd,
+                        help=f"价格漂移作废阈值 USD（默认 {Cfg.assist_max_slip_usd}）")
     parser.add_argument("--status", action="store_true", help="只看状态，不跑")
     parser.add_argument("--once", action="store_true", help="只跑一轮")
     args = parser.parse_args()
@@ -4348,6 +5112,8 @@ def main() -> None:
         cooldown_sec=args.cooldown, dry_run=args.paper,
         max_trades=args.max_trades, max_loss_usd=args.max_loss,
         max_minutes=args.max_minutes,
+        assist=args.assist, assist_entry_wait_sec=args.assist_wait,
+        assist_max_slip_usd=args.assist_slip,
     )
 
     if args.status:

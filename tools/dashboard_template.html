@@ -598,6 +598,60 @@
   .td-verdict-ok  { color: #4ade80; font-weight: 700; }
   .td-verdict-dif { color: #f0b429; font-weight: 700; }
   .td-note { font-size: 11px; color: var(--dim); font-style: italic; margin-top: 4px; }
+
+  /* ---------------- 人工确认弹窗（AI 辅助做单） ----------------
+     z-index 必须高于全屏幕布 #atCurtain（9999）：用户开着「全屏提醒」时
+     看到的是那块红字，弹窗被盖住就等于没弹，信号 90 秒后自动作废。 */
+  .modal-mask.sig-mask { z-index: 10000; }
+  .modal-sig {
+    width: min(620px, calc(100vw - 40px));
+    max-height: calc(100vh - 60px);
+    display: flex; flex-direction: column;
+    border-color: rgba(240,180,41,.45);
+    box-shadow: 0 0 0 1px rgba(240,180,41,.18), 0 24px 60px rgba(0,0,0,.55);
+    animation: sigIn .18s ease-out;
+  }
+  @keyframes sigIn { from { transform: translateY(-10px); opacity: .4; } to { transform: none; opacity: 1; } }
+  .modal-sig.flash { animation: sigPulse 1.1s ease-in-out infinite; }
+  @keyframes sigPulse {
+    0%,100% { box-shadow: 0 0 0 1px rgba(240,180,41,.18), 0 24px 60px rgba(0,0,0,.55); }
+    50% { box-shadow: 0 0 0 3px rgba(240,180,41,.45), 0 24px 60px rgba(0,0,0,.55); }
+  }
+  .sig-head { display: flex; align-items: baseline; gap: 10px; flex: none; }
+  .sig-head h4 { margin: 0; flex: none; }
+  .sig-head .sig-clock { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--good, #4ade80); }
+  .sig-head .sig-clock.warn { color: #f0b429; }
+  .sig-head .sig-clock.danger { color: #ff6b6b; }
+  .sig-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: 8px; padding-right: 6px; }
+  .sig-sec { margin-top: 10px; }
+  .sig-sec:first-child { margin-top: 0; }
+  .sig-sec > b { display: block; font-size: 11px; letter-spacing: .6px; color: var(--muted); margin-bottom: 5px; }
+  .sig-sec .row { font-size: 12.5px; line-height: 1.65; }
+  .sig-sec .row .k { color: var(--dim); }
+  .sig-quote {
+    font-size: 12.5px; line-height: 1.7; padding: 9px 11px; border-radius: 8px;
+    background: rgba(255,255,255,.04); border: 1px solid var(--border-hi);
+    word-break: break-word;
+    /* 程序判断是多行拼的（方向倾向 / 是否一致 / 建议），
+       不保留换行会挤成一坨长句，等于没写。 */
+    white-space: pre-line;
+  }
+  .sig-verdict { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
+  .sig-verdict.long { color: #ff6b6b; }   /* 中国习惯：涨/多为红 */
+  .sig-verdict.short { color: #4ade80; }
+  .sig-prob { margin-top: 8px; }
+  .sig-prob-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,.08); }
+  .sig-prob-bar .long { background: #ff6b6b; }
+  .sig-prob-bar .short { background: #4ade80; }
+  .sig-prob-lab { display: flex; justify-content: space-between; font-size: 11.5px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .sig-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .sig-tags span {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--border-hi); color: var(--muted);
+  }
+  .sig-tags span.bad { color: #ffb4a8; border-color: rgba(255,107,107,.4); }
+  .modal-sig .actions { flex: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .modal-sig .hint { flex: none; margin-top: 8px; font-size: 11px; color: var(--dim); line-height: 1.55; }
   .link-btn {
     background: none; border: none; color: var(--accent, #4a9eff); cursor: pointer;
     font-size: 11px; padding: 0 2px; text-decoration: underline; font-family: inherit;
@@ -699,6 +753,10 @@
   .at-mode { display: flex; align-items: center; gap: 12px; margin-left: 12px; }
   .at-mode label { display: flex; align-items: center; gap: 4px; font-size: 12.5px; cursor: pointer; }
   .at-mode input { accent-color: #4a9eff; margin: 0; cursor: pointer; }
+  /* 「纸面演练」只在选了 AI 辅助时才有意义，没选就收起来，
+     否则控制条上会多一个永远点不动的复选框。显隐由 updateModeHint 直接改
+     style.display —— 不用查询父节点，冒烟测试的假 DOM 里没有 querySelector。 */
+  .at-mode .at-sub { display: none; color: var(--dim); font-size: 12px; }
   .at-int { display: flex; align-items: center; gap: 4px; }
   /* 全局 select 的 min-width:300px 是给账户选择器的；套到「品种」「间隔」上
      会把选择器拉成一条横贯整行的白条，把后面的按钮全部挤到第二行。 */
@@ -998,6 +1056,53 @@
   </div>
 </div>
 
+<!-- 人工确认弹窗（AI 辅助做单）。**独立 DOM**，不复用 #modalMask：
+     那个是单槽 Promise（modalResolve 只有一个），信号和"确认付费"撞车时会
+     互相覆盖，点谁都算到对方头上。
+     这里也**不响应 Esc、不点遮罩关闭**——误按一次等于否决一次，代价是白丢
+     一个已经算好的信号。只能点按钮。 -->
+<div class="modal-mask sig-mask hidden" id="sigMask">
+  <div class="modal modal-sig" id="sigCard" role="dialog" aria-modal="true"
+       aria-labelledby="sigTitle">
+    <div class="sig-head">
+      <h4 id="sigTitle">AI 信号</h4>
+      <span class="mini" id="sigSub"></span>
+      <span class="sig-clock" id="sigClock">—</span>
+    </div>
+    <div class="sig-body">
+      <div class="sig-sec">
+        <b>最终裁决（大模型）</b>
+        <div class="sig-verdict" id="sigVerdict">—</div>
+        <div class="sig-prob">
+          <div class="sig-prob-bar">
+            <div class="long" id="sigBarLong" style="width:50%"></div>
+            <div class="short" id="sigBarShort" style="width:50%"></div>
+          </div>
+          <div class="sig-prob-lab">
+            <span class="pos" id="sigLabLong">看涨 50%</span>
+            <span id="sigPriceLab" class="mini"></span>
+            <span class="neg" id="sigLabShort">看跌 50%</span>
+          </div>
+        </div>
+        <div class="sig-tags" id="sigTags"></div>
+      </div>
+      <div class="sig-sec">
+        <b>大模型判断</b>
+        <div class="sig-quote" id="sigModel">—</div>
+      </div>
+      <div class="sig-sec">
+        <b>程序判断（只给建议，不拦单）</b>
+        <div class="sig-quote" id="sigProg">—</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn-cancel" id="sigNo">不做</button>
+      <button class="btn-ok" id="sigYes">同意</button>
+    </div>
+    <div class="hint" id="sigHint"></div>
+  </div>
+</div>
+
 <!-- 首启配置向导：没配 API key 时自动弹出，也能从模型条手动打开。
      写进本机 config/.env，和打包后的可写目录同源。 -->
 <div class="modal-mask hidden" id="setupMask">
@@ -1171,6 +1276,14 @@
         <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
           <input type="radio" name="atMode" id="atModeLive" value="live" checked
                  onchange="updateModeHint()"> 真实做单
+        </label>
+        <label title="和真实做单一样，但每次开/平仓前弹窗等你点。硬止损和持仓上限仍由程序直接执行，不弹窗">
+          <input type="radio" name="atMode" id="atModeAssist" value="assist"
+                 onchange="updateModeHint()"> AI 辅助
+        </label>
+        <label class="at-sub" id="atAssistPaperWrap"
+               title="演练：弹窗照弹、同意也只记账，不发真单">
+          <input type="checkbox" id="atAssistPaper" onchange="updateModeHint()"> 纸面演练
         </label>
       </div>
       <span class="mini" id="atModeHint">向券商发真实市价单</span>
@@ -2284,6 +2397,17 @@ const AT_KIND = {
   open: '开仓', close: '平仓', hold: '持有', skip: '跳过',
   stop: '停止', open_failed: '开仓失败', close_failed: '平仓失败',
   review: '复盘', flatten: '清仓', error: '异常',
+  signal: '人工确认',
+};
+
+/* 人工确认的结案原因。和 Python 侧 _fmt 的 ANS 表同源，
+ * 两边不一致的话面板和文本流水会各说各话。 */
+const AT_ANSWER = {
+  approve: '同意', deny: '否决', expired: '超时未答', cancelled: '已取消',
+  blocked: '等待期已有持仓', gone: '仓已不在', sl: '被硬止损抢占',
+  timeout: '被持仓上限抢占', void_slip: '价格漂移作废',
+  void_unknown: '读不到持仓作废', void_state: '此刻不可开仓',
+  orphan: '孤儿信号（已清理）',
 };
 
 /* 常驻状态带。和 AI 卡片同源渲染，两处数字不可能打架。
@@ -2296,8 +2420,11 @@ function renderStatusBar(a) {
   if (!a || !a.ok) {
     state = '数据读取失败';
   } else if (a.running) {
-    state = a.dry_run ? '运行中 · 纸面' : '运行中 · 真实';
-    cls = a.dry_run ? 'on' : 'warn';
+    // 辅助模式必须一眼看出来：同样是「运行中」，真实做单会自己下单，
+    // 辅助模式在等你看弹窗——这两种状态的"现在需要你做什么"完全不同。
+    state = a.assist ? (a.dry_run ? '运行中 · 辅助演练' : '运行中 · 辅助')
+                     : (a.dry_run ? '运行中 · 纸面' : '运行中 · 真实');
+    cls = (a.dry_run && !a.assist) ? 'on' : 'warn';
   } else if (a.stale) {
     state = '已停止（面板曾重启）';
     cls = 'warn';
@@ -2306,7 +2433,10 @@ function renderStatusBar(a) {
     cls = 'warn';
   }
   bar.className = 'statusbar' + (cls ? ' ' + cls : '');
-  $('atBarState').textContent = state;
+  // 待确认信号：弹窗可能被最小化/切到别的窗口，状态带上留一个永不消失的标记。
+  const sig = a && a.pending_signal;
+  $('atBarState').textContent = state
+    + (sig ? ` · 待确认 ${Math.max(0, Number(sig.remain_sec) || 0)}s` : '');
 
   const p = a && a.position;
   if (p) {
@@ -2559,6 +2689,9 @@ function renderAutoTrade(a) {
   // 幕布上的状态跟着刷新：它每 1 秒拿到的就是这份数据，不用另开请求
   lastAutoData = a;
   updateCurtain(a);
+  // 人工确认弹窗。**复用这一份 summary**，不另开请求：
+  // 多一个请求就多一处会不同步的地方，而弹窗最怕的就是"信号已经失效了还在显示"。
+  sigPoll(a);
 
   // 按钮：跑着的时候不许再点「开始」，避免起两个线程互相抢仓位
   $('atStart').disabled = !!a.running;
@@ -2568,13 +2701,18 @@ function renderAutoTrade(a) {
   const lockMode = !!a.running;
   $('atModePaper').disabled = lockMode;
   $('atModeLive').disabled = lockMode;
+  if ($('atModeAssist')) $('atModeAssist').disabled = lockMode;
+  if ($('atAssistPaper')) $('atAssistPaper').disabled = lockMode;
   $('atInterval').disabled = lockMode;
   // 品种同样锁死：跑起来之后换品种等于换了一个策略，仓位还在旧品种上
   fillSymbolOptions(a);
   if ($('atSymbol')) $('atSymbol').disabled = lockMode;
   if (lockMode) {
-    $('atModePaper').checked = !!a.dry_run;
-    $('atModeLive').checked = !a.dry_run;
+    const isAssist = !!a.assist;
+    if ($('atModeAssist')) $('atModeAssist').checked = isAssist;
+    $('atModePaper').checked = !isAssist && !!a.dry_run;
+    $('atModeLive').checked = !isAssist && !a.dry_run;
+    if ($('atAssistPaper')) $('atAssistPaper').checked = isAssist && !!a.dry_run;
     // 把选择器对齐到实际在跑的那个周期，别让界面说 60 秒而实际跑 5 秒
     const runningIv = a.cfg && a.cfg.interval_sec;
     if (runningIv) $('atInterval').value = String(runningIv);
@@ -2586,7 +2724,10 @@ function renderAutoTrade(a) {
   const allRows = (a.recent || []).slice().reverse();
   const showSkip = !!($('atShowSkip') && $('atShowSkip').checked);
   const EXEC_KINDS = ['open', 'close', 'review', 'open_failed', 'stop', 'error'];
-  const rows = showSkip ? allRows : allRows.filter(r => EXEC_KINDS.includes(r.kind));
+  // 被否决/超时/作废的信号要留在默认视图里（那是"为什么没做"的答案）；
+  // 同意的那些不重复占行——open/close 行里已经有 signal_id。
+  const rows = showSkip ? allRows : allRows.filter(
+    r => EXEC_KINDS.includes(r.kind) || (r.kind === 'signal' && r.answer !== 'approve'));
   if ($('atRowsHint')) {
     $('atRowsHint').textContent = allRows.length
       ? `共 ${allRows.length} 条 · 显示 ${rows.length} 条` : '';
@@ -2635,8 +2776,25 @@ function renderAutoTrade(a) {
  * 两个动作都会真动钱（模型调用、下单），所以都走同一套确认弹窗，
  * 而且后端还会再校验一次 confirm —— 前端弹窗只是让人看清后果，
  * 不是安全边界。安全边界在 /api/autotrade/* 那两个 handler 里。 */
+function atMode() {
+  if ($('atModeAssist') && $('atModeAssist').checked) return 'assist';
+  if ($('atModePaper') && $('atModePaper').checked) return 'paper';
+  return 'live';
+}
 function atLiveMode() {
-  return !!($('atModeLive') && $('atModeLive').checked);
+  return atMode() === 'live';
+}
+function atAssistMode() {
+  return atMode() === 'assist';
+}
+/* 辅助模式下是否「演练」（点同意也只记账）。默认勾上吗？
+   不。默认不勾 = 辅助就是真单，这是用户选第三档时的本意；
+   想演练要自己勾，勾错了最多白弹几次窗，不会以为是练手结果下了真单。 */
+function atAssistPaper() {
+  return !!(atAssistMode() && $('atAssistPaper') && $('atAssistPaper').checked);
+}
+function atDryRun() {
+  return atAssistMode() ? atAssistPaper() : atMode() === 'paper';
 }
 
 function atIntervalSec() {
@@ -2652,6 +2810,9 @@ function atIntervalSec() {
 function updateModeHint() {
   const el = $('atModeHint');
   if (!el) return;
+  // 「纸面演练」复选框只在辅助模式下露出
+  const wrap = $('atAssistPaperWrap');
+  if (wrap) wrap.style.display = atAssistMode() ? 'flex' : 'none';
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
   // 点差成本估算：平仓后冷却 30 秒 ⇒ 最好情况下每小时 ~120 笔往返。
@@ -2659,7 +2820,15 @@ function updateModeHint() {
   // 经验库在的时候尤其如此。列上限是为了把"最坏要付多少点差"摆上台面。
   const trips = Math.min(calls, 120);
   const perTrip = atSpreadCostUsd();
-  if (atLiveMode()) {
+  if (atAssistMode()) {
+    // 辅助模式必须写清两件事：等的是你，以及**硬止损不等你**。
+    // 不写后半句，用户会以为"人确认"包含"人决定什么时候止损"。
+    const paper = atAssistPaper();
+    el.textContent = `辅助${paper ? '·演练' : ''} · ${atSymbolLabel()} · 每 ${iv} 秒判断 · `
+      + `开/平仓前弹窗等你点（入场 90 秒 / 出场 120 秒，超时按默认处理）· `
+      + `硬止损与持仓上限由程序直接执行${paper ? ' · 不发真单' : ''}`;
+    el.className = paper ? 'mini' : 'mini red';
+  } else if (atLiveMode()) {
     const total = perTrip == null ? '未知' : fmt(trips * perTrip, 2) + ' USD/小时（上限）';
     el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
       + `往返上限 ${trips} 笔 ≈ 点差上限 ${total}`;
@@ -2727,7 +2896,10 @@ function atErrHtml(err) {
 }
 
 async function startAutoTrade() {
-  const live = atLiveMode();
+  const mode = atMode();
+  const live = mode === 'live';
+  const assist = mode === 'assist';
+  const paper = atDryRun();
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
   const sym = atSymbol();
@@ -2735,17 +2907,29 @@ async function startAutoTrade() {
   let ok = false;
   try {
     ok = await confirmApiCall({
-      title: live ? `真实下单：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
-                  : `纸面：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`,
-      desc: live
-        ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
-          + `每小时约 ${calls} 次模型调用；平仓后冷却 30 秒，往返上限 120 笔/小时`
-          + `（模型可跳过，实际通常更少），`
-          + `最坏点差约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
-        : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
-          + `每小时约 ${calls} 次模型调用。`,
-      cost: live ? '真实下单 + 模型调用' : '仅模型调用',
-      okText: live ? '真实开始' : '开始（纸面）',
+      title: assist
+        ? `AI 辅助${paper ? '（演练）' : ''}：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
+        : (live ? `真实下单：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
+                : `纸面：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`),
+      desc: assist
+        ? `模型出信号后弹窗等你点：入场等 90 秒（不点＝不做），`
+          + `出场等 120 秒（不点＝按模型决定平仓）。`
+          + `硬止损和持仓上限仍由程序直接执行，不会等你；`
+          + `同意时若价格已朝不利方向跑过 0.80 美元，信号作废。`
+          + (paper ? `当前是演练：同意也只记账，不发真单。`
+                   : `当前会向券商发真实市价单（0.01 手）。`)
+          + `每小时约 ${calls} 次模型调用。`
+        : (live
+            ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
+              + `每小时约 ${calls} 次模型调用；平仓后冷却 30 秒，往返上限 120 笔/小时`
+              + `（模型可跳过，实际通常更少），`
+              + `最坏点差约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
+            : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
+              + `每小时约 ${calls} 次模型调用。`),
+      cost: assist ? (paper ? '辅助演练 + 模型调用' : '弹窗确认 + 真实下单')
+                   : (live ? '真实下单 + 模型调用' : '仅模型调用'),
+      okText: assist ? (paper ? '开始（辅助演练）' : '开始（辅助·真单）')
+                     : (live ? '真实开始' : '开始（纸面）'),
     });
   } catch (e) {
     // 弹窗本身炸了也要让用户看见，否则又是「点了没反应」
@@ -2760,8 +2944,9 @@ async function startAutoTrade() {
     const r = await fetch('/api/autotrade/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        confirm: true, dry_run: !live, symbol: sym, lots: 0.01,
+        confirm: true, dry_run: paper, symbol: sym, lots: 0.01,
         interval_sec: iv,
+        assist: assist,
         account: curLogin || undefined,
       }),
     });
@@ -2769,8 +2954,12 @@ async function startAutoTrade() {
     if (!j.ok) {
       atSay(atErrHtml(j.error), 'err');
     } else {
-      atSay(`<b>已启动${j.dry_run ? '（纸面）' : '（真实做单）'}</b>：${esc(j.symbol)} ${j.lots} 手，
-             每 ${j.interval_sec} 秒判断一次。第一笔决策马上会出现在下面的表里。`, 'ok');
+      const what = j.assist ? (j.dry_run ? '（辅助演练）' : '（辅助·真单）')
+                            : (j.dry_run ? '（纸面）' : '（真实做单）');
+      atSay(`<b>已启动${what}</b>：${esc(j.symbol)} ${j.lots} 手，
+             每 ${j.interval_sec} 秒判断一次。`
+             + (j.assist ? '有信号会弹窗，<b>硬止损不等你</b>。'
+                         : '第一笔决策马上会出现在下面的表里。'), 'ok');
     }
   } catch (e) {
     atSay('<b>启动请求失败：</b>' + esc(String(e)), 'err');
@@ -4678,6 +4867,272 @@ $('modalMask').addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !$('modalMask').classList.contains('hidden')) closeModal(false);
 });
+
+/* ==================== 人工确认弹窗（AI 辅助做单）====================
+   数据来源只有一份：/api/autotrade 每秒回来的 summary.pending_signal。
+   不另开接口，避免"信号已经失效、弹窗还在"这种最伤信任的错位。
+
+   三条硬规矩：
+   1. 不响应 Esc、不点遮罩关闭。误按一次＝否决一次，白丢一个算好的信号。
+   2. 同一个 id 只响一次铃、只置顶一次。面板每秒轮询，不去重就是连续响铃。
+   3. 倒计时基准用 server_ts（服务端时钟），客户端时钟偏几分钟也不会显示负数。
+*/
+let lastSigId = null;
+let answeredSigId = null;
+let sigRemain = 0;
+let sigTimer = null;
+let sigBusy = false;
+let titleTimer = null;
+let titleBase = '';
+let audioCtx = null;
+
+/* WebView2 的 WebAudio 必须先由用户手势解锁，否则 resume() 挂起、一声不响。
+   挂在首次 pointerdown/keydown 上——用户点了页面任何地方就算解锁。 */
+function unlockAudio() {
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { /* 没声音也要能用，绝不在这里抛 */ }
+}
+document.addEventListener('pointerdown', unlockAudio, { once: false });
+document.addEventListener('keydown', unlockAudio, { once: false });
+
+/* 提示音用振荡器合成，不新增音频文件：打包不用多收资产，
+   也不会因为找不到 wav 而静默失败。两声上行短音，够醒。 */
+function beepSignal() {
+  try {
+    unlockAudio();
+    if (!audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    [[0, 880], [0.18, 1320]].forEach(([dt, hz]) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = hz;
+      gain.gain.setValueAtTime(0.0001, t0 + dt);
+      gain.gain.exponentialRampToValueAtTime(0.26, t0 + dt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.16);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0 + dt);
+      osc.stop(t0 + dt + 0.18);
+    });
+  } catch (e) { /* 同上：声音是锦上添花 */ }
+}
+
+function flashTitle(on) {
+  if (!on) {
+    if (titleTimer) { clearInterval(titleTimer); titleTimer = null; }
+    if (titleBase) document.title = titleBase;
+    return;
+  }
+  if (titleTimer) return;
+  if (!titleBase) titleBase = document.title;
+  let flip = false;
+  titleTimer = setInterval(() => {
+    flip = !flip;
+    document.title = flip ? '🔔 有信号待确认' : titleBase;
+  }, 900);
+}
+
+/* 把窗口还原并置顶 5 秒。浏览器模式下没有桥，靠标题闪烁 + 声音兜底。 */
+function raiseWindowForSignal() {
+  try {
+    const p = nativeApi('raise_window', 5);
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (e) { /* 桥挂了不影响弹窗 */ }
+}
+
+function sigFmtTags(sig) {
+  const f = sig.feat || {};
+  const mtf = f.mtf || {};
+  const out = [];
+  const push = (txt, bad) => { if (txt) out.push({ txt, bad: !!bad }); };
+  if (f.pos != null) {
+    const pos = Number(f.pos);
+    push(`位置 ${(pos * 100).toFixed(0)}%`, pos >= 0.65 || pos <= 0.35);
+  }
+  if (f.er != null) push(`ER ${Number(f.er).toFixed(2)}`);
+  if (f.atr != null) push(`ATR ${Number(f.atr).toFixed(2)}`);
+  if (f.streak != null) push(`连${Number(f.streak) > 0 ? '阳' : '阴'} ${Math.abs(Number(f.streak))}`);
+  if (mtf.pos != null) push(`M5位置 ${(Number(mtf.pos) * 100).toFixed(0)}%`);
+  if (mtf.er != null) push(`M5 ER ${Number(mtf.er).toFixed(2)}`);
+  if (f.regime) push(String(f.regime));
+  const box = $('sigTags');
+  box.innerHTML = '';
+  out.forEach(o => {
+    const sp = document.createElement('span');
+    if (o.bad) sp.className = 'bad';
+    sp.textContent = o.txt;
+    box.appendChild(sp);
+  });
+}
+
+function sigShow(sig) {
+  const isExit = sig.kind === 'exit';
+  const dir = Number(sig.direction) > 0 ? 1 : -1;
+  const long = dir > 0;
+  const pUp = sig.p_up == null ? null : Number(sig.p_up);
+  const pShort = pUp == null ? null : 1 - pUp;
+
+  $('sigTitle').textContent = isExit ? '平仓信号 · 需要你确认' : '开仓信号 · 需要你确认';
+  $('sigSub').textContent = isExit
+    ? `持仓 ${long ? '多' : '空'} · 已持 ${Math.round(Number(sig.held_sec || 0) / 60)} 分钟`
+    : `${long ? '做多' : '做空'} · ${sig.price == null ? '' : fmt(sig.price, 3)}`;
+
+  // 最终裁决：入场看 act/方向，出场就是"平"。
+  // 颜色按中国习惯：多/涨 = 红，空/跌 = 绿。
+  const v = $('sigVerdict');
+  if (isExit) {
+    v.textContent = `平掉 ${long ? '多单' : '空单'}`;
+    v.className = 'sig-verdict';
+  } else {
+    v.textContent = long ? '做多' : '做空';
+    v.className = 'sig-verdict ' + (long ? 'long' : 'short');
+  }
+
+  if (pUp == null) {
+    $('sigBarLong').style.width = '50%';
+    $('sigBarShort').style.width = '50%';
+    $('sigLabLong').textContent = '看涨 —';
+    $('sigLabShort').textContent = '看跌 —';
+  } else {
+    $('sigBarLong').style.width = (pUp * 100).toFixed(1) + '%';
+    $('sigBarShort').style.width = (pShort * 100).toFixed(1) + '%';
+    $('sigLabLong').textContent = `看涨 ${(pUp * 100).toFixed(0)}%`;
+    $('sigLabShort').textContent = `看跌 ${(pShort * 100).toFixed(0)}%`;
+  }
+  $('sigPriceLab').textContent = sig.price == null ? '' : `触发价 ${fmt(sig.price, 3)}`;
+
+  sigFmtTags(sig);
+
+  // 大模型判断 = 它自己的原话 + p_up。原话最能看出它到底在赌什么。
+  $('sigModel').textContent = (sig.reason || '（模型没给理由）');
+
+  // 程序判断：方向倾向 + 位置判定/建议。这里是"仅供参考"的那一半，
+  // 所以要写清它并不拦单，否则用户会以为程序已经点头了。
+  const bits = [];
+  const pd = Number(sig.prog_dir || 0);
+  bits.push(pd > 0 ? '方向倾向：做多' : pd < 0 ? '方向倾向：做空' : '方向倾向：无（不给建议）');
+  if (sig.agree === true) bits.push('模型自称与程序一致');
+  if (sig.agree === false) bits.push('模型自称与程序分歧');
+  if (sig.advice_text) bits.push('程序意见：' + sig.advice_text);
+  else if (sig.advice) bits.push('程序意见：' + String(sig.advice));
+  $('sigProg').textContent = bits.join('\n');
+
+  $('sigYes').textContent = isExit ? '同意平仓' : `同意${long ? '做多' : '做空'}`;
+  $('sigNo').textContent = isExit ? '继续持有' : '不做';
+  $('sigYes').disabled = false;
+  $('sigNo').disabled = false;
+  sigBusy = false;
+
+  const waitSec = Math.max(5, Number(sig.wait_sec || 0));
+  $('sigHint').textContent = isExit
+    ? `等 ${sigRemain} 秒；不点＝按模型决定平仓。硬止损/持仓上限期间照常生效，不受这个弹窗影响。`
+    : `等 ${sigRemain} 秒；不点＝不做。同意时若价格朝不利方向跑过 ${
+        (lastAutoData && lastAutoData.assist_cfg && lastAutoData.assist_cfg.max_slip_usd) || 0.8
+      } 美元，信号自动作废。`;
+
+  $('sigMask').classList.remove('hidden');
+  $('sigCard').classList.add('flash');
+  beepSignal();
+  flashTitle(true);
+  raiseWindowForSignal();
+}
+
+function sigHide() {
+  $('sigMask').classList.add('hidden');
+  $('sigCard').classList.remove('flash');
+  flashTitle(false);
+  lastSigId = null;
+}
+
+function sigTick() {
+  if (sigRemain > 0) sigRemain -= 1;
+  const el = $('sigClock');
+  if (!el) return;
+  el.textContent = sigRemain > 0 ? `${sigRemain}s` : '已过期';
+  el.className = 'sig-clock' + (sigRemain <= 10 ? ' danger' : (sigRemain <= 30 ? ' warn' : ''));
+  const hint = $('sigHint');
+  if (hint && !sigBusy) {
+    const isExit = $('sigYes').textContent.indexOf('平仓') >= 0;
+    hint.textContent = isExit
+      ? `等 ${Math.max(0, sigRemain)} 秒；不点＝按模型决定平仓。硬止损/持仓上限期间照常生效。`
+      : `等 ${Math.max(0, sigRemain)} 秒；不点＝不做。`;
+  }
+}
+
+async function sigAnswer(approve) {
+  if (sigBusy || !lastSigId) return;
+  sigBusy = true;
+  const sid = lastSigId;
+  $('sigYes').disabled = true;
+  $('sigNo').disabled = true;
+  try {
+    const r = await fetch('/api/autotrade/signal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: sid, approve: !!approve, confirm: true,
+                             account: curLogin || undefined }),
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      // 过期/已处理：关掉弹窗并说清原因，别让用户以为点坏了
+      atSay('<b>这条信号没能提交：</b>' + esc(j.error || '已失效'), 'err');
+      sigHide();
+      loadAutoTrade();
+      return;
+    }
+    atSay(approve ? '<b>已同意</b>，正在按当前价执行…' : '<b>已否决</b>，这一轮不进场。', 'ok');
+    answeredSigId = sid;
+    sigHide();
+    // 立刻拉一次：等下一次 1 秒轮询也能看到，但用户点了就想马上有反馈
+    loadAutoTrade();
+  } catch (e) {
+    sigBusy = false;
+    $('sigYes').disabled = false;
+    $('sigNo').disabled = false;
+    atSay('<b>提交失败：</b>' + esc(String(e)), 'err');
+  }
+}
+
+function sigPoll(a) {
+  const sig = a && a.ok ? a.pending_signal : null;
+  if (!sig || !sig.id) {
+    if (lastSigId) sigHide();
+    return;
+  }
+  // 已经回答过的 id 不再弹：worker 清掉 pending_signal 有 0.2 秒空窗，
+  // 这期间面板可能又轮询到一次，不挡住就是"点了同意、弹窗又闪回来"。
+  if (sig.id === answeredSigId) {
+    if (lastSigId) sigHide();
+    return;
+  }
+  const remain = Math.max(0, Number(sig.remain_sec) || 0);
+  if (remain <= 0) {                 // 服务端已判过期，下一次轮询就会清掉
+    if (lastSigId) sigHide();
+    return;
+  }
+  if (sig.id !== lastSigId) {        // 新信号：只在这时响铃/置顶
+    lastSigId = sig.id;
+    answeredSigId = null;
+    sigRemain = remain;
+    sigShow(sig);
+    if (sigTimer) clearInterval(sigTimer);
+    sigTimer = setInterval(sigTick, 1000);
+    sigTick();
+  } else {
+    // 同一信号：只把倒计时对齐服务端（防本地定时器漂移），不重复响铃
+    if (Math.abs(remain - sigRemain) > 2) sigRemain = remain;
+  }
+}
+
+$('sigYes').addEventListener('click', () => sigAnswer(true));
+$('sigNo').addEventListener('click', () => sigAnswer(false));
+// **不注册** Esc / 遮罩点击关闭：这两个在弹窗语境下等于"否决"，
+// 而人按 Esc 的意图通常是"关掉这个挡住我的东西"。
 
 function renderApiMeter(info) {
   if (!info) return;

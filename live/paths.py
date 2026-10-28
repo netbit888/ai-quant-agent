@@ -25,6 +25,7 @@ MT5 的 Python 接口（`mt5.login`）需要账号的**密码**才能切换登�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -172,8 +173,28 @@ def read_json(login: int | str, name: str, default=None):
 
 
 def write_json(login: int | str, name: str, data) -> None:
+    """写 JSON：**先写临时文件再 os.replace 原子替换**。
+
+    为什么不能直接 write_text：面板每 1~2 秒轮询一次、AI 线程同时在写同一个
+    state 文件。write_text 分「打开→截断→写」几步，中间那几毫秒里读方会拿到
+    半个 JSON；load_state 捕获 JSONDecodeError 后返回空状态，界面就会闪一下
+    「未启动 / 空仓 / 无信号」。加到「人工确认」弹窗上，这个闪断会变成
+    **弹窗闪没、下一秒又弹、提示音重复响**。
+
+    os.replace 在同一分区上是原子的：读方要么读到完整旧文件，要么读到完整
+    新文件，不存在中间态。临时文件用固定后缀（同目录），失败时清掉。
+    """
     p = account_file(login, name)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # ------------------------------------------------------------- 场次备注

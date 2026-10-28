@@ -13,6 +13,7 @@
     /api/session_advice    生成场次级 AI 复盘（花钱）
     /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
     /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
+    /api/autotrade/signal  回答一条待确认信号（AI 辅助模式；approve 会下单）
     /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
     /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
@@ -538,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/advice": self._post_advice,
             "/api/autotrade/start": self._post_autotrade_start,
             "/api/autotrade/stop": self._post_autotrade_stop,
+            "/api/autotrade/signal": self._post_autotrade_signal,
             "/api/autotrade/reset": self._post_autotrade_reset,
             "/api/autotrade/reset_lessons": self._post_autotrade_reset_lessons,
             "/api/llm/switch": self._post_llm_switch,
@@ -623,6 +625,17 @@ class Handler(BaseHTTPRequestHandler):
                 max_trades=int(body.get("max_trades") or 0),
                 max_loss_usd=float(body.get("max_loss_usd") or 0.0),
                 max_minutes=int(body.get("max_minutes") or 0),
+                # AI 辅助模式（第三种）。与 dry_run 不互斥：
+                # assist + dry_run = 演练，弹窗照弹、同意只记账。
+                assist=bool(body.get("assist", False)),
+                assist_entry_wait_sec=int(body.get("assist_entry_wait_sec")
+                                          or autotrade.Cfg.assist_entry_wait_sec),
+                assist_exit_wait_sec=int(body.get("assist_exit_wait_sec")
+                                         or autotrade.Cfg.assist_exit_wait_sec),
+                assist_max_slip_usd=float(body.get("assist_max_slip_usd")
+                                          or autotrade.Cfg.assist_max_slip_usd),
+                assist_deny_cooldown=int(body.get("assist_deny_cooldown")
+                                         or autotrade.Cfg.assist_deny_cooldown),
             )
             # 间隔太短等于把点差当水喝；冷却只是防连环单的下限，无上限——
             # 「1 分钟内重开」的硬需求已删，教训库和刚平仓提醒管节奏。
@@ -665,6 +678,37 @@ class Handler(BaseHTTPRequestHandler):
             flatten = bool(body.get("flatten", True))
             result = autotrade.WORKER.stop(login=login, flatten=flatten)
             result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_autotrade_signal(self, body: dict) -> None:
+        """回答一条待确认信号（AI 辅助模式）。
+
+        这是**唯一一个"点一下就可能真下单"**的接口，所以两道门槛：
+          · approve=True 必须带 confirm=true（前端本来就在同一次点击里发，
+            但少一层校验就多一次误触的机会）；
+          · 不在这里做冷却/锁——答复本身是幂等的，`answer_signal` 会校验
+            id 与时限，过期的答复一律拒绝并说明原因。
+        """
+        sid = str(body.get("id") or "").strip()
+        approve = bool(body.get("approve"))
+        if approve and not body.get("confirm"):
+            self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝下单"})
+            return
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is not None:
+                paths.set_login(login)
+            want = str(body.get("account") or "").strip()
+            if want and login is not None and want != str(login):
+                self._json(400, {"ok": False,
+                                 "error": "只能回答当前登录账户的信号"})
+                return
+            result = autotrade.answer_signal(sid, approve, login=login)
             self._json(200, result)
         except Exception as exc:  # noqa: BLE001
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -1282,6 +1326,41 @@ class _Bridge:
         return {"native": _WINDOW is not None, "shell": _SHELL,
                 "fullscreen": _fullscreen, "on_top": _over_top}
 
+    def raise_window(self, hold_sec=5):
+        """把窗口还原并短暂置顶——AI 辅助模式的信号弹窗用它喊人。
+
+        为什么不是永久置顶：那是用户自己按的开关（set_on_top），弹窗借用
+        5 秒后就还回去。为什么不是只响铃：面板被最小化或被压在其他窗口后面
+        时，光有声音找不到窗口，而信号 90 秒就作废了。
+
+        桥的三条规矩照旧：可 JSON 化、全 try/except、不做慢事。
+        `Timer` 负责恢复，不阻塞调用方。
+        """
+        global _over_top
+        if _WINDOW is None:
+            return {"ok": False, "error": "仅窗口模式支持"}
+        try:
+            prev = bool(_over_top)
+            try:
+                _WINDOW.restore()          # 最小化时先还原，否则 on_top 也看不见
+            except Exception:  # noqa: BLE001
+                pass
+            _WINDOW.on_top = True
+            hold = max(1.0, min(60.0, float(hold_sec or 5)))
+
+            def _restore():
+                global _over_top
+                try:
+                    _WINDOW.on_top = prev
+                    _over_top = prev
+                except Exception:  # noqa: BLE001
+                    pass
+
+            threading.Timer(hold, _restore).start()
+            return {"ok": True, "hold_sec": hold, "restored_to": prev}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
 
 def _register_window(win) -> None:
     global _WINDOW
@@ -1687,6 +1766,23 @@ def main(argv=None) -> int:
             updater.start_check()
     except Exception as exc:  # noqa: BLE001
         print(f"[!] 更新器初始化失败（不影响启动）：{type(exc).__name__}: {exc}")
+
+    # 信号提醒：AI 辅助模式出信号时，把窗口还原并短暂置顶。
+    # 注册要早（在起服务之前）：回调在 worker 线程里被调，只判 _WINDOW 是否为
+    # None，窗口创建前就注册好，信号来了才不至于漏。没窗口（headless/CLI）
+    # 时 raise_window 自己返回 ok:False，无害。
+    try:
+        from live import autotrade as _at
+
+        def _signal_raise(sig):
+            # _Bridge 无实例状态，临时实例即可；raise_window 内部只读全局
+            # _WINDOW，无窗口（headless）时返回 ok:False，无害。
+            threading.Thread(target=_Bridge().raise_window,
+                             kwargs={"hold_sec": 5}, daemon=True).start()
+
+        _at.register_signal_notifier(_signal_raise)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] 信号提醒注册失败（不影响启动）：{type(exc).__name__}: {exc}")
 
     try:
         server, port, existing = _start_server(args.host, args.port)
