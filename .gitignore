@@ -28,6 +28,11 @@ live_probe.json
 .DS_Store
 Thumbs.db
 
+# 本机工具数据与快捷方式
+# .workbuddy/ 里有会话记忆（含账户号），快捷方式指向本机路径，都不该入库。
+.workbuddy/
+*.lnk
+
 # 打包产物（tools/build_portable.bat 生成）
 build/
 dist/

@@ -1,0 +1,29 @@
+name: tag-guard
+
+# v1.5.7 踩过的坑：本地领先未 push 时 gh release create 会在**远端默认分支尖端**
+# 建 tag —— tag 落在旧提交上，Release 挂的源码和安装包不是一回事。
+# release.bat 里已经加了 push 前置检查，这里再加一道，管住手工建 tag 的情况。
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  tag-points-at-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag must point at origin/main
+        run: |
+          git fetch origin main --quiet
+          tag_sha=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          main_sha=$(git rev-parse origin/main)
+          echo "tag  $GITHUB_REF_NAME -> $tag_sha"
+          echo "main              -> $main_sha"
+          if [ "$tag_sha" != "$main_sha" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 指向 $tag_sha，但 origin/main 是 $main_sha —— 先 push 再发版"
+            exit 1
+          fi

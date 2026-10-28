@@ -1,0 +1,43 @@
+name: tests
+
+# 795+ 个用例在本机跑完约 10~16 秒，没有任何理由不自动跑。
+# 以前全靠人记得，发版前忘了跑就等于没跑。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    # Windows 只为了和开发机一致（路径大小写、CRLF、%TEMP% 行为）。
+    # 不装 pywebview / MetaTrader5：测试里有 tests/_stubs.py 顶替，
+    # 装了反而要拉几百 MB 的终端 SDK。
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install openai==3.35.1 numpy==2.5.4
+
+      - name: Unit tests
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests -v
+
+      - name: Release notes length
+        # 更新弹窗直接显示 notes，太长会把「下载并安装」顶出视口。
+        # 这条规则以前只写在 MEMORY 里，现在由 test_release_notes.py 守着。
+        run: python -m unittest tests.test_release_notes -v

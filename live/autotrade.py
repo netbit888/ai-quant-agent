@@ -375,6 +375,30 @@ def append_log(row: dict, login: int | str | None = None) -> None:
         fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
+def _finish(state: dict, row: dict, login: int | str | None = None,
+            ts: int | None = None) -> dict:
+    """一轮决策的**唯一出口**：落流水 + 落状态，然后把行返回给调用方。
+
+    为什么要收敛
+    ------------
+    tick() 有二十多个出口，以前每处手写「append_log + save_state + return」。
+    漏一处的后果不是抛异常，而是**流水写了、state 没写**：面板显示空仓而
+    实际持仓还在，或者下一条信号一直挂在 pending 上等人点。这类问题只在
+    事后对账时才发现，而账就是钱。
+
+    收敛之后新加分支只要 `return _finish(state, row, login, ts=now)`，
+    结构上不可能漏。`ts` 传了就顺手更新 last_tick_ts（面板用它判断心跳）。
+
+    顺序固定：**先写流水再写状态**。反过来的话，状态已经说"平了"、
+    流水里却还没有那一行，两边对不上时说不清是哪一步断的。
+    """
+    if ts is not None:
+        state["last_tick_ts"] = ts
+    append_log(row, login)
+    save_state(state, login)
+    return row
+
+
 def read_log(login: int | str | None = None, limit: int | None = None) -> list[dict]:
     p = log_path(login)
     if not p.exists():
@@ -2034,12 +2058,45 @@ def _returns(rows: list[dict]) -> tuple[float, float, float, float]:
     return chg(1), chg(5), chg(13), span
 
 
+# 降级留痕的节流表：{(函数名, 品种): 上次记录的时间}。
+# 必须节流——MT5 掉线时每 tick 会调 _point/_digits 好几遍，不节流就是
+# 一天几千行 degrade，把真正的流水淹掉。
+_DEGRADE_SEEN: dict[tuple[str, str], float] = {}
+_DEGRADE_INTERVAL = 600.0
+
+
+def _degrade(what: str, symbol: str, info: str,
+             login: int | str | None = None) -> None:
+    """某个价格常量没算准，退回兜底值——**留个痕**。
+
+    这些兜底本身是必要的（一个陌生品种名不该让 prompt 构建崩掉），
+    但它们"安静地算错"：点值猜成 0.001 时，黄金还行、BTC 的点差会被
+    读成 640000 点塞给模型。没有痕迹的话，事后只能怀疑"模型怎么这么蠢"。
+    """
+    key = (what, symbol)
+    now = time.time()
+    last = _DEGRADE_SEEN.get(key)
+    if last is not None and now - last < _DEGRADE_INTERVAL:
+        return
+    _DEGRADE_SEEN[key] = now
+    try:
+        append_log({"ts": int(now), "kind": "degrade", "what": what,
+                    "symbol": symbol, "info": info}, login)
+    except Exception:  # noqa: BLE001
+        # 已经在降级路径上了，写不进流水也没别的办法，别把调用方拖崩
+        pass
+
+
 def _point(symbol: str) -> float:
     try:
         from backtest.symbols import SYMBOLS
 
-        return float((SYMBOLS.get(symbol) or {}).get("point") or 0.001)
-    except Exception:  # noqa: BLE001
+        known = (SYMBOLS.get(symbol) or {}).get("point")
+        if not known:
+            _degrade("point", symbol, "品种不在符号表里，按 0.001 兜底")
+        return float(known or 0.001)
+    except Exception as exc:  # noqa: BLE001
+        _degrade("point", symbol, f"{type(exc).__name__}: {exc}")
         return 0.001
 
 
@@ -2049,8 +2106,12 @@ def _digits(symbol: str) -> int:
     try:
         from backtest.symbols import SYMBOLS
 
-        return int((SYMBOLS.get(symbol) or {}).get("digits") or 3)
-    except Exception:  # noqa: BLE001
+        known = (SYMBOLS.get(symbol) or {}).get("digits")
+        if not known:
+            _degrade("digits", symbol, "品种不在符号表里，按 3 位兜底")
+        return int(known or 3)
+    except Exception as exc:  # noqa: BLE001
+        _degrade("digits", symbol, f"{type(exc).__name__}: {exc}")
         return 3
 
 
@@ -2062,13 +2123,25 @@ def _px(symbol: str, value) -> str:
         return "—"
 
 
-def _spread_cost(symbol: str, lots: float) -> float:
+def _spread_cost(symbol: str, lots: float) -> float | None:
+    """这一手的点差成本（USD）。**算不出来返回 None，不返回 0.0**。
+
+    0.0 是个危险的谎：调用方拿它当"成本为零"，闸门就形同不存在，
+    所有单子一律放行。宁可让它显式拿到 None 自己决定怎么办。
+    （当前没有生产调用点，只有测试在用——正因为没人接，才更要一开始
+    就把语义定对，免得将来第一次接入就踩坑。）
+    """
     try:
         from backtest.symbols import spread_cost_usd
 
-        return float(spread_cost_usd(symbol, lots) or 0.0)
-    except Exception:  # noqa: BLE001
-        return 0.0
+        got = spread_cost_usd(symbol, lots)
+    except Exception as exc:  # noqa: BLE001
+        _degrade("spread_cost", symbol, f"{type(exc).__name__}: {exc}")
+        return None
+    if got is None:
+        _degrade("spread_cost", symbol, "spread_cost_usd 返回空值")
+        return None
+    return float(got)
 
 
 def _ticks_text(cfg: Cfg, bars: list[dict]) -> str:
@@ -3244,9 +3317,9 @@ def _positions(symbol: str) -> list[dict] | None:
 
 def _symbol_contract(symbol: str) -> float:
     try:
-        import MetaTrader5 as mt5
+        from live.journal import _mt5, mt5_call
 
-        info = mt5.symbol_info(symbol)
+        info = mt5_call(_mt5().symbol_info, symbol)
         if info is not None and getattr(info, "trade_contract_size", 0):
             return float(info.trade_contract_size)
     except Exception:  # noqa: BLE001
@@ -3262,10 +3335,15 @@ def _symbol_contract(symbol: str) -> float:
 def _quote(symbol: str) -> tuple[float, float] | None:
     # 走 journal 的连接保活，不要直接 mt5.symbol_info_tick：
     # 没 initialize 过的话它只会返回 None，看起来像行情断了。
+    #
+    # 用 call_quick 而不是 call：这条路径同时被 tick 和 2 秒一格的止损快查
+    # 调用，而 `order_send` 可能要等券商几百毫秒。拿不到锁就当「这一轮没有
+    # 报价」——上层已经有完整处理（skip 掉这一轮），下一格再来。
     try:
         from live.journal import _mt5
+        from live.mt5lock import call_quick
 
-        tick = _mt5().symbol_info_tick(symbol)
+        tick = call_quick(_mt5().symbol_info_tick, symbol, timeout=0.3)
         if tick is None:
             return None
         return float(tick.bid), float(tick.ask)
@@ -3385,9 +3463,11 @@ def _stop(state: dict, reason: str, now: int, login=None) -> dict:
     state["stop_reason"] = reason
     state["running"] = False
     state["last_tick_ts"] = now
-    save_state(state, login)
     row = {"ts": now, "kind": "stop", "reason": reason}
+    # 顺序与 _finish 一致：先流水后状态。反过来的话面板会先看到"已停"，
+    # 而流水里还没有那一行，说不清是哪一步断的。
     append_log(row, login)
+    save_state(state, login)
     return {"kind": "stop", "stop": True, "reason": reason}
 
 
@@ -3395,7 +3475,44 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
          quote: tuple[float, float] | None = None,
          rows: list[dict] | None = None,
          positions: list[dict] | None = None) -> dict:
-    """跑一轮决策。所有外部依赖都可注入，方便在没有终端的机器上测。"""
+    """跑一轮决策。所有外部依赖都可注入，方便在没有终端的机器上测。
+
+    **异常在这一层兜住并落盘**，不再往上抛。以前全靠 `Worker._loop` 兜：
+    tick 中途炸掉时流水可能已经写了一行、state 却没写，面板显示的还是上一轮
+    的状态——人以为程序在盯盘，实际这一轮什么都没做。现在异常也走 `_finish`，
+    至少留下「这一轮出过错」的痕迹，下一轮照常跑。
+    """
+    now = int(now or time.time())
+    # 内存里那份 state 的引用。异常时必须用它，**不能重新 load_state**：
+    # 重读会把这一轮已经做进内存的改动（pending_reviews、model_errors、
+    # 刚记下的 pos）全部丢掉，最坏的情况是 `send_open` 已经发出去了、
+    # 结算记录还在内存里没落盘——于是"券商有单、面板空仓"，下一轮还会
+    # 以为空仓再开一单。
+    live_state: list[dict] = []
+    try:
+        return _tick_body(cfg, login, now, quote, rows, positions, live_state)
+    except Exception as exc:  # noqa: BLE001
+        row = {"ts": now, "kind": "error",
+               "reason": f"{type(exc).__name__}: {exc}"}
+        try:
+            state = live_state[0] if live_state else load_state(login)
+            _finish(state, row, login, ts=now)
+        except Exception:  # noqa: BLE001
+            # 连 state 都读不出来（磁盘满 / 权限），至少把流水留下
+            append_log(row, login)
+        return row
+
+
+def _tick_body(cfg: Cfg, login, now: int,
+               quote: tuple[float, float] | None,
+               rows: list[dict] | None,
+               positions: list[dict] | None,
+               live_state: list[dict] | None = None) -> dict:
+    """一轮决策的实际实现（now 已由 tick 归一，出口一律走 _finish）。
+
+    `live_state` 是给外层异常兜底用的：这里 load 出来的 state 引用塞进去，
+    外层异常时就能拿到"这一轮改到一半"的那份，而不是重新读盘。
+    """
     now = int(now or time.time())
 
     # 到期的复盘先跑掉（平仓后 7 根 K 线才到期）。必须在 load_state 之前：
@@ -3404,7 +3521,9 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     process_due_reviews(cfg, now, login)
 
     state = load_state(login)
-
+    if live_state is not None:
+        # 交给外层异常兜底：异常时用它落盘，别重新读盘把改动丢了
+        live_state.append(state)
     # 孤儿信号：state 里挂着一条待确认信号，但这个进程里没有人在等它
     # （面板重启过、或者上一轮异常退出）。不清理的话面板会一直弹一个
     # 点了也没用的窗，而且 answer_signal 那边会一直拒绝。
@@ -3430,10 +3549,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     q = quote if quote is not None else _quote(cfg.symbol)
     if not q:
         row = {"ts": now, "kind": "skip", "reason": "拿不到报价"}
-        append_log(row, login)
-        state["last_tick_ts"] = now
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
     bid, ask = q
 
     # 取数要超过可见窗口：MA28 需要 28 根，模型仍然只看到其中最近 14 根
@@ -3453,10 +3569,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         live_positions = positions if positions is not None else _positions(cfg.symbol)
         if live_positions is None:
             row = {"ts": now, "kind": "skip", "reason": "读不到持仓（MT5 未连接？），本轮不动"}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
 
     # --- 持仓已经没了（AI 平的 / 你手动平的 / 券商砍的）---------------------
     if pos and not paper and not any(
@@ -3481,13 +3594,11 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             "reason": "外部平仓：模型没发平仓单，仓位已在终端消失",
             "source": "external",
         }
-        append_log(row, login)
         # 复盘排进队列：等 7 根 K 线走完再复盘，这期间照常判断下一笔。
         # 平仓当刻就复盘看不出「平完之后怎么走」，等于白问。
         pos["exit_reason"] = "外部平仓（模型没发平仓单）"
         queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
-        save_state(state, login)
-        return {**row, "detected": True}
+        return {**_finish(state, row, login), "detected": True}
 
     # --- 有仓：先过程序闸门，再问模型该不该平 --------------------------------
     if pos:
@@ -3521,10 +3632,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                 "ts": now, "kind": "exit", "close": False,
                 "reason": gate["reason"], "source": gate["source"],
             }
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
 
         if gate is not None:
             # 止损：程序直接平，不问模型，也不占用 model_errors 计数
@@ -3553,9 +3661,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                        "source": decision.get("source")}
                 if decision.get("error"):
                     row["error"] = decision["error"]
-                state["last_tick_ts"] = now
-                append_log(row, login)
-                save_state(state, login)
+                _finish(state, row, login, ts=now)
                 if int(state.get("model_errors") or 0) >= 3:
                     return _stop(state,
                                  f"模型连续 {state['model_errors']} 次调用失败，"
@@ -3581,10 +3687,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                     "ts": now, "kind": "exit", "close": False,
                     "reason": row["reason"], "source": "human",
                 }
-                state["last_tick_ts"] = now
-                append_log(row, login)
-                save_state(state, login)
-                return row
+                return _finish(state, row, login, ts=now)
 
             sig = _new_signal(
                 "exit", cfg, direction=int(pos.get("direction") or 1),
@@ -3624,10 +3727,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                        "signal_id": sig_id,
                        "reason": "等待确认期间仓位已在终端消失，下一轮按外部平仓记账",
                        "held_sec": held_sec}
-                state["last_tick_ts"] = now
-                append_log(row, login)
-                save_state(state, login)
-                return row
+                return _finish(state, row, login, ts=now)
             elif ans["answer"] in ("deny", "cancelled"):
                 if ans["answer"] != "cancelled":
                     _set_assist_deny(state, "exit", cfg.assist_deny_cooldown)
@@ -3642,10 +3742,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                     "ts": now, "kind": "exit", "close": False,
                     "reason": why_txt, "source": "human",
                 }
-                state["last_tick_ts"] = now
-                append_log(row, login)
-                save_state(state, login)
-                return row
+                return _finish(state, row, login, ts=now)
             else:                       # approve / expired
                 exec_by = "human" if ans["answer"] == "approve" else "assist_expired"
                 # 用答复瞬间的价格重算：等了 120 秒，浮盈早就不是原来那个数，
@@ -3671,9 +3768,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         if not res.get("ok"):
             row = {"ts": now, "kind": "close_failed", "ticket": pos.get("ticket"),
                    "reason": decision.get("reason"), "error": res.get("reason")}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
+            _finish(state, row, login, ts=now)
             # 平不掉还继续每分钟调模型问一次，只会白花钱；
             # 仓位还在手上，必须停下来让人去终端处理。
             return _stop(state, f"平仓失败（{res.get('reason')}），已自动停止", now, login)
@@ -3710,7 +3805,6 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             row["exec_by"] = exec_by
             if sig_slip is not None:
                 row["slip"] = sig_slip
-        append_log(row, login)
         # 平仓之后才允许回看更长的一段，但**要等 7 根 K 线**才复盘：
         # 排进队列，这期间照常分析行情、照常开下一笔。
         pos["exit_reason"] = decision.get("reason") or ""
@@ -3719,17 +3813,13 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         # 出场时机不是模型选的，复盘不能再把账算到出场头上（见 ask_review）。
         pos["exit_source"] = decision.get("source") or ""
         queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
 
     # --- 空仓：先看闸门，过不了就不花 API 的钱 -------------------------------
     ok, why = can_open(state, now, bool(live_positions), cfg)
     if not ok:
         row = {"ts": now, "kind": "skip", "reason": why}
-        state["last_tick_ts"] = now
-        append_log(row, login)
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
 
     # 辅助模式的静默期：刚被否决 / 刚超时，这一段时间既不弹窗也不调模型。
     # 放在 ask_entry **之前**是刻意的——省的是 token，不是版面。
@@ -3741,10 +3831,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             row = {"ts": now, "kind": "skip", "assist": True,
                    "reason": (f"上一条信号未获批准，{until - now_real} 秒内不再弹窗"
                               f"（也不重复问模型）")}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
 
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
     # 落盘后才能事后对账「程序对 vs 模型对」。trend_follow 决定趋势市给不给方向。
@@ -3818,10 +3905,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
             # 调用失败不等于"它主动放弃"，两者混在一起看会把故障当成保守
             row["source"] = "error"
             row["error"] = decision.get("error")
-        state["last_tick_ts"] = now
-        append_log(row, login)
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
 
     # 信号强度闸门。p_up 贴着 0.50 时模型自己也没把握，而开一单要先付 0.24 点差。
     # 5 秒周期下每分钟能出现十几次这种"微弱优势"，不挡住就是稳定亏损。
@@ -3831,10 +3915,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                "prog_dir": prog_dir, "agree": agree, "feat": feat,
                "reason": (f"信号不够强：p_up={p_up:.2f}，偏离 0.50 仅 {edge:.2f}，"
                           f"低于门槛 {cfg.min_edge:.2f}（开仓要先付点差）")}
-        state["last_tick_ts"] = now
-        append_log(row, login)
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
 
     # 程序对这笔开仓的建议（2026-10-28 起默认只建议、不拦）。
     # 放在 min_edge 之后、send_open 之前：前面那道判的是"信号够不够强"，
@@ -3850,10 +3931,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                "prog_dir": prog_dir, "agree": agree, "feat": feat,
                "veto": code, "act": act,
                "reason": f"{why}（入场闸门 {code} 拦下，模型原话：{decision.get('reason') or '无'}）"}
-        state["last_tick_ts"] = now
-        append_log(row, login)
-        save_state(state, login)
-        return row
+        return _finish(state, row, login, ts=now)
     if advice_code:
         # 建议归建议，单照开。把意见挂到决策上，面板会显示「模型否决了建议」，
         # 开仓行也带 would_veto——事后能按这一格算「听了 vs 没听」的期望。
@@ -3912,10 +3990,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                    "agree": agree, "feat": feat, "assist": True,
                    "signal_id": sig_id, "answer": ans["answer"],
                    "reason": why_txt}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
 
         if sig_slip is not None and sig_slip > float(cfg.assist_max_slip_usd):
             _set_assist_deny(state, "entry", cfg.assist_deny_cooldown)
@@ -3927,10 +4002,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                    "reason": (f"已同意，但价已朝不利方向跑了 {sig_slip:.2f} > "
                               f"{float(cfg.assist_max_slip_usd):.2f}，"
                               f"信号作废不下单")}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
 
         # 复核：这 90 秒里你完全可能自己开了一笔，或者刹车已经踩了
         has_pos = False
@@ -3942,10 +4014,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                        "agree": agree, "feat": feat, "assist": True,
                        "signal_id": sig_id, "answer": "void_unknown",
                        "reason": "已同意，但读不到持仓状态，无法确认没有叠仓，信号作废"}
-                state["last_tick_ts"] = now
-                append_log(row, login)
-                save_state(state, login)
-                return row
+                return _finish(state, row, login, ts=now)
             has_pos = bool(ps)
         ok2, why2 = can_open(state, int(time.time()), has_pos, cfg)
         if not ok2:
@@ -3954,10 +4023,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
                    "agree": agree, "feat": feat, "assist": True,
                    "signal_id": sig_id, "answer": "void_state",
                    "reason": f"已同意，但此刻已不可开仓：{why2}"}
-            state["last_tick_ts"] = now
-            append_log(row, login)
-            save_state(state, login)
-            return row
+            return _finish(state, row, login, ts=now)
         exec_by = "human"
         bid, ask = float(ans["bid"] or bid), float(ans["ask"] or ask)
 
@@ -3965,9 +4031,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     if not res.get("ok"):
         row = {"ts": now, "kind": "open_failed", "p_up": p_up, "direction": direction,
                "reason": decision.get("reason"), "error": res.get("reason")}
-        state["last_tick_ts"] = now
-        append_log(row, login)
-        save_state(state, login)
+        _finish(state, row, login, ts=now)
         # 被券商拒绝（没开算法交易 / 保证金不足 / 休市 / 手数非法）时，
         # 下一分钟重试也只会同样被拒，还会再花一次模型调用。
         if res.get("retcode") in (10027, 10018, 10019, 10014, 10013):
@@ -4024,9 +4088,7 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
         row["sig_wait_sec"] = sig_wait
         if sig_slip is not None:
             row["slip"] = sig_slip
-    append_log(row, login)
-    save_state(state, login)
-    return row
+    return _finish(state, row, login, ts=now)
 
 
 def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
@@ -4087,9 +4149,10 @@ def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
     估算不含点差和佣金，只能看方向对不对；真实数字以 MT5 账本为准。
     """
     try:
-        import MetaTrader5 as mt5
+        from live.journal import mt5_call, _mt5 as _conn
 
-        deals = mt5.history_deals_get(position=int(pos.get("ticket") or 0)) or []
+        deals = mt5_call(_conn().history_deals_get,
+                         position=int(pos.get("ticket") or 0)) or []
         if deals:
             total = sum(
                 float(getattr(d, "profit", 0.0))

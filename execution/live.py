@@ -23,7 +23,8 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-from live import appdirs
+from live import appdirs, mt5lock
+from live.mt5lock import MT5Busy
 
 ROOT = appdirs.app_root()
 # 下单审计日志。走可写数据根——冻结后 _MEIPASS 是临时目录，写进去等于没写。
@@ -52,38 +53,58 @@ class Executor:
     # ---------------------------------------------------------- 连接
 
     def connect(self, retries: int = 3) -> bool:
+        """建立连接。走闸门，不是裸锁。
+
+        连接是唯一可能"几十秒不返回"的操作（`initialize` 内部超时 30 秒，
+        常驻进程还可能先拉起终端）。如果靠锁排队，面板轮询和 2 秒一格的
+        止损快查会跟着停——那是最不能停的路径。闸门在持锁后关闭，期间
+        新调用立刻 `MT5Busy` 快速失败，业务层按"这一轮没行情"跳过。
+        """
+        if self.connected:
+            return True
         kwargs = {}
         if self.cfg.terminal_path:
             kwargs["path"] = self.cfg.terminal_path
 
-        if self.cfg.keep_alive:
-            # 已经连上就直接复用，不要再 initialize 一次（引用计数会一直涨）
-            if mt5.terminal_info() is not None:
-                self.connected = True
-                return True
-            if mt5.initialize(**kwargs):
-                self.connected = True
-                return True
-            self._record("connect_failed", {"error": str(mt5.last_error())})
+        try:
+            with mt5lock.connecting():
+                if self.cfg.keep_alive:
+                    # 已经连上就直接复用，不要再 initialize 一次（引用计数会一直涨）
+                    if mt5.terminal_info() is not None:
+                        self.connected = True
+                        return True
+                    if mt5.initialize(**kwargs):
+                        self.connected = True
+                        return True
+                    self._record("connect_failed", {"error": str(mt5.last_error())})
+                    return False
+
+                for attempt in range(1, retries + 1):
+                    if mt5.initialize(**kwargs):
+                        self.connected = True
+                        return True
+                    if attempt < retries:
+                        time.sleep(2)
+                self._record("connect_failed", {"error": str(mt5.last_error())})
+                return False
+        except MT5Busy as exc:
+            # 另一条线程正在连接：不排队、不重复 initialize，直接报失败
+            self._record("connect_busy", {"error": str(exc)})
             return False
 
-        for attempt in range(1, retries + 1):
-            if mt5.initialize(**kwargs):
-                self.connected = True
-                return True
-            time.sleep(2)
-        self._record("connect_failed", {"error": str(mt5.last_error())})
-        return False
-
     def shutdown(self) -> None:
-        if self.connected and not self.cfg.keep_alive:
-            mt5.shutdown()
-            self.connected = False
+        if not (self.connected and not self.cfg.keep_alive):
+            return
+        try:
+            mt5lock.call(mt5.shutdown)
+        except MT5Busy:
+            return
+        self.connected = False
 
     # ---------------------------------------------------------- 只读
 
     def account(self) -> dict | None:
-        info = mt5.account_info()
+        info = mt5lock.call(mt5.account_info)
         if info is None:
             return None
         return {
@@ -99,13 +120,23 @@ class Executor:
         }
 
     def quote(self) -> tuple[float, float] | None:
-        tick = mt5.symbol_info_tick(self.cfg.symbol)
+        """报价。**拿不到锁就当这一轮没有报价**，不排队。
+
+        面板 1.5 秒轮询一次、止损快查 2~5 秒一格，都是"这一格没有就算了"
+        的调用。等锁等于把下单的耗时转嫁给止损判定——宁可返回 None 让上层
+        跳过这一轮。
+        """
+        tick = mt5lock.call_quick(mt5.symbol_info_tick, self.cfg.symbol,
+                                  timeout=0.3)
         if tick is None:
             return None
         return tick.bid, tick.ask
 
     def positions(self) -> list[dict]:
-        items = mt5.positions_get(symbol=self.cfg.symbol) or []
+        """当前持仓。读失败抛异常——`None` 被当成"没有持仓"是开仓事故的源头。"""
+        items = mt5lock.call(mt5.positions_get, symbol=self.cfg.symbol)
+        if items is None:
+            raise RuntimeError(f"读不到持仓: {mt5.last_error()}")
         return [
             {
                 "ticket": p.ticket,
@@ -121,8 +152,11 @@ class Executor:
         ]
 
     def check_trading_allowed(self) -> tuple[bool, str]:
-        info = mt5.terminal_info()
-        acct = mt5.account_info()
+        # 两个快照必须成对读：中间插进一次别的调用，可能读到"终端允许、
+        # 账户已禁"的错位组合，判出来的结论不可信。
+        with mt5lock.lock():
+            info = mt5.terminal_info()
+            acct = mt5.account_info()
         if info is None or acct is None:
             return False, "终端或账户信息不可用"
         if not info.trade_allowed:
@@ -140,13 +174,17 @@ class Executor:
 
         不在的话 `symbol_info_tick` 返回 None、`order_send` 报「未知品种」，
         表面上像行情断了，实际只是没勾选这个品种。
+
+        查可见性和勾选必须原子：中间被别人插一次（切品种），勾完的就不是
+        原来那个了。
         """
         try:
-            info = mt5.symbol_info(self.cfg.symbol)
-            if info is None:
-                return
-            if not info.visible:
-                mt5.symbol_select(self.cfg.symbol, True)
+            with mt5lock.lock():
+                info = mt5.symbol_info(self.cfg.symbol)
+                if info is None:
+                    return
+                if not info.visible:
+                    mt5.symbol_select(self.cfg.symbol, True)
         except Exception:  # noqa: BLE001
             pass
 
@@ -162,7 +200,7 @@ class Executor:
         ret = getattr(mt5, "ORDER_FILLING_RETURN", 2)
         modes: list[int] = []
         try:
-            info = mt5.symbol_info(self.cfg.symbol)
+            info = mt5lock.call(mt5.symbol_info, self.cfg.symbol)
             fm = int(getattr(info, "filling_mode", 0) or 0)
             if fm & 1:  # SYMBOL_FILLING_FOK
                 modes.append(fok)
@@ -180,6 +218,10 @@ class Executor:
 
         返回 (mt5 结果, 说明)。说明里记下试过哪些 filling，
         这样失败时能看出是券商拒绝成交方式，不是价格或手数的问题。
+
+        **每次 order_send 单独拿锁，整段不持锁**：券商无响应时单次
+        `order_send` 自己就会卡，不能再把锁一起带走——否则一次卡单会连带
+        停掉报价和止损快查。
         """
         invalid_fill = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
         done = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
@@ -188,7 +230,7 @@ class Executor:
         for mode in self._filling_modes():
             req = dict(request)
             req["type_filling"] = mode
-            result = mt5.order_send(req)
+            result = mt5lock.call(mt5.order_send, req)
             rc = getattr(result, "retcode", None)
             tried.append({"filling": mode, "retcode": rc})
             if rc == done or rc != invalid_fill:
@@ -206,12 +248,16 @@ class Executor:
         tp: float | None = None,
         comment: str = "aqa",
     ) -> dict:
-        """市价开仓。dry_run=True 时只返回构造好的请求。"""
+        """市价开仓。dry_run=True 时只返回构造好的请求。
+
+        **整段不持锁**，只有真正的接口调用各拿一次。参数自检、组请求、
+        写审计日志都在锁外——它们不碰 MT5，占着锁只会拖累报价和止损快查。
+        """
         if not self.connected and not self.connect():
             raise RuntimeError("MT5 连接失败")
         self._ensure_symbol()
 
-        tick = mt5.symbol_info_tick(self.cfg.symbol)
+        tick = mt5lock.call(mt5.symbol_info_tick, self.cfg.symbol)
         if tick is None:
             raise RuntimeError(f"无法获取 {self.cfg.symbol} 报价")
 
@@ -269,13 +315,20 @@ class Executor:
         return {"ok": ok, **payload}
 
     def close_position(self, ticket: int) -> dict:
+        """平掉指定持仓。
+
+        持仓快照和报价必须成对读：中间插一次别的调用，"按 A 的价格去平 B"
+        这种错位在平仓路径上是直接损失。
+        """
         self._ensure_symbol()
-        positions = mt5.positions_get(ticket=ticket) or []
-        if not positions:
-            return {"ok": False, "reason": "持仓不存在"}
-        pos = positions[0]
-        tick = mt5.symbol_info_tick(pos.symbol)
-        direction = -1 if pos.type == mt5.POSITION_TYPE_BUY else 1
+        with mt5lock.lock():
+            positions = mt5.positions_get(ticket=ticket) or []
+            if not positions:
+                return {"ok": False, "reason": "持仓不存在"}
+            pos = positions[0]
+            tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            return {"ok": False, "reason": f"无法获取 {pos.symbol} 报价"}
         price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
 
         request = {

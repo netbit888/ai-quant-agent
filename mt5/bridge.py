@@ -14,7 +14,7 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-from live import appdirs
+from live import appdirs, mt5lock
 
 DATA_DIR = appdirs.data_dir()
 
@@ -50,12 +50,17 @@ def get_symbols(pattern: str = "") -> list[str]:
 
 
 def ensure_symbol(symbol: str) -> None:
-    """确保品种在 Market Watch 中，否则 copy_rates 会失败。"""
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        raise ValueError(f"品种不存在: {symbol}（用 get_symbols() 查看可用品种）")
-    if not info.visible and not mt5.symbol_select(symbol, True):
-        raise RuntimeError(f"无法选中品种: {symbol}")
+    """确保品种在 Market Watch 中，否则 copy_rates 会失败。
+
+    两次调用要连在一起：查可见性和勾选之间被别人插一脚（切品种），
+    勾完的就不是原来那个了。
+    """
+    with mt5lock.lock():
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            raise ValueError(f"品种不存在: {symbol}（用 get_symbols() 查看可用品种）")
+        if not info.visible and not mt5.symbol_select(symbol, True):
+            raise RuntimeError(f"无法选中品种: {symbol}")
 
 
 def _to_rows(rates) -> list[dict]:
@@ -88,7 +93,7 @@ def get_rates(symbol: str, timeframe: str = "H1", count: int = 500) -> list[dict
     """
     tf = _timeframe(timeframe)
     ensure_symbol(symbol)
-    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    rates = mt5lock.call(mt5.copy_rates_from_pos, symbol, tf, 0, count)
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"取 K 线失败 {symbol} {timeframe}: {mt5.last_error()}")
     return _to_rows(rates)
@@ -109,7 +114,7 @@ def get_rates_live(symbol: str, timeframe: str = "M1", count: int = 120) -> list
     tf = _timeframe(timeframe)
     conn = _mt5()          # 未连接时会 initialize，已连接就复用
     ensure_symbol(symbol)
-    rates = conn.copy_rates_from_pos(symbol, tf, 0, count)
+    rates = mt5lock.call(conn.copy_rates_from_pos, symbol, tf, 0, count)
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"取 K 线失败 {symbol} {timeframe}: {conn.last_error()}")
     return _to_rows(rates)
@@ -149,7 +154,7 @@ def get_ticks_live(symbol: str, from_ts: int, to_ts: int) -> list[dict]:
 
     ticks = None
     for build in (local, as_utc):
-        ticks = conn.copy_ticks_range(symbol, build(from_ts), build(to_ts), flags)
+        ticks = mt5lock.call(conn.copy_ticks_range, symbol, build(from_ts), build(to_ts), flags)
         if ticks is not None and len(ticks):
             break
     if ticks is None:
@@ -197,7 +202,7 @@ def main() -> None:
         print(f"{args.symbol} {args.tf}: {len(rows)} bars -> {out}")
         print(f"  首根: {rows[0]}")
         print(f"  末根: {rows[-1]}")
-        acct = mt5.account_info()
+        acct = mt5lock.call(mt5.account_info)
         if acct:
             print(f"  账户: {acct.login} @ {acct.server}  balance={acct.balance} {acct.currency}")
 

@@ -47,6 +47,24 @@ TYPE_BALANCE = 2
 _lock = threading.Lock()
 _connected = False
 
+# MT5 接口的串行化搬到 `live/mt5lock.py` 了。
+#
+# 为什么不留在这里：`execution/live.py`（下单）和 `mt5/bridge.py`（回测取数）
+# 都要用同一把锁，而它们本来不该依赖**账本**模块——放 journal 里等于让
+# "锁"这个底座能力长在业务模块上，回测侧为了拿锁得反向 import 实盘账本。
+#
+# 这里保留同名别名，是为了不动既有调用点（含 tests/test_mt5_lock.py 的
+# `journal.mt5_lock()`）。新代码请直接 `from live import mt5lock`。
+from live.mt5lock import (  # noqa: E402,F401  （放在 _lock 之后，避免循环导入时半初始化）
+    MT5Busy,
+    busy_stats as mt5_busy_stats,
+    call as mt5_call,
+    call_quick as mt5_call_quick,
+    connecting as mt5_connecting,
+    is_connecting as mt5_is_connecting,
+    lock as mt5_lock,
+)
+
 # MT5 不在时 mt5.initialize() 会**阻塞整个进程 60 秒**（MT5 内部最小超时就是 60s，
 # timeout 参数调小没用）。面板是 HTTP 服务，被冻住 60 秒等于整个页面假死。
 # 所以失败后要记住时间，这段时间内直接短路，不再反复去撞那 60 秒。
@@ -194,7 +212,25 @@ def _mark_launch_ok() -> None:
 
 
 def _ensure(allow_launch: bool = False) -> None:
-    """常驻连接。dashboard 会高频调用，反复 initialize/shutdown 太浪费。
+    """常驻连接。走 `connecting()` 闸门，不是裸锁。
+
+    以前这里是裸的双检（`if _connected: return`）：两条线程同时看到 False
+    就会各调一次 `mt5.initialize()`，引用计数涨到 2、连接状态却只有一份，
+    后面查不清是"连上了"还是"连了两次"。闸门内重做双检就没有这个窗口。
+
+    **为什么用闸门而不是普通锁**：这段里有 `ensure_terminal()`（拉起终端，
+    可能几十秒）和 `mt5.initialize()`（内部超时 30 秒）。如果只是持锁，
+    别的线程会排队等到天荒地老——包括 2 秒一格的止损快查。闸门在持锁后
+    set，期间新调用直接 `MT5Busy` 快速失败，业务层按"这一轮没行情"跳过。
+    """
+    if _connected:
+        return
+    with mt5_connecting():
+        _ensure_locked(allow_launch)
+
+
+def _ensure_locked(allow_launch: bool = False) -> None:
+    """常驻连接的实际实现（**调用方必须已持有 MT5 锁 / 在闸门内**）。
 
     三道闸：
     1. 终端进程不在 → 默认**立刻抛错**，不等那 60 秒（让 HTTP 请求快速失败）。
@@ -241,13 +277,19 @@ def _mt5(allow_launch: bool = False):
 
 
 def disconnect() -> None:
-    global _connected, _conn_failed_at
-    if _connected:
-        import MetaTrader5 as mt5
+    """断开常驻连接。
 
-        mt5.shutdown()
-        _connected = False
-    _conn_failed_at = 0.0
+    走闸门：`shutdown()` 本身很快，但它必须独占——正在 initialize 的时候
+    插一脚会把引用计数搞乱。
+    """
+    global _connected, _conn_failed_at
+    with mt5_connecting():
+        if _connected:
+            import MetaTrader5 as mt5
+
+            mt5.shutdown()
+            _connected = False
+        _conn_failed_at = 0.0
 
 
 # ------------------------------------------------------------------ 账户
@@ -271,10 +313,11 @@ def is_demo_mode(trade_mode) -> bool:
 def account_snapshot(allow_launch: bool = False) -> dict:
     """当前账户状态快照。"""
     mt5 = _mt5(allow_launch)
-    ai = mt5.account_info()
-    if ai is None:
-        raise RuntimeError(f"读不到账户信息: {mt5.last_error()}")
-    ti = mt5.terminal_info()
+    with mt5_lock():
+        ai = mt5.account_info()
+        if ai is None:
+            raise RuntimeError(f"读不到账户信息: {mt5.last_error()}")
+        ti = mt5.terminal_info()
     return {
         "login": ai.login,
         "server": ai.server,
@@ -306,8 +349,18 @@ def probe_login() -> int | None:
 
 
 def open_positions(allow_launch: bool = False) -> list[dict]:
+    """账户当前持仓。
+
+    **读失败抛异常，不返回空列表。** `positions_get()` 返回 None 表示查询
+    失败，以前这里 `or []` 把它翻成"没有持仓"——而上层 `_positions()` 特意
+    用 None 表示"不知道"、就是为了防止把读失败当成"刚才那笔已经平了"再反手
+    开一仓。`or []` 让那层保护整个失效：终端抖一下就能变成连续开仓。
+    空仓时 MT5 返回的是空 tuple，走不到这个分支。
+    """
     mt5 = _mt5(allow_launch)
-    rows = mt5.positions_get() or []
+    rows = mt5_call(mt5.positions_get)
+    if rows is None:
+        raise RuntimeError(f"读不到持仓: {mt5.last_error()}")
     out = []
     for p in rows:
         out.append(
@@ -443,7 +496,7 @@ def sync(days: int = 365, login: int | str | None = None, allow_launch: bool = F
     mt5 = _mt5(allow_launch)
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
-    raw = mt5.history_deals_get(start, now)
+    raw = mt5_call(mt5.history_deals_get, start, now)
     if raw is None:
         return SyncResult(login=_login_of(login), error=f"history_deals_get 失败: {mt5.last_error()}")
 
