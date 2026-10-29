@@ -969,7 +969,7 @@ class TestMT5FastFail(unittest.TestCase):
         with mock.patch.object(self.journal, "_terminal_alive", return_value=False), \
              mock.patch("MetaTrader5.initialize") as init:
             with self.assertRaises(RuntimeError) as ctx:
-                self.journal._ensure()
+                self.journal._ensure_real()
         self.assertIn("未运行", str(ctx.exception))
         init.assert_not_called()          # 关键：根本不去调那个会冻 60 秒的函数
 
@@ -1008,12 +1008,12 @@ class TestMT5FastFail(unittest.TestCase):
              mock.patch("MetaTrader5.initialize", return_value=False), \
              mock.patch("MetaTrader5.last_error", return_value=(-1, "boom")):
             with self.assertRaises(RuntimeError):
-                self.journal._ensure()
+                self.journal._ensure_real()
             self.assertGreater(self.journal._conn_failed_at, 0)
 
             with mock.patch("MetaTrader5.initialize") as init2:
                 with self.assertRaises(RuntimeError) as ctx:
-                    self.journal._ensure()
+                    self.journal._ensure_real()
             init2.assert_not_called()     # 退避生效
             self.assertIn("刚失败过", str(ctx.exception))
 
@@ -1030,6 +1030,14 @@ class TestTerminalAutostart(unittest.TestCase):
         from live import journal
 
         self.journal = journal
+        # 这个类测的就是 collect → _ensure 的启动闸门，必须用真实实现：
+        # tests/_stubs 默认把 _ensure 断链了（防测试真连终端），这里换回来。
+        # 每个用例都 mock 了 _terminal_alive / _start_terminal / ensure_terminal，
+        # 所以换回来也不会真的去 initialize。
+        self._ensure_patch = mock.patch.object(journal, "_ensure",
+                                               journal._ensure_real)
+        self._ensure_patch.start()
+        self.addCleanup(self._ensure_patch.stop)
         self._saved = {
             "_connected": journal._connected,
             "_conn_failed_at": journal._conn_failed_at,
