@@ -408,6 +408,43 @@ class TestAssistEntry(TempLedger):
             self.assertIn(key, r)
         self.assertEqual(r["sig_kind"], "entry")
 
+    # ---- 否决后状态带要改口（2026-10-29）------------------------------------
+    # last_decision 是轮首写的，应答发生在它之后。不打标的话状态带会一直挂着
+    # 「模型开仓 + 做多的理由」，而弹窗写着「已否决」——同一块屏幕上两句相反的话。
+
+    def test_deny_marks_last_decision(self):
+        self._tick("deny")
+        ld = autotrade.load_state()["last_decision"]
+        self.assertEqual(ld["answer"], "deny")
+        self.assertGreater(ld["deny_until"], int(time.time()) + 150)
+        # 模型原话一个字都不许动：复盘要看的仍是它当时怎么说的
+        self.assertEqual(ld["reason"], "结构支持")
+        self.assertTrue(ld["act"])
+
+    def test_expired_marks_last_decision(self):
+        self._tick("expired")
+        ld = autotrade.load_state()["last_decision"]
+        self.assertEqual(ld["answer"], "expired")
+        self.assertGreater(ld["deny_until"], int(time.time()) + 150)
+
+    def test_cancelled_marks_without_deny_until(self):
+        """取消不写冷却，所以不能挂一个静默时间上去。"""
+        self._tick("cancelled")
+        ld = autotrade.load_state()["last_decision"]
+        self.assertEqual(ld["answer"], "cancelled")
+        self.assertIsNone(ld["deny_until"])
+
+    def test_slip_void_marks_last_decision(self):
+        self._tick("approve", ans_ask=4001.10)      # 0.86 > 0.80 上限
+        ld = autotrade.load_state()["last_decision"]
+        self.assertEqual(ld["answer"], "void_slip")
+
+    def test_approve_does_not_mark_answer(self):
+        """真开了仓就不能带 answer，否则标签会被「已否决」盖掉。"""
+        self._tick("approve")
+        ld = autotrade.load_state()["last_decision"]
+        self.assertNotIn("answer", ld)
+
     def test_assist_off_never_asks(self):
         with mock.patch.object(autotrade, "ask_entry",
                                return_value={"act": True, "p_up": 0.7,

@@ -954,13 +954,16 @@
   }
   .sb-why-tag {
     flex: none; margin-top: 4px; padding: 3px 9px; border-radius: 5px;
-    font-size: 13px; font-weight: 600;
+    font-size: 13px; font-weight: 600; white-space: nowrap;
     border: 1px solid var(--border); background: rgba(255,255,255,.05); color: var(--dim);
   }
   .sb-why-tag.is-skip { color: var(--warn); border-color: rgba(240,180,41,.35); background: rgba(240,180,41,.08); }
   .sb-why-tag.is-veto { color: var(--bad); border-color: rgba(255,77,79,.38); background: rgba(255,77,79,.08); }
   .sb-why-tag.is-act { color: var(--good); border-color: rgba(46,204,113,.38); background: rgba(46,204,113,.08); }
   .sb-why-tag.is-override { color: var(--accent, #4a9eff); border-color: rgba(74,158,255,.38); background: rgba(74,158,255,.09); }
+  /* 已否决 / 超时 / 作废：这是"人看过并拦下"，不是"规则拦下"也不是"模型不做"。
+     刻意用中性灰而不是红——红色留给 is-veto，那才是程序替你做了决定。 */
+  .sb-why-tag.is-deny { color: var(--muted); border-color: rgba(160,170,185,.34); background: rgba(160,170,185,.10); }
   .sb-why-text {
     min-width: 0; flex: 1 1 240px; color: var(--text); opacity: .9;
     white-space: normal; overflow-wrap: anywhere;
@@ -2717,7 +2720,26 @@ function renderAutoTrade(a) {
       text = String(ld.reason || '').replace(/\s+/g, ' ').trim() || '（模型没给理由）';
       // 程序建议从 title 里搬到可见行：藏起来等于没提。
       advTxt = String(ld.advice_text || '').replace(/\s+/g, ' ').trim();
-      if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
+      // 这一轮最后没进场（否决 / 超时 / 作废）时，标签必须**盖过** act=true 的
+      // 「模型开仓」。last_decision 是轮首写的，应答发生在它之后，后端会用
+      // answer 打标；不认这个字段的话，同一块屏幕上会同时出现「模型开仓」
+      // 和弹窗那句「已否决」——10-29 用户就是这么发现的。
+      const ANS_TAG = { deny: '已否决', expired: '超时未答', cancelled: '已取消',
+                        blocked: '信号作废·已有持仓', void_slip: '价格已跑·作废',
+                        void_unknown: '读不到持仓·作废', void_state: '已不可开仓·作废' };
+      if (ld.answer) {
+        tag = ANS_TAG[ld.answer] || '未进场';
+        cls = 'is-deny';
+        // 「静默到 21:57」只在自己还没过期时显示。基准取 server_ts：
+        // 客户端时钟偏几分钟也不会指着一个已经过去的时间。
+        const nowS = Number(a.server_ts) || (Date.now() / 1000);
+        const until = Number(ld.deny_until) || 0;
+        if (until > nowS) {
+          tag += ' · 静默到 ' + new Date(until * 1000)
+            .toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        }
+      }
+      else if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
       // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。
       // 这一格是事后分桶的关键——「听了程序」和「没听」要能分开算期望。
       else if (ld.advice) { tag = '模型否决建议'; cls = 'is-override'; }
@@ -2726,6 +2748,16 @@ function renderAutoTrade(a) {
         else if (ld.act === true) { tag = '模型开仓'; cls = 'is-act'; }
         else { tag = '模型偏' + (ld.direction > 0 ? '多' : '空'); cls = 'is-skip'; }
       } else { tag = ld.close ? '平仓' : '持仓中'; }
+      // 到过止盈门槛的单子（2026-10-29）：状态带直接标出"每 N 秒复核"。
+      // 不标的话，用户看到 reason 里一句「暂不调模型」会以为程序把这笔忘了——
+      // 10-29 那笔空单（峰值 +7.39 回落到 +6.08）就是这么被问出来的。
+      // 判据取 position.tp_reached_ts 而不是 ld.source：闸门 hold 那轮的
+      // last_decision.source 是 tp_recheck，但模型答完一轮后 source 变成 llm，
+      // 只有 pos 上的标记是贯穿整笔的。
+      const reaskSec = Number(a.tp_reask_sec || 0);
+      if (!ld.close && reaskSec > 0 && a.position && a.position.tp_reached_ts) {
+        tag = '持仓中 · ' + reaskSec + 's 复核';
+      }
       const w = ld.wait;
       if (w && w.level) {
         const FLAG = { set: '刚定', keep: '继续等', move: '下调', drift: '想上移·已拦',

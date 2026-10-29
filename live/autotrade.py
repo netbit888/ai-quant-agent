@@ -151,6 +151,26 @@ class Cfg:
     # **参数没变，变的只是延迟**：模型从「最坏 60 秒后才被问到」变成「≤2 秒」。
     # False = 快查只记录峰值和止损，出场节奏完全回到老行为。
     tp_wake: bool = True
+    # 到过门槛后的复核节拍（秒）。**0 = 关闭，回到旧行为。**
+    #
+    # 起因（2026-10-29 23:27 那笔，空 0.01@4027.164，plan=trend）：
+    #   浮盈摸到 peak=+7.39（≥ tp_min_trend=7.00），tp_wake 把模型叫来问过一次，
+    #   模型说继续持有；随后浮盈回落到 +6.08，_exit_gate 立刻改回 tp_wait
+    #   「未达止盈门槛 7.00，本轮不调模型」——**这一笔从此没人再看**。
+    #   唯一的重复唤醒是 _stale_hit，而它的条件是 fp < tp×0.6 = 4.2，
+    #   于是 4.2~7.0 这一整段是静默区：既能吐掉全部利润，也不问一句。
+    #
+    # 语义（用户的定位）：达到门槛 ≠ 一次性事件，而是"这笔单进入高频复核状态"。
+    # 一旦到过门槛，之后每隔 tp_reask_sec 秒把决定权交给模型，不管当时浮盈
+    # 在门槛上方还是下方——回落的瞬间恰恰是最该判断的时刻，旧逻辑却在那时闭嘴。
+    #
+    # 为什么是 60：决策轮本身就是 interval_sec(60)，节拍与之对齐等于"每分钟一次"，
+    # 不需要在快查里另开一路。**已过门槛后 tp_wake 不再唤醒**（见 _wait_next），
+    # 否则浮盈稳定在门槛上方时会变成每 2~5 秒问一次模型。
+    #
+    # 成本：趋势单上限 3 小时 → 最坏约 180 次调用/笔。这是明码标价的代价，
+    # 觉得贵就把它调大或设 0，不要偷偷改回去。
+    tp_reask_sec: int = 60
     # ---------------------------------------------------------------
     # 峰值停滞唤醒（2026-10-29）。**不改任何平仓阈值，只改"谁能说话"。**
     #
@@ -1296,6 +1316,7 @@ EXIT_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前 
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}
 持仓 {direction_text} {lots} 手  开仓 {entry}  已持仓 {held_text}  浮动 {pnl_text}
 本笔打法 {plan_text}
+{peak_text}
 开仓依据 {entry_reason}
 你从自己交易里总结的教训
 {lessons}
@@ -2313,7 +2334,8 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
                       tf: str = "M1", contract: float = 100.0,
                       ticks_text: str = "", symbol: str = "XAUUSDm",
                       lessons: str = "", zone_edge: float = 0.35,
-                      mtf_text: str = "", trend_follow: bool = True) -> str:
+                      mtf_text: str = "", trend_follow: bool = True,
+                      tp_min: float = 0.0) -> str:
     w = visible_bars(rows)
     r1, r5, r13, _ = _returns(w)
     direction = int(position.get("direction") or 1)
@@ -2335,6 +2357,35 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
                  "震荡单（开仓时判为震荡或方向不明）：赚的是区间内的来回，"
                  "贴到反向沿、形态被打断就走，别指望它变成趋势")
 
+    # 峰值浮盈（2026-10-29）。这一行是「到过门槛后每分钟复核」的**前提**：
+    # 光把模型叫来、不给它"已经摸到过 7.39 又吐回 6.08"这个事实，它会当成
+    # 一笔普通的 +6.08 趋势单照旧回答"继续拿"——每分钟问一次、每次都说拿住，
+    # 等于把 token 烧在信息缺失的判断上。**模型没有跨轮记忆**，峰值必须
+    # 每一轮都写在 user 里，不能指望它记得上一轮。
+    tp_min = float(tp_min or 0.0)
+    try:
+        peak = float(position["peak_pnl"]) if position.get("peak_pnl") is not None else None
+    except (TypeError, ValueError):
+        peak = None
+    if tp_min <= 0:
+        peak_text = ""
+    elif peak is None:
+        peak_text = f"浮盈峰值 未记录（止盈门槛 {tp_min:.2f}）"
+    elif peak >= tp_min:
+        back = peak - pnl
+        # peak_pnl 由快查循环按 2~5 秒采样，可能比此刻的浮盈略低
+        # （写这句话时的报价和上一次采样不同）。回落为负就别说"回落 −0.03"，
+        # 那读起来像程序算错了。
+        back_txt = (f"随后回落 {back:.2f} 到当前 {pnl:+.2f}" if back > 0.01
+                    else f"当前 {pnl:+.2f}，比记录到的峰值还高")
+        peak_text = (f"浮盈峰值 {peak:+.2f}（**已触及**止盈门槛 {tp_min:.2f}，"
+                     f"{back_txt}）"
+                     "—— 这笔单曾经够格落袋，现在必须明确回答「结构还在、继续拿」"
+                     "还是「回落已经破坏结构、现在就平」，不要含糊带过")
+    else:
+        peak_text = (f"浮盈峰值 {peak:+.2f}（止盈门槛 {tp_min:.2f}，尚未到线），"
+                     f"当前 {pnl:+.2f}")
+
     return EXIT_PROMPT.format(
         symbol=symbol, clock=time.strftime("%Y-%m-%d %H:%M", time.gmtime()),
         direction_text="多" if direction > 0 else "空",
@@ -2342,6 +2393,7 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
         bid=_px(symbol, bid), ask=_px(symbol, ask), pnl_text=pnl_text,
         entry_reason=(position.get("entry_reason") or "未记录")[:120],
         plan_text=plan_text,
+        peak_text=peak_text,
         n=len(w), tf=tf, bars=_fmt_bar_lines(w, dg),
         structure=_structure_text(w, zone_edge, dg, trend_follow, for_exit=True),
         r1=r1, r5=r5, r13=r13,
@@ -3279,7 +3331,9 @@ def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
                                    regime=regime_of(rows), scope="exit"),
                                zone_edge=cfg.zone_edge,
                                mtf_text=mtf_text,
-                               trend_follow=cfg.trend_follow)
+                               trend_follow=cfg.trend_follow,
+                               tp_min=float(exit_params(
+                                   cfg, position.get("plan"))["tp_min_usd"] or 0.0))
     held = int(time.time()) - int(position.get("opened_at") or time.time())
     try:
         text, usage = _chat(prompt, system_for(
@@ -3802,9 +3856,13 @@ def _tick_body(cfg: Cfg, login, now: int,
         # stale 先判：它只决定"这一轮要不要问模型"，不决定平不平。
         # 判定和 _wait_next 的快查共用 _stale_hit，两处同源。
         stale = _stale_hit(cfg, pos, float_pnl, now)
+        # 到过门槛 → 每分钟复核（2026-10-29）。判定和写 tp_reached_ts 都在这个
+        # 函数里，闸门只接两个布尔/整数：tp_seen（到过门槛）、tp_left（距复核秒数）。
+        tp_seen, tp_left = _tp_reached_step(cfg, pos, float_pnl, now)
         gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"),
                           stale_ready=stale,
-                          be_local=_be_local_hit(cfg, pos, float_pnl))
+                          be_local=_be_local_hit(cfg, pos, float_pnl),
+                          tp_seen=tp_seen, tp_left=tp_left)
 
         # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
         sig_id = None
@@ -3844,6 +3902,16 @@ def _tick_body(cfg: Cfg, login, now: int,
                 # 留痕：这笔是"系统放行、模型判断"而不是"浮盈到门槛了"。
                 # 面板和复盘靠这个把两类决策分开算命中率。
                 decision["via"] = "stale"
+            # 到过门槛的复核节拍：**只有真问到模型才记**，理由同 stale_ts——
+            # 模型调用失败不该吃掉 60 秒的复核窗口。
+            if tp_seen and decision.get("source") != "error":
+                pos["tp_ask_ts"] = now
+                # 留痕：这次是"到过门槛后又回落，按节拍复核"，不是首次穿越。
+                # 复盘按 via 分桶时这两类的期望完全不同——一个是"刚够线要不要走"，
+                # 一个是"已经吐掉一截要不要止损离场"。setdefault 不会盖掉 stale。
+                tp_now = float(exit_params(cfg, pos.get("plan"))["tp_min_usd"] or 0.0)
+                if tp_now > 0 and float_pnl < tp_now:
+                    decision.setdefault("via", "tp_recheck")
             # 模型失败要计数：进场失败只是少做一笔，出场失败意味着仓位没人管，
             # 连错 3 次必须停下来让人接手，不能让它一直挂在那儿。
             if decision.get("source") == "error":
@@ -4201,6 +4269,9 @@ def _tick_body(cfg: Cfg, login, now: int,
             # 取消不写冷却：那是"关程序"，不是"这单不该做"
             if ans["answer"] != "cancelled":
                 _set_assist_deny(state, "entry", cfg.assist_deny_cooldown)
+            # 让状态带跟着改口：否则它还挂在"模型开仓"上，跟刚弹出来的
+            # "已否决"正好相反（见 _mark_answered 的注释）。
+            _mark_answered(state, ans["answer"])
             why_txt = {
                 "deny": "人工否决，不下单",
                 "expired": f"{cfg.assist_entry_wait_sec} 秒无人应答，按不做处理",
@@ -4216,6 +4287,7 @@ def _tick_body(cfg: Cfg, login, now: int,
 
         if sig_slip is not None and sig_slip > float(cfg.assist_max_slip_usd):
             _set_assist_deny(state, "entry", cfg.assist_deny_cooldown)
+            _mark_answered(state, "void_slip")
             row = {"ts": now, "kind": "skip", "p_up": p_up,
                    "direction": direction, "prog_dir": prog_dir,
                    "agree": agree, "feat": feat, "assist": True,
@@ -4231,6 +4303,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         if not cfg.dry_run:
             ps = _positions(cfg.symbol)
             if ps is None:
+                _mark_answered(state, "void_unknown")
                 row = {"ts": now, "kind": "skip", "p_up": p_up,
                        "direction": direction, "prog_dir": prog_dir,
                        "agree": agree, "feat": feat, "assist": True,
@@ -4240,6 +4313,7 @@ def _tick_body(cfg: Cfg, login, now: int,
             has_pos = bool(ps)
         ok2, why2 = can_open(state, int(time.time()), has_pos, cfg, direction=direction)
         if not ok2:
+            _mark_answered(state, "void_state")
             row = {"ts": now, "kind": "skip", "p_up": p_up,
                    "direction": direction, "prog_dir": prog_dir,
                    "agree": agree, "feat": feat, "assist": True,
@@ -4336,7 +4410,8 @@ def _tick_body(cfg: Cfg, login, now: int,
 
 def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
                plan: str | None = None, stale_ready: bool = False,
-               be_local: bool = False) -> dict | None:
+               be_local: bool = False, tp_seen: bool = False,
+               tp_left: int = 0) -> dict | None:
     """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
 
     顺序是致命的：**止损必须排在止盈门槛之前**。
@@ -4355,6 +4430,9 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
         交给模型，但它必须排在 tp_wait 之前——否则 fp < tp 永远走不到这里，
         "唤醒"就成了一句空话（10-28 那笔盲等 455 秒就是这么来的）；
       · tp_wait 最后：fp 没到门槛就继续持有、不调模型，省 token。
+        **tp_wait 只对"从没到过门槛"的单子生效**（2026-10-29）：tp_seen=True
+        时改走 tp_recheck，最多静默 tp_reask_sec 秒。否则一笔摸到 7.39 又掉回
+        6.08 的趋势单会被 tp_wait 永久闭嘴，而它比任何时候都更需要判断。
 
     `stale_ready` / `be_local` 都由调用方判好再传进来，本函数**不碰时间、
     也不读 pos**——否则那 20 条钉顺序的单测全得跟着传 timestamp 和整笔仓位。
@@ -4400,6 +4478,18 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
 
     if ep["tp_min_usd"] > 0:
         if float_pnl < ep["tp_min_usd"]:
+            # 到过门槛（2026-10-29）：门槛不是"单程票"，是"这笔单进入高频复核"。
+            # 一旦浮盈摸到过门槛，之后哪怕掉回门槛以内也照样每隔 tp_reask_sec
+            # 把决定交回模型——回落到 6.08 那一格恰恰最该被判断，旧逻辑却在
+            # 那时改口"本轮不调模型"，于是 4.2~7.0 成了无人看守的静默区。
+            # tp_left>0 只是节流（同一分钟内不重复问），不是永久静默。
+            if tp_seen:
+                if tp_left <= 0:
+                    return None
+                return {"close": False, "source": "tp_recheck",
+                        "reason": (f"浮盈 {float_pnl:+.2f} 已回落到门槛 "
+                                   f"{ep['tp_min_usd']:.2f} 以内，但本笔到过门槛；"
+                                   f"{tp_left}s 后复核，暂不调模型")}
             return {"close": False, "source": "tp_wait",
                     "reason": (f"浮盈 {float_pnl:+.2f} 未达止盈门槛 "
                                f"{ep['tp_min_usd']:.2f}，继续持有（本轮不调模型）")
@@ -4565,6 +4655,9 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         issues.append(f"停滞唤醒的浮盈比例必须落在 0~1（{cfg.stale_frac}）")
     if getattr(cfg, "stale_reask_sec", 0) < 0:
         issues.append(f"停滞唤醒的重问间隔不能为负（{cfg.stale_reask_sec} 秒）")
+    # 到过门槛后的复核节拍：0 是合法的「关掉」，只有负数报错。
+    if getattr(cfg, "tp_reask_sec", 0) < 0:
+        issues.append(f"到过门槛后的复核间隔不能为负（{cfg.tp_reask_sec} 秒）")
     # 止损快查的间隔只有下限有意义：< 2 秒时 MT5 tick 读取的抖动开始比价格
     # 变化本身大，白白空转。**上界不在这里拦**——配得比决策间隔大也不报错，
     # _wait_next 会把它夹到 interval_sec（等于没开）。理由：这是个纯粹的
@@ -4715,6 +4808,68 @@ def _stale_hit(cfg: Cfg, pos: dict | None, float_pnl: float, now: int) -> bool:
     if tp <= 0:
         return False
     return float(float_pnl) < tp * frac
+
+
+def _tp_reached_step(cfg: Cfg, pos: dict | None, float_pnl: float,
+                     now: int) -> tuple[bool, int]:
+    """这一笔到过止盈门槛吗？到过之后距下一次复核还有几秒。
+
+    返回 `(tp_seen, tp_left)`：
+      · `tp_seen=True` = 浮盈曾经 ≥ 门槛，闸门因此**不再用 tp_wait 静默**；
+      · `tp_left>0` = 还在 tp_reask_sec 的节流窗口内，这一轮不必再问。
+
+    和 `_stale_hit` 一样是**只读判定 + 一个写标记**的分工：`_exit_gate` 是纯函数
+    （单测直接调，不传时间戳），所以时间相关的判定全部留在外面，闸门只接
+    `tp_seen` / `tp_left` 两个语义参数。
+
+    两个标记都落在 pos 里，跟着 state 一起持久化：
+      · `tp_reached_ts`（首次到门槛的时刻）——跨轮、跨重启都必须保留，
+        否则程序一重启，这笔单就"从没到过门槛"，重新回到静默；
+      · `tp_ask_ts`（上次真问了模型的时刻）——**只由真正调用模型的调用方写**
+        （见 tick），本函数不写。模型调用失败还占掉一个节流窗口的话，
+        最该被问的那一分钟恰好没人问。
+
+    旧 state 兼容：升级瞬间手里正拿着一笔已经到过门槛的单子（有 peak_pnl、
+    没有 tp_reached_ts），在这里用 peak 补记一次——否则这个洞只在"新开的单"
+    上被堵住，正在亏的那笔依然静默。
+
+    `tp_reask_sec <= 0` 直接判否，等于整条规则关掉、回到旧行为。
+    """
+    if not pos:
+        return False, 0
+    reask = int(getattr(cfg, "tp_reask_sec", 0) or 0)
+    if reask <= 0:
+        return False, 0
+
+    tp = float(exit_params(cfg, pos.get("plan"))["tp_min_usd"] or 0.0)
+    if tp <= 0:
+        return False, 0
+
+    try:
+        now = int(now)
+    except (TypeError, ValueError):
+        return False, 0
+
+    seen = pos.get("tp_reached_ts") is not None
+    if not seen:
+        peak = pos.get("peak_pnl")
+        try:
+            peak = float(peak) if peak is not None else float("-inf")
+        except (TypeError, ValueError):
+            peak = float("-inf")
+        if float(float_pnl) >= tp or peak >= tp:
+            pos["tp_reached_ts"] = now
+            seen = True
+    if not seen:
+        return False, 0
+
+    try:
+        last = int(pos.get("tp_ask_ts") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    if last <= 0:
+        return True, 0          # 到过门槛但还没问过 → 这一轮就问
+    return True, max(0, reask - (now - last))
 
 
 def _be_applies(pos: dict | None) -> bool:
@@ -5188,6 +5343,38 @@ def _set_assist_deny(state: dict, kind: str, sec: int) -> None:
     state["assist_deny_until"] = raw
 
 
+def _mark_answered(state: dict, answer: str) -> None:
+    """把「这一轮最终没进场」写到 last_decision 上。
+
+    为什么必须写：`last_decision` 在轮首就落好了（那时只有模型的原话），
+    人工应答发生在它之后。不主动改的话，状态带会一直挂着「模型开仓」
+    + 做多的理由，而弹窗那边写着「已否决」——同一块屏幕上两句相反的话。
+    10-29 用户当场就问「我否决开仓信号后，上面的分析怎么还不变」。
+
+    只加两格，且都只是描述事实：
+      · answer     —— deny / expired / cancelled / blocked / void_slip / void_unknown
+      · deny_until —— 静默到期时刻（绝对时间戳）。前端拿它和 server_ts 比，
+                      还没过期才显示「静默到 HH:MM」；过期就只留标签，
+                      免得几小时后又翻出来一句"静默到 21:57"。
+
+    **reason 一个字都不动**：复盘要看的仍然是「它当时怎么说的」，只是现在
+    能同时知道这句话已经被否掉了。
+    """
+    ld = state.get("last_decision")
+    if not isinstance(ld, dict):
+        return
+    ld["answer"] = answer
+    until = _assist_deny_until(state, "entry")
+    try:
+        until = int(until)
+    except (TypeError, ValueError):
+        until = 0
+    # 只有还没到期的才挂上去。cancelled 不写冷却，这时取到的可能是更早
+    # 一次否决留下的旧值——已经过期就清成 None，否则标签会指着一个早就
+    # 过去的时间。
+    ld["deny_until"] = until if until > int(time.time()) else None
+
+
 def _await_human(cfg: Cfg, sig: dict, login=None, pos: dict | None = None,
                  *, clock=None, quote_fn=None, positions_fn=None,
                  sleeper=None) -> dict:
@@ -5313,12 +5500,17 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
          10-29 那笔 +3.63 → −3.11 的形状。挂上之后每格空转。
       3. **止损判定**（_guard_hit）：浮亏过线提前返回；券商端没挂上保本线时，
          浮盈回到 0 也在这里提前返回（本地兜底）。
-      4. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ tp_min_usd 也提前返回。
-         下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
-         参数没变，变的只是模型被问到的延迟（最坏 60 秒 → ≤2 秒）。
+      4. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ 这一笔的门槛（趋势 7.0 /
+         震荡 3.25，按 plan 取）也提前返回。**只叫醒第一次**——到过门槛之后
+         由决策轮按 tp_reask_sec 复核，这里不再插队（见第 6 条）。
       5. **峰值停滞唤醒**（_stale_hit，2026-10-29）：浮盈摸到高点后停滞
          stale_sec 秒、且已经掉到 tp×stale_frac 以下，也提前返回一次。
          同样只是"把最坏 60 秒的无人看守缩到一格"，阈值一个字没改。
+      6. **到过门槛后的复核节拍**（tp_reask_sec，2026-10-29）：**不在这一层做**。
+         已到过门槛的单子在这一层刻意不提前返回，按决策轮的 60 秒自然节拍
+         走到 tick()，由 _exit_gate 的 tp_recheck 分支放行或再等一格。
+         理由：如果这里也按 fp≥tp 叫醒，浮盈稳定在门槛上方就变成每 2~5 秒
+         问一次模型——那是把 60 秒的判断变成 2 秒的骚扰，不是本规则要的东西。
 
     步长是**自适应**的：fp 离止盈门槛远时按 guard_sec 粗看，进入
     [tp_min - tp_wake_band, ∞) 后切 guard_near_sec 细看。采样密度花在决策
@@ -5343,11 +5535,14 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
     guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
     near = min(float(getattr(cfg, "guard_near_sec", 0.0) or 0.0), guard)
     band = float(getattr(cfg, "tp_wake_band", 0.0) or 0.0)
-    tp = float(getattr(cfg, "tp_min_usd", 0.0) or 0.0)
-    wake = bool(getattr(cfg, "tp_wake", False)) and tp > 0
 
     # 无仓 / 平仓轮 / 刚停：不需要快查，睡满一整轮（也省掉每格的报价读取）
     pos = load_state(login).get("position") if guard > 0 else None
+    # 门槛按**这一笔自己的 plan** 取（趋势 7.0 / 震荡 3.25）。以前这里固定读
+    # cfg.tp_min_usd，趋势单在 3.25 就被叫醒，醒来又撞上 tp_wait → tick 空转，
+    # 每 2 秒白算一次 K 线。和 _exit_gate 用同一个 exit_params，口径不许分家。
+    tp = float(exit_params(cfg, pos.get("plan"))["tp_min_usd"] or 0.0) if pos else 0.0
+    wake = bool(getattr(cfg, "tp_wake", False)) and tp > 0
     if not pos or row.get("kind") in ("close", "stop"):
         return _nap(max(1.0, deadline - time.time()), stop_wait, sleeper)
 
@@ -5381,8 +5576,11 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
             save_state(fresh, login)
         if _guard_hit(cfg, pos, q[0], q[1], fp=fp):
             return False       # 剩下的时间不要了，立刻进下一轮去平仓
-        if wake and fp >= tp:
-            return False       # tp 穿越唤醒：交模型决定，不等满一轮
+        if wake and fp >= tp and not pos.get("tp_reached_ts"):
+            # tp 穿越唤醒：**只叫醒第一次**（tp_reached_ts 由 tick 的
+            # _tp_reached_step 写入）。到过门槛之后如果还按 fp>=tp 提前返回，
+            # 浮盈一稳定在门槛上方就会每 2~5 秒叫一次模型——那是骚扰不是判断。
+            return False
         if _stale_hit(cfg, pos, fp, int(time.time())):
             # 峰值停滞唤醒（2026-10-29）：和止损快查一样只提前返回，不平仓。
             # 判定用 tick 里同一个 _stale_hit，保证"快查认为该醒"和"闸门放行"
@@ -5926,6 +6124,10 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "guard_near_sec": saved_cfg.get("guard_near_sec", _defaults.guard_near_sec),
         "tp_wake_band": saved_cfg.get("tp_wake_band", _defaults.tp_wake_band),
         "tp_wake": saved_cfg.get("tp_wake", _defaults.tp_wake),
+        # 到过门槛后的复核节拍（2026-10-29）。必须上面板：这笔单到底是
+        # 「到过门槛、每分钟问一次」还是「没到门槛、不问」，用户得能对上账，
+        # 否则面板显示"本轮不调模型"会被理解成程序坏了。
+        "tp_reask_sec": saved_cfg.get("tp_reask_sec", _defaults.tp_reask_sec),
         # 峰值停滞唤醒（2026-10-29）。同理必须上去：用户得能看见
         # 「浮盈摸到高点后停滞 3 分钟会被问一次」这件事到底开着还是关着，
         # 否则面板显示的和实际跑的又是两套。

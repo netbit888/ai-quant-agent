@@ -394,6 +394,38 @@ try {
   if (!clampOk) failed = true;
   api.renderAutoTrade(savedAt);
 
+  // 到过门槛后的复核标记（2026-10-29）：position.tp_reached_ts 存在时，
+  // 状态带必须写明「每 N 秒复核」。否则用户看到 reason 里那句「暂不调模型」，
+  // 会以为程序把这笔单忘了——10-29 那笔空单（峰值 +7.39 回落到 +6.08）
+  // 就是这么被问出来的。
+  const reaskLd = {
+    ts: 1790000100, kind: 'exit', close: false, source: 'tp_recheck',
+    reason: '浮盈 +6.08 已回落到门槛 7.00 以内，但本笔到过门槛；40s 后复核，暂不调模型',
+  };
+  api.renderAutoTrade({ ...atSample, tp_reask_sec: 60,
+                        position: { ...atSample.position, tp_reached_ts: 1790000000 },
+                        last_decision: reaskLd });
+  const reaskTag = String(made.atWhyTag.textContent || '');
+  const reaskOk = reaskTag.includes('60s 复核');
+  console.log(`  到过门槛的复核标记 ${reaskOk ? '✓' : '✗'} (${reaskTag})`);
+  if (!reaskOk) failed = true;
+  const reaskWhy = String(made.atWhyText.textContent || '');
+  console.log(`  复核理由原样上屏 ${reaskWhy.includes('到过门槛') ? '✓' : '✗'} (${reaskWhy.trim()})`);
+  if (!reaskWhy.includes('到过门槛')) failed = true;
+  // 关掉（tp_reask_sec=0）→ 退回普通「持仓中」，不许留一个不存在的节拍
+  api.renderAutoTrade({ ...atSample, tp_reask_sec: 0,
+                        position: { ...atSample.position, tp_reached_ts: 1790000000 },
+                        last_decision: reaskLd });
+  const plainTag = String(made.atWhyTag.textContent || '');
+  console.log(`  规则关闭时不标复核 ${plainTag === '持仓中' ? '✓' : '✗'} (${plainTag})`);
+  if (plainTag !== '持仓中') failed = true;
+  // 没到过门槛的普通持仓 → 同样不许标复核
+  api.renderAutoTrade({ ...atSample, tp_reask_sec: 60, last_decision: reaskLd });
+  const noMarkTag = String(made.atWhyTag.textContent || '');
+  console.log(`  未到过门槛不标复核 ${noMarkTag === '持仓中' ? '✓' : '✗'} (${noMarkTag})`);
+  if (noMarkTag !== '持仓中') failed = true;
+  api.renderAutoTrade(savedAt);
+
   // 峰值浮盈：持仓卡和流水行都要有。跟实际盈亏并排看才分得清
   // 「摸到了又吐回去」和「一路没回头」——两者要改的地方完全相反。
   const posSub = String(made.atPosSub.textContent || '');
