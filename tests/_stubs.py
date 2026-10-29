@@ -154,6 +154,22 @@ def install_missing_stubs() -> None:
             mt5.TIMEFRAME_H4 = 16388
             mt5.TIMEFRAME_D1 = 16408
             mt5.COPY_TICKS_ALL = -1
+            # 下单/改单常量（2026-10-30）。execution/live.py 的 modify_sl 用
+            # POSITION_TYPE_BUY 判多空、TRADE_ACTION_SLTP 发改单请求；桩里没有
+            # 这些名字时，**只有没装终端 SDK 的机器（CI）会红**，开发机装了真包
+            # 永远看不出来——这正是 10-29 那批 CI 连续失败的两条。
+            # 数值取自 MT5 Python API 文档，别按"看起来合理"改。
+            mt5.ORDER_TYPE_BUY = 0
+            mt5.ORDER_TYPE_SELL = 1
+            mt5.POSITION_TYPE_BUY = 0
+            mt5.POSITION_TYPE_SELL = 1
+            mt5.TRADE_ACTION_DEAL = 1
+            mt5.TRADE_ACTION_SLTP = 6
+            mt5.ORDER_TIME_GTC = 0
+            mt5.ORDER_FILLING_FOK = 0
+            mt5.ORDER_FILLING_IOC = 1
+            mt5.ORDER_FILLING_RETURN = 2
+            mt5.TRADE_RETCODE_DONE = 10009
             sys.modules["MetaTrader5"] = mt5
 
     if "openai" not in sys.modules:

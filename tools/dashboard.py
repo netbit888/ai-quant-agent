@@ -1434,6 +1434,15 @@ def _start_ui_watchdog() -> None:
     threading.Thread(target=loop, name="ui-watchdog", daemon=True).start()
 
 
+# pywebview 的对话框 id：OPEN=10 / FOLDER=20 / SAVE=30（2.x 起没变过）。
+# 没装 pywebview 时用它兜底。为什么需要兜底：_dialog_type 只是**一次常量查询**，
+# 不该因为一个可选依赖缺失就抛异常——调用方（_Bridge.pick_export_path）会把
+# 异常包成 ok=False，于是"没有 pywebview 的机器"上这批用例永远红着（CI 就是
+# 没装 pywebview 的环境，10-29 连续 10 次 tests 失败里有 6 条是这么来的）。
+# 真没有 pywebview 就没有窗口对象，这组数字不会被送进任何真实对话框。
+_DIALOG_IDS = {"OPEN": 10, "FOLDER": 20, "SAVE": 30}
+
+
 def _dialog_type(name: str) -> int:
     """取 pywebview 的对话框类型常量（"OPEN" / "SAVE" / "FOLDER"）。
 
@@ -1442,7 +1451,12 @@ def _dialog_type(name: str) -> int:
     点几次，控制台就刷几行，看着像程序有毛病。优先用 ``FileDialog`` 枚举，
     只有在老版本 pywebview 上才回落到旧常量（那时也只能忍着那行 warning）。
     """
-    import webview
+    try:
+        import webview
+    except ImportError:
+        # 可选依赖缺失不等于"这个功能坏了"：常量是稳定的，按已知值返回，
+        # 调用方有没有窗口对象由它自己判（_WINDOW is None）。
+        return _DIALOG_IDS[name]
 
     fd = getattr(webview, "FileDialog", None)
     val = getattr(fd, name, None) if fd is not None else None
