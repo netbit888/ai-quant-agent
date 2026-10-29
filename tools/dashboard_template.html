@@ -254,6 +254,15 @@
   #rowsTrade td:nth-child(11), #rowsPos td:nth-child(9) {
     white-space: normal; max-width: 340px; word-break: break-word;
   }
+  /* 理由列的上限只做「视觉折行」，不再在 JS 里砍字符串。
+     原来渲染时写的是 String(reason).slice(0,80)——正好断在「（反事实校正：
+     平仓后回」，既没有省略号提示被截断，也没有任何地方能看全。现在整段文本
+     进 DOM，这里限 6 行、超出由浏览器自己出省略号，悬停看 title 全文，
+     「详情」弹窗里还有一份完整版（renderTradeDetail 没做任何截断）。 */
+  .why-clamp {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6;
+    overflow: hidden; white-space: normal; word-break: break-word;
+  }
   /* 长文本和文本类列一律左对齐。右对齐对数字有意义（个位对个位），
      对「窄幅震荡，收盘位置 50%」这种句子是灾难：每行末尾才对齐，
      眼睛每次都要横向扫到最右边才能开始读。 */
@@ -2991,8 +3000,9 @@ function renderAutoTrade(a) {
       <td class="mono">${pUp}</td>
       <td class="mono ${r.pnl == null ? '' : signClass(r.pnl)}">${pnl}${peakLine}</td>
       <td class="mini">${esc(src)}</td>
-      <td class="mini">${esc(String(whyIn).slice(0, 80))}${r.error ? `<div class="red">${esc(String(r.error).slice(0, 60))}</div>` : ''}</td>
-      <td class="mini">${esc(String(whyOut).slice(0, 80))}</td>
+      <td class="mini"><div class="why-clamp" title="${esc(whyIn)}">${esc(whyIn || '—')}</div>${
+        r.error ? `<div class="red">${esc(String(r.error).slice(0, 60))}</div>` : ''}</td>
+      <td class="mini"><div class="why-clamp" title="${esc(whyOut)}">${esc(whyOut || '—')}</div></td>
       <td>${r.ticket && (r.kind === 'open' || r.kind === 'close')
             ? `<button class="link-btn" onclick="tradeDetailShow(${r.ticket})">详情</button>` : ''}</td>
     </tr>`;
