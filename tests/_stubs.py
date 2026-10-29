@@ -98,9 +98,10 @@ def disable_live_mt5() -> None:
     ``MetaTrader5.initialize``，不会真的碰网络。
 
     ``AQA_ALLOW_MT5=1`` 可以关掉断链（排查"是不是断链导致的"时用）。
+    注意：真实实现 ``_ensure_real`` 无论是否断链都要存——test_live 里
+    TestTerminalAutostart / TestMT5FastFail 直接引用它，少了这个属性
+    逃生门一开这 8 个用例反而 AttributeError（2026-10-29 核查时发现）。
     """
-    if os.environ.get("AQA_ALLOW_MT5"):
-        return
     try:
         from live import journal
     except Exception:  # noqa: BLE001
@@ -109,6 +110,9 @@ def disable_live_mt5() -> None:
         return
 
     journal._ensure_real = journal._ensure
+
+    if os.environ.get("AQA_ALLOW_MT5"):
+        return
 
     def _refuse(allow_launch: bool = False):  # noqa: ARG001
         raise RuntimeError(
