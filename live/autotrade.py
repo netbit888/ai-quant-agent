@@ -3800,7 +3800,14 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 平仓来源：这笔单挂了券商端保本止损（be_ok）时，「仓在终端消失」十有
         # 八九是那条线被打了，不是人手动平的。再用 deal.reason 复核一次——
         # 有人在你挂着保本线的时候手动平仓是完全可能的，那种情况记 external。
-        source, why = "external", "外部平仓：模型没发平仓单，仓位已在终端消失"
+        #
+        # 文案（2026-10-29）：原来写"仓位已在终端消失"。复盘模型把它读成"程序/
+        # 终端出了故障"，于是 10-29 那笔 +7.39→+3.71 的人工平仓被写成
+        # 「别被终端消失吓出」——一条教模型"下次该走也别走"的教训，还进了提示词。
+        # 人工平仓是**主动决策**，文本必须让模型分得清这两件事。
+        source, why = ("external",
+                       "外部平仓（人工或终端操作，非程序决策）：模型没发平仓单，"
+                       "仓位已不在券商端")
         if pos.get("be_ok"):
             deal_reason = _close_deal_reason(pos)
             if deal_reason is None or deal_reason == 4:      # 4 = DEAL_REASON_SL

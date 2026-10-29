@@ -238,6 +238,11 @@ class TestBeInTick(TempLedger):
             row = autotrade.tick(self.cfg, now=NOW, quote=(4002.0, 4002.24),
                                  rows=bars_up(), positions=[])
         self.assertEqual(row["source"], "external")
+        # 文案必须写明是"人工/终端操作"。写成"仓位已在终端消失"，复盘模型会读成
+        # 程序故障，产出「别被终端消失吓出」这种教模型下次该走也别走的教训
+        # （2026-10-29 那笔 +7.39→+3.71 的人工平仓就这么被写了）。
+        self.assertIn("人工", row["reason"])
+        self.assertNotIn("已在终端消失", row["reason"])
 
     def test_gate_closes_with_be_local_source(self):
         """券商端没挂上、浮盈回到 0：程序代平，close 行记为 be_local。"""
