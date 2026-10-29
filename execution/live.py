@@ -356,6 +356,79 @@ class Executor:
         return {"ok": ok, "retcode": getattr(result, "retcode", None),
                 "comment": getattr(result, "comment", None), "filling": meta}
 
+    def modify_sl(self, ticket: int, sl: float) -> dict:
+        """把持仓的硬止损改到指定价，**不动止盈**。
+
+        为什么要走券商端而不是让程序轮询着市价平：
+          · 止损挂在券商那边，进程崩了、面板关了、网络断一下它仍然有效；
+          · 成交就在设的那个价上——实测 5 秒轮询把 −3.00 打成 −3.39
+            （超调 13%），改单没有这个损耗。
+
+        保本止损（SL 抬到开仓价）是它的第一个用户。
+
+        持仓快照和请求必须成对读：中间插一次别的调用，就可能把止损改到
+        另一笔仓上（ticket 已经换了），那是直接的钱。
+
+        **拿不到锁就直接返回 busy，不排队**：调用方（5 秒一格的止损快查）
+        不能为了改单停在那里。MT5 的 `initialize` 最长 30 秒且全程持锁，
+        排队等于把止损判定停半分钟——那是最不能停的路径。
+        """
+        self._ensure_symbol()
+        # call_quick + 显式区分 None（读不到）与 []（没有这笔仓）：
+        # 把"终端忙"翻成"持仓不存在"会让调用方以为仓位已经没了。
+        positions = mt5lock.call_quick(mt5.positions_get, ticket=ticket,
+                                       timeout=0.5, default=None)
+        if positions is None:
+            return {"ok": False, "busy": True, "reason": "终端忙，这一格改单作废"}
+        if not positions:
+            return {"ok": False, "reason": "持仓不存在"}
+        pos = positions[0]
+        info = mt5lock.call_quick(mt5.symbol_info, pos.symbol, timeout=0.5)
+        tick = mt5lock.call_quick(mt5.symbol_info_tick, pos.symbol, timeout=0.5)
+        if tick is None:
+            return {"ok": False, "busy": True, "reason": "拿不到报价，这一格改单作废"}
+
+        digits = int(getattr(info, "digits", 3) or 3) if info is not None else 3
+        price = round(float(sl), digits)
+        is_buy = pos.type == mt5.POSITION_TYPE_BUY
+        # 方向自检：多单 SL 必须在现价（bid）下方、空单在上方（ask），
+        # 否则券商返回 10016「无效止损」。与其发一个必被拒的请求，
+        # 不如在本地说清楚——调用方据此判断"价格已经回头了，这条线现在挂不上去"。
+        if is_buy and price >= tick.bid:
+            return {"ok": False, "reason": "止损价不低于现价（价格已回到开仓价下方）"}
+        if not is_buy and price <= tick.ask:
+            return {"ok": False, "reason": "止损价不高于现价（价格已回到开仓价上方）"}
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": pos.symbol,
+            "sl": price,
+            # 必须原样带回去：SLTP 请求里 tp=0 的含义是「没有止盈」，
+            # 漏传会把持仓上已有的止盈清掉。
+            "tp": float(getattr(pos, "tp", 0.0) or 0.0),
+            "magic": self.cfg.magic,
+        }
+        if self.cfg.dry_run:
+            self._record("dry_run_modify_sl", request)
+            return {"ok": True, "dry_run": True, "request": request, "price": price}
+
+        # 不走 _send：它会给请求塞 type_filling 并轮换成交方式，而 SLTP
+        # 请求没有"成交方式"这回事，多余字段在部分券商上会被整单拒掉。
+        # 也**不用 call()**：连接期它会在锁上排到 `initialize` 结束（最长 30 秒）。
+        # 拿不到锁就当这一格没做，下一格（2~5 秒后）再来。
+        # 注意参数必须按位置传：带 kwargs 调 order_send 会得到 None + error -2。
+        result = mt5lock.call_quick(mt5.order_send, request, timeout=1.0)
+        if result is None:
+            return {"ok": False, "busy": True, "reason": "终端忙，这一格改单作废"}
+        rc = getattr(result, "retcode", None)
+        ok = rc == mt5.TRADE_RETCODE_DONE
+        self._record("sl_modify_sent" if ok else "sl_modify_failed",
+                     {"ticket": ticket, "sl": price, "retcode": rc,
+                      "comment": getattr(result, "comment", None)})
+        return {"ok": ok, "retcode": rc,
+                "comment": getattr(result, "comment", None), "price": price}
+
     # ---------------------------------------------------------- 记录
 
     def _record(self, kind: str, payload: dict) -> None:

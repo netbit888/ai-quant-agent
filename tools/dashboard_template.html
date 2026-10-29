@@ -875,6 +875,7 @@
   .at-gate.sl b { color: var(--bad); }
   .at-gate.tp b { color: var(--good); }
   .at-gate.guard b { color: var(--info); }
+  .at-gate.be b { color: var(--accent); }
   .at-gate.off { opacity: .45; }
   .at-gate.off b { color: var(--muted); text-decoration: line-through; }
 
@@ -914,9 +915,11 @@
     -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
     border: 1px solid var(--border-hi);
     box-shadow: 0 16px 32px -24px #000;
-    font-size: 12px;
+    /* 13.5 不是 13 也不是 14：三处（运行中/持仓/今日战绩）在 13px 下仍显小，
+       14px 又会跟下面 16px 的理由行挤成一整块。 */
+    font-size: 13.5px;
   }
-  .statusbar .sb-dot { width: 7px; height: 7px; border-radius: 50%;
+  .statusbar .sb-dot { width: 8px; height: 8px; border-radius: 50%;
                        background: var(--dim); flex: 0 0 auto; }
   .statusbar.on .sb-dot { background: var(--good); box-shadow: 0 0 10px rgba(46,204,113,.85); }
   .statusbar.on .sb-state { color: var(--good); }
@@ -925,9 +928,13 @@
   .statusbar .sb-state { font-weight: 600; color: var(--muted); white-space: nowrap; }
   .statusbar .sb-sep { width: 1px; align-self: stretch; min-height: 16px; background: var(--border); }
   .statusbar .sb-grow { flex: 1 1 auto; }
-  .statusbar .sb-k { color: var(--dim); font-size: 11px; }
+  .statusbar .sb-k { color: var(--dim); font-size: 12px; }
   .statusbar .sb-v { font-family: var(--mono); font-weight: 600; }
-  .statusbar .btn-ghost { margin: 0; padding: 4px 10px; font-size: 11.5px; }
+  /* 持仓时这一串是「多 0.01 @4028.561 浮盈 +1.20 峰 +3.63/7.00」，原本是
+     连续的 inline span、零间距，字号提到 13.5 之后会糊成一片。
+     统一 5px：标签靠颜色（dim）与数值（等宽粗体）区分，不再靠间距区分。 */
+  #atBarPos { display: inline-flex; align-items: baseline; gap: 5px; }
+  .statusbar .btn-ghost { margin: 0; padding: 5px 11px; font-size: 12.5px; }
   /* 静音态：不用危险红（那不是错误），用 dim 灰表示"这个通道被关了"。 */
   .statusbar .btn-ghost.btn-mute.off { color: var(--dim); border-style: dashed; }
   /* 常驻状态带的第二行：最近一次判断的原话。
@@ -936,12 +943,18 @@
      用 flex:1 1 100% 换行，状态带本身是 sticky，滚到哪儿都看得见。 */
   .statusbar .sb-why {
     flex: 1 1 100%; min-width: 0;
-    display: flex; align-items: baseline; gap: 8px;
-    padding-top: 6px; margin-top: 2px; border-top: 1px dashed var(--border);
-    font-size: 11.5px; line-height: 1.5;
+    display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px var(--sp2);
+    padding-top: 8px; margin-top: var(--sp1); border-top: 1px dashed var(--border);
+    /* 这条是**用户会主动读**的内容（空仓时靠它看模型在想什么），
+       不是注脚。11.5px/--muted 是当注脚处理的规格，读起来像附属信息，
+       所以提到正文档 13px、颜色提到 --text（压 12% 亮度）。
+       换行改成最多三行：原来是 nowrap + 省略号，长理由直接截断，
+       而「为什么没做」恰恰全在句子后半段。 */
+    font-size: 16px; line-height: 1.6;
   }
   .sb-why-tag {
-    flex: none; padding: 0 7px; border-radius: 5px; font-size: 10.5px;
+    flex: none; margin-top: 4px; padding: 3px 9px; border-radius: 5px;
+    font-size: 13px; font-weight: 600;
     border: 1px solid var(--border); background: rgba(255,255,255,.05); color: var(--dim);
   }
   .sb-why-tag.is-skip { color: var(--warn); border-color: rgba(240,180,41,.35); background: rgba(240,180,41,.08); }
@@ -949,10 +962,26 @@
   .sb-why-tag.is-act { color: var(--good); border-color: rgba(46,204,113,.38); background: rgba(46,204,113,.08); }
   .sb-why-tag.is-override { color: var(--accent, #4a9eff); border-color: rgba(74,158,255,.38); background: rgba(74,158,255,.09); }
   .sb-why-text {
-    min-width: 0; flex: 1 1 auto; color: var(--muted);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; flex: 1 1 240px; color: var(--text); opacity: .9;
+    white-space: normal; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+    overflow: hidden;
   }
-  .sb-why-wait { flex: none; color: var(--dim); font-family: var(--mono); font-size: 10.5px; }
+  /* 锚点放在 tag 右侧、正文之前：放行尾会跟正文抢宽度——窄窗口下正文被压成
+     一条窄柱、右边还空一大块（1060px 实测）。让正文独占余下全部宽度。 */
+  .sb-why-wait {
+    flex: none; margin-top: 6px; color: var(--dim);
+    font-family: var(--mono); font-size: 12px;
+  }
+  /* 程序建议单独占一行（只有真给建议时才出现，284 笔里 13 笔）。
+     以前它只藏在 tag 的 title 里——等于没显示：要 hover 才知道程序有意见，
+     而空仓时"模型想做什么"和"程序觉得该不该"是同一件事的两面，得并排看见。 */
+  .sb-why-adv {
+    flex: 1 1 100%; display: none;
+    color: var(--info); font-size: 15px; line-height: 1.6;
+    padding-left: 2px; margin-top: 2px;
+  }
+  .sb-why-adv.on { display: block; }
   .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
   .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
   .at-msg b { color: #fff; }
@@ -1273,8 +1302,9 @@
             title="停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）">关闭并清仓</button>
     <div class="sb-why">
       <span class="sb-why-tag" id="atWhyTag">—</span>
-      <span class="sb-why-text" id="atWhyText">还没跑过</span>
       <span class="sb-why-wait" id="atWhyWait"></span>
+      <span class="sb-why-text" id="atWhyText">还没跑过</span>
+      <span class="sb-why-adv" id="atWhyAdv"></span>
     </div>
   </div>
   <div class="acct" id="acct">
@@ -1397,6 +1427,8 @@
             title="浮亏到线由程序直接市价平，不问模型。账本里仍记为「手动平仓」，不给订单挂 SL">硬止损 <b id="atGateSlV">−3.00</b></span>
       <span class="at-gate guard" id="atGateGuard"
             title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。决策间隔是 60 秒，这中间价格能跑完一整根 M1，止损会超调">止损快查 <b id="atGateGuardV">每 5 秒</b></span>
+      <span class="at-gate be" id="atGateBe"
+            title="趋势单浮盈摸到触发线后，把券商端的硬止损抬到开仓价。挂在券商那边，进程崩了、面板关了都还有效，成交就在开仓价上——轮询式止损实测超调 13%。挂不上时由 5 秒快查在浮盈回到 0 时代平">保本止损 <b id="atGateBeV">3.25</b></span>
       <span class="at-gate tp" id="atGateTp"
             title="浮盈没到这个数就不平、也不调模型（省 token）。到线才问模型要不要落袋">止盈门槛 <b id="atGateTpV">3.25</b></span>
       <span class="at-gate" id="atGateStale"
@@ -2455,6 +2487,9 @@ const AT_KIND = {
   stop: '停止', open_failed: '开仓失败', close_failed: '平仓失败',
   review: '复盘', flatten: '清仓', error: '异常',
   signal: '人工确认',
+  // 保本止损（2026-10-29）：这一行记的是"把券商端 SL 改到开仓价"这件事，
+  // 不是成交。单独一个 kind，免得和开平仓混在一起数笔数。
+  be: '保本止损', be_fail: '保本没挂上',
 };
 
 /* 人工确认的结案原因。和 Python 侧 _fmt 的 ANS 表同源，
@@ -2628,6 +2663,15 @@ function renderAutoTrade(a) {
       sub += ' · 峰值 ' + money(Number(p.peak_pnl))
         + (tpFor ? ' / ' + fmt(tpFor, 2) : '');
     }
+    // 保本止损（2026-10-29）。挂上了要看得见，没挂上更要看得见：
+    // be_ok=1 → 券商端 SL 已经在开仓价，进程崩了也有保护；
+    // be_arm_ts 有值而 be_ok 没有 → 触发过但改单没成功，那段时间只能靠
+    // 5 秒快查的本地兜底（浮盈回到 0 由程序平），用户得知道这个差别。
+    if (p.be_ok) {
+      sub += ' · 保本 @' + fmt(Number(p.be_sl || p.price_open), 3);
+    } else if (p.be_arm_ts) {
+      sub += ' · 保本触发未挂上' + (p.be_err ? '（' + String(p.be_err).slice(0, 20) + '）' : '');
+    }
     $('atPosSub').textContent = sub;
   } else {
     $('atPos').textContent = '空仓';
@@ -2665,11 +2709,14 @@ function renderAutoTrade(a) {
   // 常驻状态带第二行：最近一次判断的原话 + 等待锚点。
   // 「模型不做」和「程序拦下」要分开显示——前者是它自己的判断，后者是规则否决，
   // 看到的人该知道去找谁改。
-  const whyTag = $('atWhyTag'), whyText = $('atWhyText'), whyWait = $('atWhyWait');
+  const whyTag = $('atWhyTag'), whyText = $('atWhyText'), whyWait = $('atWhyWait'),
+        whyAdv = $('atWhyAdv');
   if (whyTag && whyText) {
-    let tag = '—', cls = '', text = '还没跑过', waitTxt = '';
+    let tag = '—', cls = '', text = '还没跑过', waitTxt = '', advTxt = '';
     if (ld) {
       text = String(ld.reason || '').replace(/\s+/g, ' ').trim() || '（模型没给理由）';
+      // 程序建议从 title 里搬到可见行：藏起来等于没提。
+      advTxt = String(ld.advice_text || '').replace(/\s+/g, ' ').trim();
       if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
       // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。
       // 这一格是事后分桶的关键——「听了程序」和「没听」要能分开算期望。
@@ -2694,6 +2741,10 @@ function renderAutoTrade(a) {
     whyText.textContent = text;
     whyText.title = text;
     whyWait.textContent = waitTxt;
+    if (whyAdv) {
+      whyAdv.textContent = advTxt ? '程序建议：' + advTxt : '';
+      whyAdv.className = 'sb-why-adv' + (advTxt ? ' on' : '');
+    }
   }
 
   $('atClosed').textContent = a.closed + ' 笔';
@@ -2743,6 +2794,12 @@ function renderAutoTrade(a) {
   const guardOn = gGuard > 0 && gGuard < ivSec;
   $('atGateGuardV').textContent = guardOn ? '每 ' + fmt(gGuard, 0) + ' 秒' : '关闭';
   $('atGateGuard').className = 'at-gate guard' + (guardOn ? '' : ' off');
+  // 保本止损（2026-10-29）：只给趋势单。显示触发线，关掉时写「关闭」——
+  // 和上面几条同一个规矩：页面不许把没在跑的规则画成在跑。
+  const beArm = Number(a.be_arm_usd || 0);
+  const beOn = !!a.be_at_entry && beArm > 0;
+  $('atGateBeV').textContent = beOn ? fmt(beArm, 2) + ' · 仅趋势单' : '关闭';
+  $('atGateBe').className = 'at-gate be' + (beOn ? '' : ' off');
   $('atGateHoldV').textContent = gHold > 0 ? fmt(Math.round(gHold / 60), 0) + ' 分钟' : '关闭';
   $('atGateHold').className = 'at-gate' + (gHold > 0 ? '' : ' off');
 
@@ -2759,16 +2816,24 @@ function renderAutoTrade(a) {
 
   // 程序止损笔数：这个数和"模型平仓"要分开看。止损多说明入场方向差，
   // 模型平得差是另一回事——两者的处理方式完全不同，混在一起看不出问题。
-  const slN = Number(a.sl_closes || 0);
-  if (slN) {
-    const tpTxt = (a.tp_min_usd == null) ? '' : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`;
-    $('atSl').textContent = `程序止损 ${slN} 笔`
-      + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
-      + (a.tp_min_usd ? ` · 未达止盈门槛不平${tpTxt}` : '');
-    $('atSl').style.color = 'var(--warn)';
-  } else {
-    $('atSl').textContent = '';
-  }
+    const slN = Number(a.sl_closes || 0);
+    // 保本止损（2026-10-29）单独点名：它和硬止损混在一起会看不出规则效果。
+    // 「硬止损 8 笔 + 保本 3 笔」= 方向错得多，但至少 3 次没让它变成亏损单。
+    const beN = Number(a.be_closes || 0);
+    const beTxt = beN ? `（保本止损 ${beN} 笔）` : '';
+    if (slN) {
+      const tpTxt = (a.tp_min_usd == null) ? '' : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`;
+      $('atSl').textContent = `程序止损 ${slN} 笔`
+        + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
+        + beTxt
+        + (a.tp_min_usd ? ` · 未达止盈门槛不平${tpTxt}` : '');
+      $('atSl').style.color = 'var(--warn)';
+    } else if (beN) {
+      $('atSl').textContent = `保本止损 ${beN} 笔（摸到触发线后回到开仓价出场）`;
+      $('atSl').style.color = 'var(--info)';
+    } else {
+      $('atSl').textContent = '';
+    }
 
   // 最近 10 笔多空分布：只看盈亏发现不了"只会做多"这种偏置，必须单独显示。
   const dr = a.dir_recent || {};
@@ -2839,7 +2904,11 @@ function renderAutoTrade(a) {
   // 「跳过 / 继续持有」——它们把真正的平仓行冲掉了，等于没得看。
   const allRows = (a.recent || []).slice().reverse();
   const showSkip = !!($('atShowSkip') && $('atShowSkip').checked);
-  const EXEC_KINDS = ['open', 'close', 'review', 'open_failed', 'stop', 'error'];
+  // 'be' / 'be_fail'（2026-10-29）默认可见：那是程序真的动了券商端的单，
+  // 而且一笔持仓最多出现一次——藏进"显示跳过"里，用户就没法一眼确认
+  // 「这笔的保本线到底挂上没挂上」。失败尤其要看得见。
+  const EXEC_KINDS = ['open', 'close', 'review', 'open_failed', 'stop', 'error',
+                      'be', 'be_fail'];
   // 被否决/超时/作废的信号要留在默认视图里（那是"为什么没做"的答案）；
   // 同意的那些不重复占行——open/close 行里已经有 signal_id。
   const rows = showSkip ? allRows : allRows.filter(
@@ -2861,14 +2930,28 @@ function renderAutoTrade(a) {
       : r.source === 'fallback' ? '规则兜底'
       : r.source === 'external' ? '终端外平仓'
       : r.source === 'panel' ? '面板'
+      // 保本止损（2026-10-29）：be = 券商端那条线被打到（成交就发生在
+      // 开仓价附近）；be_local = 券商端没挂上、由程序代平。两者必须分开，
+      // 否则"规则到底有没有生效"这件事永远查不清。
+      : r.source === 'be' ? '券商保本'
+      : r.source === 'be_local' ? '程序保本'
+      // 改单那两行不产生成交，来源列写"谁动的手"：券商改单 / 改单失败。
+      : r.kind === 'be' ? (r.mode === 'paper' ? '纸面' : '券商改单')
+      : r.kind === 'be_fail' ? '改单失败'
       : '—';
     // 开仓理由在 open 行；平仓理由在 close 行，且 close 行会把当初的
     // 进场理由一起带上，这样一笔单的「为什么进 / 为什么出」能在同一行看完。
     const whyIn = r.kind === 'open' ? (r.reason || '') : (r.entry_reason || '');
     // 平仓行写「为什么出」；复盘行写平仓后回看那段的结论，单独标出来
-    const whyOut = r.kind === 'close' ? (r.reason || '')
-      : (r.kind === 'review' ? ('💡 ' + (r.lesson || r.error || '')) : '');
-    const isSkip = r.kind === 'skip' || r.kind === 'hold';
+    // 保本止损两行（2026-10-29）本身就是"做了什么"——理由放进这一列，
+    // 否则「开仓理由/平仓理由」两列全空，只剩一个标签看不出改到了哪个价。
+    // 平仓行写「为什么出」；复盘行写平仓后回看那段的结论。
+    // 保本止损两行（2026-10-29）本身就是"做了什么"——理由也要放进来，
+    // 否则「开仓理由 / 平仓理由」两列全空，只剩一个标签看不出改到了哪个价。
+    let whyOut = '';
+    if (r.kind === 'close') whyOut = r.reason || '';
+    else if (r.kind === 'review') whyOut = '💡 ' + (r.lesson || r.error || '');
+    else if (r.kind === 'be' || r.kind === 'be_fail') whyOut = r.reason || r.error || '';    const isSkip = r.kind === 'skip' || r.kind === 'hold';
     return `<tr${isSkip ? ' class="at-skip"' : ''}>
       <td class="mono">${hhmmss(r.ts)}</td>
       <td>${AT_KIND[r.kind] || r.kind || '—'}</td>
@@ -4106,6 +4189,9 @@ function renderTradeDetail(d) {
         : res.exit_source === 'sl' ? '程序硬止损'
         : res.exit_source === 'timeout' ? '持仓超时'
         : res.exit_source === 'external' ? '外部平仓（手动/强平）'
+        // 保本止损（2026-10-29）：券商端那条线打的，成交价应在开仓价附近。
+        : res.exit_source === 'be' ? '保本止损（券商端 SL）'
+        : res.exit_source === 'be_local' ? '保本止损（程序代平）'
         : esc(res.exit_source || '—'))
     + `</div></div>`;
 
@@ -5237,10 +5323,21 @@ function sigShow(sig) {
   const bits = [];
   const pd = Number(sig.prog_dir || 0);
   bits.push(pd > 0 ? '方向倾向：做多' : pd < 0 ? '方向倾向：做空' : '方向倾向：无（不给建议）');
-  if (sig.agree === true) bits.push('模型自称与程序一致');
+  // 「与程序一致」只比方向（prog_dir vs direction），**不比位置、措辞、跨周期**。
+  // 2026-10-29 20:14 实盘：贴着上沿追多（pos 0.84），程序给出 top_long_ban，
+  // 弹窗同时写着「模型自称与程序一致」和「程序意见：此处追多＝接最后一棒」——
+  // 两句话并排，读者只会记住前一句，12.7 秒后点了同意，-3.11。
+  // 所以有建议时不再说「一致」，按建议类型说清是哪儿不一致。
+  const advCode = String(sig.advice || '');
+  const advText = sig.advice_text ? String(sig.advice_text) : '';
+  if (sig.agree === true) {
+    bits.push(!advCode && !advText ? '模型自称与程序一致'
+      : advCode === 'act_guard' ? '方向一致，但理由在说别进'
+      : '方向一致，但位置有问题');
+  }
   if (sig.agree === false) bits.push('模型自称与程序分歧');
-  if (sig.advice_text) bits.push('程序意见：' + sig.advice_text);
-  else if (sig.advice) bits.push('程序意见：' + String(sig.advice));
+  if (advText) bits.push('程序意见：' + advText);
+  else if (advCode) bits.push('程序意见：' + advCode);
   $('sigProg').textContent = bits.join('\n');
 
   $('sigYes').textContent = isExit ? '同意平仓' : `同意${long ? '做多' : '做空'}`;

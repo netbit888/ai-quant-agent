@@ -216,6 +216,32 @@ class Cfg:
     # 理论上限约 13（每根都创新高）。实测趋势市 skip 点的中位是 4.9。
     trend_span_atr_max: float = 8.0
     # ---------------------------------------------------------------
+    # 保本止损（2026-10-29）。**趋势单浮盈摸到 be_arm_usd 之后，把券商端的
+    # 硬止损抬到开仓价。**
+    #
+    # 为什么加：tick 级重放了 17 笔「峰值摸到过 3.25」的单子（M1 的 OHLC
+    # 分不出同一分钟内先到 3.25 还是先回开仓价，只有逐笔 tick 能定先后）。
+    # 结果里 trend 6 笔 +24.32 → +34.00（+9.68），**赢单零误伤**：3 笔赢单
+    # 一次都没回到开仓价，3 笔亏损单全部回到过。也就是说在趋势单里
+    # 「摸到 3.25 又回开仓价」≈「这笔趋势失败了」，这条线是个失效探测器。
+    #
+    # 为什么只给 trend：震荡单的止盈门槛本来就是 3.25，摸到就该让模型说话，
+    # 不需要第二道线；而 trend 的门槛是 7.0，摸到 3.25 之后既不平也没人问，
+    # 正是 10-28 / 10-29 那几笔「+3.63 一路看到 −3.11」的死角。
+    #
+    # 为什么挂在券商端而不是程序轮询：轮询实测超调 13%（−3.00 打成 −3.39），
+    # 而改单就是那个价成交；并且进程崩了这条线还在。
+    be_at_entry: bool = True
+    # 触发线（USD）：峰值浮盈到这个数才把止损抬到开仓价。
+    # 取 3.25 而不是 tp_min_trend 的 7.0 —— 7.0 是"目标"，3.25 是"方向已经
+    # 被证明过"。实测 4.5~7.0 区间一笔样本都没有，等 7.0 等于不保护。
+    # 设 0 关掉（等价于 be_at_entry=False）。
+    be_arm_usd: float = 3.25
+    # 挂单失败后的重试间隔（秒）。失败通常是终端这一下没收（算法交易没开、
+    # 锁被占、或价格已经回到开仓价以下挂不上去）。节流是为了别每 2 秒锤
+    # 一次券商。**失败期间保护不缺席**：浮盈回到 0 由 _guard_hit 本地代平。
+    be_retry_sec: int = 20
+    # ---------------------------------------------------------------
     # 入场端的两个硬闸门（2026-10-27 复盘后加）。它们**不发明新规则**，
     # 只是把提示词里早就写着、模型却会违反的两条约束交给代码执行。
     #
@@ -338,6 +364,9 @@ def _empty_state() -> dict:
         # 其中有多少笔是程序硬止损平的（source="sl"）。与「模型主动平」分开数，
         # 否则命中率会被止损单污染。
         "sl_closes": 0,
+        # 其中有多少笔是保本止损平的（source="be" / "be_local"，2026-10-29）。
+        # 和 sl_closes 分开：硬止损说明入场方向错了，保本止损说明方向对过。
+        "be_closes": 0,
         "pnl": 0.0,
         "position": None,
         "stop_reason": None,
@@ -2464,12 +2493,19 @@ def build_review_prompt(rows: list[dict], position: dict, exit_price: float,
     )
 
 
+# 出场**不是模型决定**的那几种 source：程序硬止损（sl）、券商端保本止损（be）、
+# 程序代平保本（be_local）。它们的共同点是"平仓那一刻模型没有决策权"，
+# 所以复盘出来的教训不能只锁在出场端——模型真正能改的是"这一笔该不该开"。
+_FORCED_EXIT_SOURCES = ("sl", "be", "be_local")
+
+
 def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
                opened_at: int, closed_at: int, login=None,
                exit_source: str = "") -> dict:
     """平仓满 7 根之后要一句复盘。失败就返回空，绝不影响主流程。
 
-    `exit_source` = 谁发起的这次平仓（"sl" / "llm" / "timeout" / "panel"）。
+    `exit_source` = 谁发起的这次平仓（"sl" / "be" / "be_local" / "llm" /
+    "timeout" / "panel"）。
     **"sl"（程序硬止损）是特殊情况**：出场那一刻不是模型选的，是代码按
     sl_usd 砍的，模型从头到尾没有出场决策权。这时候复盘却把它归成
     「止损太晚 · scope=exit」——出场端的错误模型根本无从改起，
@@ -2479,7 +2515,9 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
     因为那条教训 scope=exit，入场端压根看不到）。
 
     所以 sl 平仓强制升级成 scope="both"，并在返回里标 `src="sl"`，
-    注入端的 `_scope_ok` 凭这个标记放行到入场端。
+    注入端的 `_scope_ok` 凭这个标记放行到入场端。2026-10-29 起保本止损
+    （be / be_local）走同一条路：那也是"程序/券商替你出的场"，见
+    _FORCED_EXIT_SOURCES。
     """
     tf_sec = 60
     held_sec = max(0, int(closed_at) - int(opened_at or closed_at))
@@ -2538,12 +2576,13 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
 
     scope = parsed["scope"]
     src = ""
-    if str(exit_source or "").lower() == "sl" and scope != "both":
+    forced = str(exit_source or "").lower()
+    if forced in _FORCED_EXIT_SOURCES and scope != "both":
         # 出场不是模型决定的 → 这条教训不能只归出场端，否则入场永远学不到。
         scope = "both"
-        src = "sl"
-    elif str(exit_source or "").lower() == "sl":
-        src = "sl"
+        src = forced
+    elif forced in _FORCED_EXIT_SOURCES:
+        src = forced
 
     return {"ok": True, "lesson": parsed["lesson"], "theme": theme,
             "scope": scope, "bars": len(window),
@@ -2778,9 +2817,10 @@ def lesson_clusters(login=None) -> list[dict]:
                                 "lesson": text, "ts": ts, "regimes": {},
                                 "verified": 0, "sl": 0}
         b["count"] += 1
-        # sl = 这个桶里有几条是**被硬止损砍掉**的单留下的。
-        # 出场那一刻不是模型决定的，这类教训两端都要看（见 _scope_ok）。
-        if str(r.get("src") or "") == "sl":
+        # sl = 这个桶里有几条是**程序/券商强制平仓**的单留下的（硬止损、
+        # 保本止损）。出场那一刻不是模型决定的，这类教训两端都要看
+        # （见 _scope_ok 与 _FORCED_EXIT_SOURCES）。
+        if str(r.get("src") or "") in _FORCED_EXIT_SOURCES:
             b["sl"] += 1
         # verified = 这条桶里有几条**过了反事实检验**。
         # 只认落盘的 verdict 字段，不认 row_verdict 的文本推断——
@@ -3530,6 +3570,30 @@ def send_open(cfg: Cfg, direction: int) -> dict:
             pass
 
 
+def send_modify_sl(cfg: Cfg, ticket: int, sl: float) -> dict:
+    """把持仓的券商端止损改到 `sl`。失败返回 ok=False，不抛异常。
+
+    单独一个函数（而不是复用 send_close 的路径）是因为它是**改单**，不是成交：
+    它不改持仓，只改券商端那条线。日志、错误码、重试语义都和开平仓不同。
+    """
+    ex = _executor(cfg)
+    try:
+        if not ex.connect():
+            return {"ok": False, "reason": "MT5 连接失败"}
+        res = ex.modify_sl(int(ticket), float(sl))
+        if not res.get("ok"):
+            hint = retcode_hint(res.get("retcode"))
+            res["reason"] = hint or res.get("comment") or f"retcode={res.get('retcode')}"
+        return res
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            ex.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def send_close(cfg: Cfg, ticket: int) -> dict:
     ex = _executor(cfg)
     try:
@@ -3679,6 +3743,17 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 之后 position 就被清了——所以必须在这一行之前记下来。
         state["last_close_dir"] = pos.get("direction")
         state["position"] = None
+        # 平仓来源：这笔单挂了券商端保本止损（be_ok）时，「仓在终端消失」十有
+        # 八九是那条线被打了，不是人手动平的。再用 deal.reason 复核一次——
+        # 有人在你挂着保本线的时候手动平仓是完全可能的，那种情况记 external。
+        source, why = "external", "外部平仓：模型没发平仓单，仓位已在终端消失"
+        if pos.get("be_ok"):
+            deal_reason = _close_deal_reason(pos)
+            if deal_reason is None or deal_reason == 4:      # 4 = DEAL_REASON_SL
+                source = "be"
+                why = (f"券商端保本止损 {float(pos.get('be_sl') or 0):.3f} 被触发"
+                       f"（峰值浮盈后把 SL 抬到开仓价）")
+                state["be_closes"] = int(state.get("be_closes") or 0) + 1
         row = {
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
             "direction": pos.get("direction"), "pnl": round(pnl, 2),
@@ -3687,12 +3762,15 @@ def _tick_body(cfg: Cfg, login, now: int,
             # 两个理由分别存：开仓理由来自当初的进场判断，平仓理由来自这次离场判断。
             # 合成一个字段就再也分不清「为什么进」和「为什么出」，复盘直接废掉。
             "entry_reason": pos.get("entry_reason"),
-            "reason": "外部平仓：模型没发平仓单，仓位已在终端消失",
-            "source": "external",
+            "reason": why,
+            "source": source,
         }
+        if pos.get("be_ok"):
+            row["be_sl"] = float(pos.get("be_sl") or 0.0)
+            row["peak_pnl"] = pos.get("peak_pnl")
         # 复盘排进队列：等 7 根 K 线走完再复盘，这期间照常判断下一笔。
         # 平仓当刻就复盘看不出「平完之后怎么走」，等于白问。
-        pos["exit_reason"] = "外部平仓（模型没发平仓单）"
+        pos["exit_reason"] = why
         queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
         return {**_finish(state, row, login), "detected": True}
 
@@ -3709,6 +3787,15 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 两处共用 _track_peak，峰值逻辑同源。
         _track_peak(pos, float_pnl, now)
 
+        # 保本止损（2026-10-29）：趋势单峰值到 be_arm_usd 就把券商端 SL 抬到
+        # 开仓价。**在闸门之前做**——同一轮里如果价格正好又跌回开仓价，
+        # 闸门要能用上刚记下的 be_arm_ts 做本地兜底。
+        # 快查循环也调这一个函数，两处同源（否则 60 秒这一格才知道要挂，
+        # 而峰值往往在 2 秒格里就被抓到了），挂上过一次之后自动空转。
+        be_row = _be_step(cfg, pos, float_pnl, now)
+        if be_row:
+            append_log(be_row, login)
+
         # plan 在开仓时锁定（见 state["position"]），出场参数跟着这笔单打法走，
         # 中途 regime 跳变不换规则——见 exit_params 的注释。
         #
@@ -3716,7 +3803,8 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 判定和 _wait_next 的快查共用 _stale_hit，两处同源。
         stale = _stale_hit(cfg, pos, float_pnl, now)
         gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"),
-                          stale_ready=stale)
+                          stale_ready=stale,
+                          be_local=_be_local_hit(cfg, pos, float_pnl))
 
         # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
         sig_id = None
@@ -3926,6 +4014,10 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 否则「模型平仓命中率」会被一堆止损单污染。
         if decision.get("source") == "sl":
             state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
+        # 保本线兜底平仓（2026-10-29）单独计数：它和硬止损是两码事——
+        # 硬止损说明入场方向错了，保本止损说明方向对过、没吃到。
+        if decision.get("source") == "be_local":
+            state["be_closes"] = int(state.get("be_closes") or 0) + 1
         if decision.get("error"):
             row["error"] = decision["error"]
         if sig_id:
@@ -4243,23 +4335,29 @@ def _tick_body(cfg: Cfg, login, now: int,
 
 
 def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
-               plan: str | None = None, stale_ready: bool = False) -> dict | None:
+               plan: str | None = None, stale_ready: bool = False,
+               be_local: bool = False) -> dict | None:
     """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
 
     顺序是致命的：**止损必须排在止盈门槛之前**。
     反过来写的话，一笔浮亏 -5 USD 的单子会因为「浮盈没到 2.50」被判成继续持有，
     止损永远不触发——参数越保守亏得越多。所以单独抽出来 + 单测钉住顺序。
 
-    现在的顺序是 **sl → timeout → stale → tp_wait**，四条各自的位置都有理由：
+    现在的顺序是 **sl → be_local → timeout → stale → tp_wait**，五条各自的位置
+    都有理由：
       · sl 最前：兜底，任何时候都不许被别的规则挡住；
-      · timeout 第二：卡在 +2.0（没到门槛）的单子不能被无限持有，否则超短线拖成隔夜；
-      · stale（2026-10-29）第三：**只放行、不改阈值**。峰值停滞时返回 None 把决定
+      · be_local（2026-10-29）第二：保本线的本地兜底，只在券商端没挂上时成立。
+        必须排在 timeout 和 tp_wait 之前——它的触发条件是"浮盈回到 0"，
+        那时候 fp 远低于门槛，落在 tp_wait 后面就永远走不到；
+        也必须排在 sl 之后：浮亏 -3.5 的单子两条线同时为真，记成 sl 才是实情；
+      · timeout 第三：卡在 +2.0（没到门槛）的单子不能被无限持有，否则超短线拖成隔夜；
+      · stale 第四：**只放行、不改阈值**。峰值停滞时返回 None 把决定
         交给模型，但它必须排在 tp_wait 之前——否则 fp < tp 永远走不到这里，
         "唤醒"就成了一句空话（10-28 那笔盲等 455 秒就是这么来的）；
       · tp_wait 最后：fp 没到门槛就继续持有、不调模型，省 token。
 
-    `stale_ready` 由 `_stale_hit()` 判好再传进来，本函数**不碰时间**——
-    否则那 20 条钉顺序的单测全得跟着传 timestamp。
+    `stale_ready` / `be_local` 都由调用方判好再传进来，本函数**不碰时间、
+    也不读 pos**——否则那 20 条钉顺序的单测全得跟着传 timestamp 和整笔仓位。
 
     `plan` 决定这一笔按哪套参数走（见 exit_params）：趋势单的止盈门槛是
     tp_min_trend（默认 7.0）、持仓上限 max_hold_trend（默认 3 小时）；震荡单
@@ -4276,6 +4374,14 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
     if ep["sl_usd"] > 0 and float_pnl <= -abs(ep["sl_usd"]):
         return {"close": True, "source": "sl",
                 "reason": (f"硬止损：浮亏 {float_pnl:+.2f} 触及 -{abs(ep['sl_usd']):.2f}")
+                }
+
+    # 保本线兜底（2026-10-29）：峰值到过 be_arm_usd、但券商端那条 SL 没挂上，
+    # 现在浮盈回到 0 —— 程序自己平，别让这条规则只活在设计文档里。
+    if be_local:
+        return {"close": True, "source": "be_local",
+                "reason": (f"保本线：浮盈 {float_pnl:+.2f} 回到 0，"
+                           "券商端止损没挂上，程序代平")
                 }
 
     # 持仓上限排在止盈门槛之前：否则一笔卡在 +2.0（没到门槛 3.25）的单子
@@ -4359,6 +4465,13 @@ def _fmt(row: dict) -> str:
                 f"[{row.get('source')}] {row.get('reason') or ''}")
     if kind == "hold":
         return f"{clock} 持有 {row.get('reason') or ''}"
+    if kind == "be":
+        return (f"{clock} 保本止损 #{row.get('ticket')} "
+                f"SL→{float(row.get('sl') or 0):.3f} [{row.get('mode')}] "
+                f"{row.get('reason') or ''}")
+    if kind == "be_fail":
+        return (f"{clock} 保本止损没挂上 #{row.get('ticket')}："
+                f"{row.get('error') or row.get('reason') or ''}")
     if kind == "skip":
         return f"{clock} 跳过：{row.get('reason')}"
     if kind == "stop":
@@ -4604,24 +4717,194 @@ def _stale_hit(cfg: Cfg, pos: dict | None, float_pnl: float, now: int) -> bool:
     return float(float_pnl) < tp * frac
 
 
+def _be_applies(pos: dict | None) -> bool:
+    """保本止损管不管这一笔。**只判 plan**：规则只给趋势单。
+
+    震荡单的止盈门槛本来就是 3.25，摸到就该让模型说话，不需要第二道线；
+    趋势单的门槛是 7.0，摸到 3.25 之后既不平也没人问，那才是要补的洞。
+    """
+    if not pos:
+        return False
+    return str(pos.get("plan") or "") == "trend"
+
+
+def _be_local_hit(cfg: Cfg, pos: dict | None, float_pnl: float) -> bool:
+    """保本线的**本地兜底**：券商端没挂上时，浮盈回到 0 由程序平。
+
+    只在 `be_ok` 为假时成立。券商端挂上了就绝不重复判——两道同时生效的话，
+    成交价变成"谁先到谁赢"，统计上再也分不清是券商 SL 打的还是程序平的，
+    而这条规则的全部价值就在于事后能按 source 分桶算期望。
+
+    为什么需要兜底：改单会失败（终端算法交易关了、锁被占、价格已经回到
+    开仓价以下挂不上去）。没有兜底的话「保本」只是一句建议，最需要它的
+    那笔单恰好就拿不到保护。
+    """
+    if not pos or not bool(getattr(cfg, "be_at_entry", False)):
+        return False
+    if not _be_applies(pos):
+        return False
+    if not pos.get("be_arm_ts") or pos.get("be_ok"):
+        return False
+    return float(float_pnl) <= 0
+
+
+def _be_step(cfg: Cfg, pos: dict, float_pnl: float, now: int) -> dict | None:
+    """保本止损：峰值到线后把券商端 SL 抬到开仓价。返回要落盘的一行或 None。
+
+    **这一步只改券商端那条线**，不改任何平仓判定：挂上之后平不平仍然由
+    券商 SL / _exit_gate / 模型三方照旧决定。
+
+    为什么在 5 秒快查里做，而不是只在 60 秒的 tick 里做：3.63 那样的峰值是
+    2 秒一格抓到的。等决策轮再看，价格早就回来了，止损也就没机会抬——
+    而保护窗口恰好就是"刚摸到高点"那几分钟。
+
+    返回 None 的情况：规则关 / 不是趋势单 / 已经处理过 / 还没到线 /
+    失败节流期 / 终端这一格忙（正在连接）。返回 dict 时**调用方负责
+    append_log + save_state**——本函数不落盘，理由和 _stale_hit 一样：
+    写盘时机必须由唯一的那处决定。
+    """
+    if not pos or not bool(getattr(cfg, "be_at_entry", False)):
+        return None
+    if not _be_applies(pos):
+        return None
+    arm = float(getattr(cfg, "be_arm_usd", 0.0) or 0.0)
+    if arm <= 0:
+        return None
+    # 已经挂上（be_ok）或纸面已处理（be_mode=paper）就不再进
+    if pos.get("be_ok") or pos.get("be_mode") == "paper":
+        return None
+
+    peak = pos.get("peak_pnl")
+    try:
+        peak = float(peak) if peak is not None else float(float_pnl)
+        fp = float(float_pnl)
+    except (TypeError, ValueError):
+        return None
+    if max(peak, fp) < arm:
+        return None
+
+    entry = float(pos.get("price_open") or 0.0)
+    ticket = int(pos.get("ticket") or 0)
+    if entry <= 0:
+        return None
+    now = int(now)
+
+    # 第一次到线：先把「该有保本了」记下来。券商端挂不上时，_guard_hit
+    # 靠这个标记做本地兜底——否则这条规则在最需要用它的场景里正好是空的。
+    if not pos.get("be_arm_ts"):
+        pos["be_arm_ts"] = now
+
+    # 价格已经回到（或穿到）开仓价以下：多单的 SL 设在现价上方会被券商
+    # 直接拒（10016）。这不是故障，是"这条线现在挂不上去了"，交给本地兜底，
+    # 不再重试——重试一万次也不会成功。
+    if fp <= 0:
+        return None
+
+    retry = int(getattr(cfg, "be_retry_sec", 20) or 0)
+    last = pos.get("be_try_ts")
+    if last is not None and retry > 0:
+        try:
+            if now - int(last) < retry:
+                return None
+        except (TypeError, ValueError):
+            pass
+
+    # 纸面单：券商那边没有这一笔，改单无从谈起。记录成 be_mode=paper，
+    # 由本地兜底在浮盈回到 0 时平——纸面演练也要按同一套规则跑，
+    # 否则"纸面表现"和"真实表现"差的就是这条保护。
+    if pos.get("dry_run") or ticket <= 0:
+        pos["be_try_ts"] = now
+        pos["be_mode"] = "paper"
+        pos["be_sl"] = float(entry)
+        pos["be_ts"] = now
+        return {"ts": now, "kind": "be", "ticket": ticket,
+                "direction": pos.get("direction"),
+                "mode": "paper", "sl": round(entry, 3),
+                "peak_pnl": round(peak, 2), "fp": round(fp, 2),
+                "reason": (f"纸面单：峰值 {peak:+.2f} ≥ {arm:.2f}，"
+                           f"保本线设到开仓价 {entry:.3f}（由程序在浮盈回到 0 时平）")}
+
+    res = send_modify_sl(cfg, ticket, entry)
+    if res.get("busy"):
+        # 终端这一格没排上队（正在连接 / 锁被占）：**不算失败**，也不消耗
+        # 重试节流。算成失败的话，一次 30 秒的连接尝试会顺手吃掉一次重试窗口，
+        # 而这段时间恰好是价格最可能回头的时候。
+        return None
+    pos["be_try_ts"] = now
+    if res.get("ok"):
+        pos["be_ok"] = 1
+        pos["be_sl"] = float(res.get("price") or entry)
+        pos["be_ts"] = now
+        pos.pop("be_err", None)
+        return {"ts": now, "kind": "be", "ticket": ticket,
+                "direction": pos.get("direction"), "mode": "broker",
+                "sl": round(float(pos["be_sl"]), 3),
+                "peak_pnl": round(peak, 2), "fp": round(fp, 2),
+                "reason": (f"峰值浮盈 {peak:+.2f} ≥ {arm:.2f}，"
+                           f"券商端硬止损已抬到开仓价 {float(pos['be_sl']):.3f}")}
+
+    pos["be_err"] = str(res.get("reason") or "改单失败")
+    tries = int(pos.get("be_tries") or 0) + 1
+    pos["be_tries"] = tries
+    # 只记第一次失败：节流期每 20 秒记一行的话，一小时能刷出 180 行噪音，
+    # 面板上真正要看的"这笔发生了什么"会被淹掉。后续失败只更新 be_err，
+    # 面板的「保本未挂上」标记会一直亮着。
+    if tries == 1:
+        return {"ts": now, "kind": "be_fail", "ticket": ticket,
+                "direction": pos.get("direction"),
+                "sl": round(entry, 3), "peak_pnl": round(peak, 2),
+                "error": pos["be_err"],
+                "reason": (f"峰值 {peak:+.2f} 到线，但保本止损没挂上"
+                           f"（{pos['be_err']}）；浮盈回到 0 时由程序代平")}
+    return None
+
+
+def _close_deal_reason(pos: dict) -> int | None:
+    """平仓那一笔 deal 的 reason（MT5 DEAL_REASON_*）。读不到返回 None。
+
+    0/1/2 = 人工在终端/手机/网页点的，3 = EA/API，4 = 止损，5 = 止盈。
+
+    有了它，「仓在终端消失」才分得清是**券商端保本止损打的**，还是人手动
+    平的——两者在账本里都是"没有平仓单"，但一个是规则生效、一个是人为干预，
+    混在一起算期望会把规则的效果冲淡。
+    """
+    try:
+        ticket = int(pos.get("ticket") or 0)
+        if ticket <= 0:
+            return None
+        from live.journal import mt5_call, _mt5 as _conn
+
+        deals = mt5_call(_conn().history_deals_get, position=ticket) or []
+        for d in deals:
+            if int(getattr(d, "entry", 0)) == 1:      # 1 = 平仓成交
+                return int(getattr(d, "reason", -1))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
                fp: float | None = None) -> str:
     """持仓期间的硬止损快查。返回 '' = 没触发。
 
-    **只看 sl_usd 一条**，故意不看止盈门槛、也不看持仓上限：
+    **只看止损这一类线**，故意不看止盈门槛、也不看持仓上限：
       · 止盈门槛一旦到线就该让模型说话，那是 tick() 里 _exit_gate 的活；
       · 持仓上限是分钟级的粗规则，拿 5 秒的节拍去看它是浪费。
+
+    2026-10-29 加的第二条线：**保本止损的本地兜底**（见 _be_local_hit）。
+    券商端挂上了（be_ok）就完全不判；只有改单一直没成功时，浮盈回到 0
+    才由这里提前结束等待、交给下一轮 _exit_gate 去平。
 
     这里是纯读，不下单、不写流水、不调模型。开销就是一次 symbol_info_tick。
     `fp` 允许调用方传入已算好的浮盈（快查循环里峰值更新和止损判定共用一次
     _realized_pnl，不重复算）；不传就自己算。
     """
-    if cfg.sl_usd <= 0:
-        return ""
     if fp is None:
         fp = _realized_pnl(cfg, pos, bid, ask)
-    if fp <= -abs(cfg.sl_usd):
+    if cfg.sl_usd > 0 and fp <= -abs(cfg.sl_usd):
         return f"浮亏 {fp:+.2f} 触及 -{abs(cfg.sl_usd):.2f}"
+    if _be_local_hit(cfg, pos, fp):
+        return f"浮盈 {fp:+.2f} 回到 0（保本线，券商端未挂上，程序代平）"
     return ""
 
 
@@ -5021,14 +5304,19 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
                stop_wait=None, sleeper=None, quote_fn=None) -> bool:
     """等下一轮决策。有仓时把长睡切成快查一格，过线就提前返回。
 
-    快查每格做四件事（一次报价、一次浮盈，全部复用）：
+    快查每格做五件事（一次报价、一次浮盈，全部复用）：
       1. **峰值更新**（_track_peak）：只在峰值被抬高时写一次 state——峰值只增
          不减，一笔持仓真正抬高的次数有限，无条件每格写盘不可接受。
-      2. **止损判定**（_guard_hit）：浮亏过线提前返回。
-      3. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ tp_min_usd 也提前返回。
+      2. **保本止损上抬**（_be_step，2026-10-29）：趋势单峰值首次到
+         be_arm_usd 时把券商端 SL 改到开仓价。只在这一格做是不够的（5 秒的
+         节拍会漏掉一瞬间的峰值），但**只靠 60 秒的决策轮一定漏**——这正是
+         10-29 那笔 +3.63 → −3.11 的形状。挂上之后每格空转。
+      3. **止损判定**（_guard_hit）：浮亏过线提前返回；券商端没挂上保本线时，
+         浮盈回到 0 也在这里提前返回（本地兜底）。
+      4. **tp 穿越唤醒**（cfg.tp_wake）：浮盈首次 ≥ tp_min_usd 也提前返回。
          下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
          参数没变，变的只是模型被问到的延迟（最坏 60 秒 → ≤2 秒）。
-      4. **峰值停滞唤醒**（_stale_hit，2026-10-29）：浮盈摸到高点后停滞
+      5. **峰值停滞唤醒**（_stale_hit，2026-10-29）：浮盈摸到高点后停滞
          stale_sec 秒、且已经掉到 tp×stale_frac 以下，也提前返回一次。
          同样只是"把最坏 60 秒的无人看守缩到一格"，阈值一个字没改。
 
@@ -5077,7 +5365,14 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
         if not q:
             continue
         fp = _realized_pnl(cfg, pos, q[0], q[1])
-        if _track_peak(pos, fp, int(time.time())):
+        peak_up = _track_peak(pos, fp, int(time.time()))
+        # 保本止损（2026-10-29）：峰值刚摸到 3.25 的那一格就把券商端 SL 抬到
+        # 开仓价——等 60 秒那一格再看，价格往往已经回落，止损就没机会抬了。
+        # 和 tick 里同一个 _be_step，挂上过一次之后自动空转（be_ok）。
+        be_row = _be_step(cfg, pos, fp, int(time.time()))
+        if be_row:
+            append_log(be_row, login)
+        if peak_up or be_row:
             # 重读再写：state 里可能还有面板写的其他字段，别拿旧快照整体覆盖。
             # 外部平仓竞态无害：pos 还是旧引用，峰值照记，下一轮 tick()
             # 检测外部平仓时会整体覆盖处理。
@@ -5607,6 +5902,11 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 而不是"模型平得不好"，两者的处理方式完全不同。
         "sl_closes": sum(1 for r in rows
                          if r.get("kind") == "close" and r.get("source") == "sl"),
+        # 保本止损平的笔数（券商端 / 程序代平都算）。和 sl_closes 分开：
+        # 硬止损说明入场方向错了，保本止损说明方向对过但没吃到，两者的
+        # 改法完全相反。攒够样本才谈得上判这条规则值不值。
+        "be_closes": sum(1 for r in rows if r.get("kind") == "close"
+                         and r.get("source") in ("be", "be_local")),
         # 新出场规则的阈值，面板上要能看见，否则用户不知道规则已经变了。
         # 旧 state 里的 cfg 没有这两个字段（那会儿还不存在），
         # 所以缺了就回退到 Cfg 的当前默认值，而不是显示 None。
@@ -5634,6 +5934,11 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "stale_frac": saved_cfg.get("stale_frac", _defaults.stale_frac),
         "stale_reask_sec": saved_cfg.get("stale_reask_sec", _defaults.stale_reask_sec),
         "stale_min_peak": saved_cfg.get("stale_min_peak", _defaults.stale_min_peak),
+        # 保本止损（2026-10-29）。面板必须能看见"这条线开着还是关着、触发线
+        # 是多少"——挂的是券商端的单，页面上不写出来，用户没法判断自己看到的
+        # 持仓到底有没有保护。持仓行另外会读 position.be_ok / be_sl 显示实际状态。
+        "be_at_entry": bool(saved_cfg.get("be_at_entry", _defaults.be_at_entry)),
+        "be_arm_usd": saved_cfg.get("be_arm_usd", _defaults.be_arm_usd),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：
