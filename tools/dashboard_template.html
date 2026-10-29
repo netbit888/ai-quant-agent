@@ -1420,7 +1420,7 @@
     <details class="at-rules">
       <summary>完整规则与信息边界</summary>
       <div class="at-rules-body">
-        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 30 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
+        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 60 秒、同向重进 180 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
         · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
         <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 峰值停滞唤醒 → 止盈门槛，顺序写死。
         浮盈 ≥ 止盈门槛时才会问模型要不要落袋；峰值停滞（默认 3 分钟没再抬高、且浮盈已掉到
@@ -2931,10 +2931,10 @@ function updateModeHint() {
   if (wrap) wrap.style.display = atAssistMode() ? 'flex' : 'none';
   const iv = atIntervalSec();
   const calls = Math.round(3600 / iv);
-  // 点差成本估算：平仓后冷却 30 秒 ⇒ 最好情况下每小时 ~120 笔往返。
+  // 点差成本估算：平仓后冷却 60 秒 ⇒ 最好情况下每小时 ~60 笔往返。
   // 这是**上限**不是预期——模型可以 act=false 跳过，实际笔数通常远低于此；
   // 经验库在的时候尤其如此。列上限是为了把"最坏要付多少点差"摆上台面。
-  const trips = Math.min(calls, 120);
+  const trips = Math.min(calls, 60);
   const perTrip = atSpreadCostUsd();
   if (atAssistMode()) {
     // 辅助模式必须写清两件事：等的是你，以及**硬止损不等你**。
@@ -3053,9 +3053,9 @@ async function startAutoTrade() {
           + `每小时约 ${calls} 次模型调用。`
         : (live
             ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
-              + `每小时约 ${calls} 次模型调用；平仓后冷却 30 秒，往返上限 120 笔/小时`
+              + `每小时约 ${calls} 次模型调用；平仓后冷却 60 秒、同向重进 180 秒，往返上限 60 笔/小时`
               + `（模型可跳过，实际通常更少），`
-              + `最坏点差约 ${perTrip == null ? '未知' : fmt(120 * perTrip, 2) + ' USD'}。`
+              + `最坏点差约 ${perTrip == null ? '未知' : fmt(60 * perTrip, 2) + ' USD'}。`
             : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
               + `每小时约 ${calls} 次模型调用。`),
       cost: assist ? (paper ? '辅助演练 + 模型调用' : '弹窗确认 + 真实下单')

@@ -49,14 +49,20 @@ def _llm():
 
 @dataclass
 class Cfg:
-    """运行参数。规则类的东西（单笔、30 秒冷却、不挂 SL/TP）不在这里。"""
+    """运行参数。规则类的东西（单笔、平仓冷却、不挂 SL/TP）不在这里。"""
 
     symbol: str = "XAUUSDm"
     lots: float = 0.01
     # 决策节奏。用户 10-26 明确要求默认 60 秒：3 秒那个档位一轮决策约 2.6 秒，
-    # 等于不间断连打模型，一天上万次调用，而且平仓后 30 秒冷却根本插不进去。
+    # 等于不间断连打模型，一天上万次调用，而且平仓后冷却根本插不进去。
     interval_sec: int = 60
-    cooldown_sec: int = 30
+    # 平仓冷却按方向分两档（2026-10-29 改）。原来是单一 30 秒，正好落在
+    # 「冷却+1 秒」的唤醒点上，等于每笔平仓后把模型推回同一个方向问一次。
+    # 10-22 起 331 笔里「同向 ≤60 秒重进」102 笔、均值 -0.50 USD/笔
+    # （整体 -0.22，t=-3.6）——最大且最差的桶；同向 61-300 秒桶均值 -0.09
+    # （近中性），所以同向推长到 3 分钟不掉钱。反向只防连环单，60 秒够。
+    cooldown_sec: int = 60          # 反向（以及方向未定）的冷却
+    cooldown_same_sec: int = 180    # 同向重进的冷却
     magic: int = 20261022
     # 用户 10-26 明确要求默认真实做单。**面板启动前仍要过一次确认弹窗**，
     # 且纸面/真实二选一始终留在界面上——默认值只是省一次点击，不是免确认。
@@ -323,6 +329,9 @@ def _empty_state() -> dict:
         "last_open_ts": None,
         "last_close_ts": None,
         "last_close_pnl": None,
+        # 刚平掉那笔的方向：同向重进要等更久（见 Cfg.cooldown_same_sec）。
+        # 老状态没有这个键 → 按「方向未知」处理，回落短的冷却，不会误拦。
+        "last_close_dir": None,
         "trades": 0,       # 已开仓笔数
         "closed": 0,       # 已平仓笔数
         "wins": 0,
@@ -391,6 +400,12 @@ def cfg_from_state(login: int | str | None = None) -> Cfg | None:
     if not isinstance(raw, dict):
         return None
     clean = {k: v for k, v in raw.items() if k in Cfg.__dataclass_fields__}
+    # 2026-10-29 冷却改成按方向分档，旧存档里只有 cooldown_sec。存档里
+    # **没有 cooldown_same_sec 且 cooldown_sec 恰好是老的默认值 30** → 当成
+    # 「没配过」，丢掉它让新默认（反向 60 / 同向 180）生效。用户自己配过的
+    # 其它值（比如 120）原样保留，不替人做决定。
+    if "cooldown_same_sec" not in clean and int(clean.get("cooldown_sec") or 0) == 30:
+        clean.pop("cooldown_sec", None)
     try:
         return Cfg(**clean)
     except (TypeError, ValueError):
@@ -3329,7 +3344,26 @@ def symbol_options() -> list[dict]:
     return out
 
 
-def can_open(state: dict, now: int, has_position: bool, cfg: Cfg) -> tuple[bool, str]:
+def cooldown_left(state: dict, now: int, direction: int | None, cfg: Cfg) -> int:
+    """平仓冷却还剩几秒。同向用 cooldown_same_sec，反向/方向未定用 cooldown_sec。
+
+    方向为 None 时按**短**的算：这道判定在问模型之前也要跑一次，那会儿还
+    不知道模型要做哪个方向，它只负责省掉冷却期内的无效 API 调用。同向那
+    180 秒由开仓前、拿到 direction 之后的第二次判定兜住（见 tick 里
+    send_open 之前那一段）。
+    """
+    last = state.get("last_close_ts")
+    if not last:
+        return 0
+    cd = int(cfg.cooldown_sec)
+    same = int(cfg.cooldown_same_sec or 0)
+    if direction and same > cd and int(state.get("last_close_dir") or 0) == int(direction):
+        cd = same
+    return max(0, cd - (now - int(last)))
+
+
+def can_open(state: dict, now: int, has_position: bool, cfg: Cfg,
+             direction: int | None = None) -> tuple[bool, str]:
     if state.get("stop_reason"):
         return False, f"已停止：{state['stop_reason']}"
     if has_position:
@@ -3341,11 +3375,11 @@ def can_open(state: dict, now: int, has_position: bool, cfg: Cfg) -> tuple[bool,
     if cfg.max_loss_usd and float(state.get("pnl") or 0.0) <= -abs(cfg.max_loss_usd):
         return False, f"累计亏损已达 {cfg.max_loss_usd:.2f} USD 上限"
 
-    last_close = state.get("last_close_ts")
-    if last_close:
-        left = cfg.cooldown_sec - (now - int(last_close))
-        if left > 0:
-            return False, f"平仓后冷却中，还需 {left} 秒"
+    left = cooldown_left(state, now, direction, cfg)
+    if left > 0:
+        same_dir = bool(direction) and (int(state.get("last_close_dir") or 0)
+                                        == int(direction))
+        return False, f"{'同向' if same_dir else ''}平仓后冷却中，还需 {left} 秒"
 
     last_open = state.get("last_open_ts")
     if last_open and now - int(last_open) < MIN_OPEN_GAP_SEC:
@@ -3641,6 +3675,9 @@ def _tick_body(cfg: Cfg, login, now: int,
         state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
         state["last_close_ts"] = now
         state["last_close_pnl"] = round(float(pnl), 2)
+        # 同向重进的冷却靠它判（见 cooldown_left）。平仓时这笔的方向还拿得到，
+        # 之后 position 就被清了——所以必须在这一行之前记下来。
+        state["last_close_dir"] = pos.get("direction")
         state["position"] = None
         row = {
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -3862,6 +3899,9 @@ def _tick_body(cfg: Cfg, login, now: int,
         state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
         state["last_close_ts"] = now
         state["last_close_pnl"] = round(float(pnl), 2)
+        # 同向重进的冷却靠它判（见 cooldown_left）。平仓时这笔的方向还拿得到，
+        # 之后 position 就被清了——所以必须在这一行之前记下来。
+        state["last_close_dir"] = pos.get("direction")
         state["position"] = None
         row = {
             "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -4106,7 +4146,7 @@ def _tick_body(cfg: Cfg, login, now: int,
                        "reason": "已同意，但读不到持仓状态，无法确认没有叠仓，信号作废"}
                 return _finish(state, row, login, ts=now)
             has_pos = bool(ps)
-        ok2, why2 = can_open(state, int(time.time()), has_pos, cfg)
+        ok2, why2 = can_open(state, int(time.time()), has_pos, cfg, direction=direction)
         if not ok2:
             row = {"ts": now, "kind": "skip", "p_up": p_up,
                    "direction": direction, "prog_dir": prog_dir,
@@ -4116,6 +4156,21 @@ def _tick_body(cfg: Cfg, login, now: int,
             return _finish(state, row, login, ts=now)
         exec_by = "human"
         bid, ask = float(ans["bid"] or bid), float(ans["ask"] or ask)
+
+    # 同向重进：方向只有拿到 decision 之后才确定，所以按方向分档的冷却必须
+    # 在这里再判一次——上面 3943 那次在问模型之前（不知道方向），4143 那次只在
+    # 辅助模式里跑。放在 send_open 之前 = 扣钱之前。assist 模式下人手点了最多
+    # 90 秒，`now` 是这一轮开始的时刻，已经旧了，所以用真实时钟。
+    left_dir = cooldown_left(state, int(time.time()) if cfg.assist else int(now),
+                             direction, cfg)
+    if left_dir > 0:
+        same_dir = int(state.get("last_close_dir") or 0) == int(direction)
+        row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
+               "prog_dir": prog_dir, "agree": agree, "feat": feat,
+               "veto": "same_dir_cooldown" if same_dir else "cooldown",
+               "reason": f"{'同向' if same_dir else ''}平仓后冷却中，还需 "
+                         f"{left_dir} 秒，这一笔不做"}
+        return _finish(state, row, login, ts=now)
 
     res = send_open(cfg, direction)
     if not res.get("ok"):
@@ -4346,6 +4401,12 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         )
     if cfg.lots <= 0:
         issues.append("手数必须大于 0")
+    # 同向冷却比反向还短 = 这台机器专门鼓励同向重进，与它存在的理由相反。
+    # 相等是允许的（等于回到单一冷却，行为可控）。
+    if cfg.cooldown_same_sec < cfg.cooldown_sec:
+        issues.append(
+            f"同向冷却 {cfg.cooldown_same_sec} 秒不能短于反向冷却 {cfg.cooldown_sec} 秒"
+        )
     # 冷却不再有「必须 <60 秒」的上限——「平仓后 1 分钟内必须重新开仓」的硬需求
     # 已删除（它和复盘体系的报复单标记直接矛盾，且是输出量要求不是质量要求）。
     # 冷却只是防连环单的下限，用户想配 2 分钟冷却应该允许。
@@ -4437,10 +4498,14 @@ def validate_cfg(cfg: Cfg) -> list[str]:
 def next_wait_sec(row: dict, cfg: Cfg) -> float:
     """这一轮跑完，下一次决策该等多久。
 
-    平仓后**在冷却结束点提前唤醒一次**（cooldown+1 秒，默认约 31 秒）：
+    平仓后**在冷却结束点提前唤醒一次**（cooldown+1 秒）：
     给模型一次决策机会——刚平仓时的市场状态往往紧接着就有结构变化，
     早看一眼不亏。但**开不开是模型的事**：教训库的「报复单」教训和
     提示词里的【刚平仓提醒】会约束它，act=false 是正常输出。
+
+    2026-10-29 起 cooldown_sec 默认 60 秒 = 决策周期，`cooldown+1` 被夹到
+    interval_sec，这一档实际等于按周期唤醒；同向那 180 秒由 can_open 拦，
+    不靠唤醒节拍——31 秒唤醒顺手把人推回同一方向的副作用就此消失。
 
     以前这里的理由是「1 分钟内必须重新开仓」——那条硬需求已删
     （和复盘体系的报复单标记直接矛盾）。唤醒保留，语义从「必须快开」
@@ -5048,7 +5113,7 @@ def run(cfg: Cfg, login=None) -> None:
     if cfg.assist:
         mode = f"AI 辅助（{mode}）"
     print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策 | "
-          f"平仓后 {cfg.cooldown_sec} 秒冷却 | 不挂 SL/TP | {mode}")
+          f"平仓后冷却 {cfg.cooldown_sec} 秒（同向 {cfg.cooldown_same_sec} 秒）| 不挂 SL/TP | {mode}")
     if cfg.assist:
         print("⚠ 辅助模式在命令行里没有面板可点：所有信号都会超时 → "
               "入场一律不做、出场按模型决定平。要人点请用面板。")
@@ -5145,6 +5210,7 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
             state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
             state["last_close_ts"] = now
             state["last_close_pnl"] = round(float(pnl), 2)
+            state["last_close_dir"] = pos.get("direction")
             state["position"] = None
             append_log({
                 "ts": now, "kind": "close", "ticket": pos.get("ticket"),
@@ -5746,7 +5812,10 @@ def main() -> None:
     parser.add_argument("--lots", type=float, default=0.01)
     parser.add_argument("--interval", type=int, default=Cfg.interval_sec,
                         help="决策间隔秒数（最小 3，模型单次约 2.6 秒）")
-    parser.add_argument("--cooldown", type=int, default=30, help="平仓后冷却秒数")
+    parser.add_argument("--cooldown", type=int, default=Cfg.cooldown_sec,
+                        help="平仓后冷却秒数（反向；也是方向未定时的兜底）")
+    parser.add_argument("--cooldown-same", type=int, default=Cfg.cooldown_same_sec,
+                        help="平仓后同向重进的冷却秒数（应大于等于 --cooldown）")
     parser.add_argument("--max-trades", type=int, default=0, help="开仓笔数上限，0=不限")
     parser.add_argument("--max-loss", type=float, default=0.0, help="累计亏损上限 USD，0=不限")
     parser.add_argument("--max-minutes", type=int, default=0, help="运行时长上限分钟，0=不限")
@@ -5767,7 +5836,8 @@ def main() -> None:
 
     cfg = Cfg(
         symbol=args.symbol, lots=args.lots, interval_sec=args.interval,
-        cooldown_sec=args.cooldown, dry_run=args.paper,
+        cooldown_sec=args.cooldown, cooldown_same_sec=args.cooldown_same,
+        dry_run=args.paper,
         max_trades=args.max_trades, max_loss_usd=args.max_loss,
         max_minutes=args.max_minutes,
         assist=args.assist, assist_entry_wait_sec=args.assist_wait,

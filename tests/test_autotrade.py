@@ -683,7 +683,9 @@ class TestGuardFastCheck(TempLedger):
 
 class TestCanOpen(unittest.TestCase):
     def setUp(self):
-        self.cfg = autotrade.Cfg()
+        # 冷却按方向分档（2026-10-29）：反向 60 秒、同向 180 秒。写死在用例里，
+        # 以后改默认值不会让这批断言悄悄换含义。
+        self.cfg = autotrade.Cfg(cooldown_sec=60, cooldown_same_sec=180)
 
     def test_fresh_state_can_open(self):
         ok, why = autotrade.can_open(autotrade._empty_state(), NOW, False, self.cfg)
@@ -695,18 +697,53 @@ class TestCanOpen(unittest.TestCase):
         self.assertIn("已有持仓", why)
 
     def test_cooldown_after_close(self):
+        """方向未定（问模型之前那次）按短的这档算，不能一上来就锁 3 分钟。"""
         state = autotrade._empty_state()
         state["last_close_ts"] = NOW - 10
         ok, why = autotrade.can_open(state, NOW, False, self.cfg)
         self.assertFalse(ok)
         self.assertIn("冷却", why)
-        self.assertIn("20 秒", why)
+        self.assertIn("50 秒", why)
 
     def test_cooldown_expired(self):
         state = autotrade._empty_state()
-        state["last_close_ts"] = NOW - 31
+        state["last_close_ts"] = NOW - 61
         ok, _ = autotrade.can_open(state, NOW, False, self.cfg)
         self.assertTrue(ok)
+
+    def test_same_dir_still_blocked_after_short_cooldown(self):
+        """反向的 60 秒走完了，同向那 180 秒还在——这正是要拦的那一半。"""
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 61
+        state["last_close_dir"] = 1
+        state["last_open_ts"] = NOW - 200
+        ok, why = autotrade.can_open(state, NOW, False, self.cfg, direction=1)
+        self.assertFalse(ok)
+        self.assertIn("同向", why)
+        self.assertIn("119 秒", why)
+
+    def test_same_dir_reopen_after_long_cooldown(self):
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 181
+        state["last_close_dir"] = 1
+        ok, why = autotrade.can_open(state, NOW, False, self.cfg, direction=1)
+        self.assertTrue(ok, why)
+
+    def test_unknown_direction_uses_short_cooldown(self):
+        """问模型之前拿不到方向 → 按短的算，否则反向单会被同向规则一起锁住。"""
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 61
+        state["last_close_dir"] = 1
+        ok, why = autotrade.can_open(state, NOW, False, self.cfg)
+        self.assertTrue(ok, why)
+
+    def test_old_state_without_last_close_dir_uses_short_cooldown(self):
+        """老状态没有 last_close_dir：当方向未知，回落短的冷却，不能误拦。"""
+        state = autotrade._empty_state()
+        state.pop("last_close_dir", None)
+        state["last_close_ts"] = NOW - 61
+        ok, why = autotrade.can_open(state, NOW, False, self.cfg, direction=1)
+        self.assertTrue(ok, why)
 
     def test_same_tick_double_open_guard(self):
         """只防同一轮重复开仓，不是交易节奏。用 60 秒当守卫会把自己锁死。"""
@@ -717,12 +754,13 @@ class TestCanOpen(unittest.TestCase):
         self.assertIn("距上次开仓", why)
 
     def test_reopen_allowed_within_one_minute_after_close(self):
-        """冷却结束后可以重开：冷却 30 秒 + 3 秒兜底守卫都不该挡住
-        31 秒后的重开。要不要开由模型定（教训库 + 刚平仓提醒管着）。"""
+        """反向重开只要走完短的那档：反向只防连环单，不是要拦的那一半。
+        同向那 180 秒由 test_same_dir_still_blocked_after_short_cooldown 锁住。"""
         state = autotrade._empty_state()
-        state["last_close_ts"] = NOW - 31
+        state["last_close_ts"] = NOW - 61
+        state["last_close_dir"] = 1
         state["last_open_ts"] = NOW - 90   # 上一笔是 90 秒前开的
-        ok, why = autotrade.can_open(state, NOW, False, self.cfg)
+        ok, why = autotrade.can_open(state, NOW, False, self.cfg, direction=-1)
         self.assertTrue(ok, why)
 
     def test_stop_reason_blocks_everything(self):
@@ -800,6 +838,48 @@ class TestTick(TempLedger):
         self.assertEqual(row["kind"], "skip")
         m_entry.assert_not_called()
         m_open.assert_not_called()
+
+    def test_same_dir_reentry_blocked_before_send_open(self):
+        """同向重进：预闸门（那会儿不知道方向）放过了，开仓前这道必须拦住。
+
+        冷却反向 30 秒在 self.cfg 里已经走完（61 秒），但同向默认 180 秒还在。
+        这是 10-29 那 4 笔「平仓 31 秒后同向再进、4/4 止损」的直接防线。
+        """
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 61
+        state["last_close_dir"] = 1
+        autotrade.save_state(state)
+
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"p_up": 0.7, "reason": "突破",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open") as m_open:
+            row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                                 rows=bars_up(), positions=[])
+
+        self.assertEqual(row["kind"], "skip")
+        self.assertEqual(row["veto"], "same_dir_cooldown")
+        self.assertIn("同向", row["reason"])
+        m_open.assert_not_called()
+
+    def test_reverse_reentry_not_blocked_before_send_open(self):
+        """反向重进不受同向那 180 秒影响——否则等于把冷却偷偷改回单一档。"""
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 61
+        state["last_close_dir"] = 1
+        autotrade.save_state(state)
+
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"p_up": 0.3, "reason": "破位",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open",
+                               return_value={"ok": True, "price": 3999.0,
+                                             "order": 557}):
+            row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                                 rows=bars_down(), positions=[])
+
+        self.assertEqual(row["kind"], "open")
+        self.assertEqual(row["direction"], -1)
 
     def test_blocked_by_existing_position_does_not_call_llm(self):
         with mock.patch.object(autotrade, "ask_entry") as m_entry:
@@ -1252,6 +1332,31 @@ class TestWorker(TempLedger):
         restored = autotrade.cfg_from_state()
         self.assertIsNotNone(restored)
         self.assertFalse(restored.dry_run)
+
+    def test_old_saved_cfg_migrates_to_asymmetric_cooldown(self):
+        """旧存档里只有 cooldown_sec=30（那是老默认值，不是人的选择）。
+
+        还原时必须换成新的两档默认，否则重启一次冷却就悄悄退回单向 30 秒。
+        """
+        state = autotrade._empty_state()
+        state["cfg"] = {"symbol": "XAUUSDm", "cooldown_sec": 30}
+        autotrade.save_state(state)
+
+        restored = autotrade.cfg_from_state()
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.cooldown_sec, 60)
+        self.assertEqual(restored.cooldown_same_sec, 180)
+
+    def test_custom_saved_cooldown_is_kept(self):
+        """人自己配过的值不能替人改：120 保留，同向补默认 180。"""
+        state = autotrade._empty_state()
+        state["cfg"] = {"symbol": "XAUUSDm", "cooldown_sec": 120}
+        autotrade.save_state(state)
+
+        restored = autotrade.cfg_from_state()
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.cooldown_sec, 120)
+        self.assertEqual(restored.cooldown_same_sec, 180)
 
 
 # ------------------------------------------------------------------ 信息边界
