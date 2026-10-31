@@ -1036,6 +1036,22 @@
   }
   .warn-strip b { color: #f6d78a; }
 
+  /* 三个回测侧视图（实时迭代 / 策略评估 / 策略库）的数据链早已停更，
+     内容冻结在 2026-10-21。这条提示条的唯一作用是让"打开就是 10-19 的
+     回测结论"不再被误读成当前实盘数据——所以用中性色，不用 warn-strip
+     的琥珀色，那会让人以为实盘出了状况。 */
+  .arch-strip {
+    display: flex; align-items: flex-start; gap: 9px; margin-bottom: 12px;
+    padding: 9px 13px; border-radius: var(--r-md); font-size: var(--fs-2); line-height: 1.55;
+    color: var(--muted); background: rgba(255,255,255,.025);
+    border: 1px dashed var(--border-hi);
+  }
+  .arch-strip b {
+    flex: none; font-size: var(--fs-1); font-weight: 700; letter-spacing: .3px;
+    color: var(--muted); background: rgba(255,255,255,.06);
+    border: 1px solid var(--border-hi); border-radius: var(--r-sm); padding: 2px 7px;
+  }
+
   .verdict-chip { font-size: var(--fs-1); font-weight: 700; padding: 3px 9px; border-radius: var(--r-pill); }
   .vc-better { background: rgba(46,204,113,.18); color: var(--good-lit); }
   .vc-worse  { background: rgba(255,77,79,.18); color: var(--bad-lit); }
@@ -2515,6 +2531,10 @@
 </section>
 
 <section id="view-iter" class="hidden">
+  <!-- 这三条 .arch-strip 的日期是写死的：下面的数据源（data/current_state.json、
+       data/evaluations/）只由旧的回测流水线写，实盘 AI 交易员不碰。真跑了新的
+       aqa.py evaluate 才需要回来改这三个日期。 -->
+  <div class="arch-strip"><b>历史存档</b><span>这里的轮次来自旧的「策略生成 → 回测 → 迭代」流水线，最后一次运行是 2026-10-21。实盘 AI 交易员不走这条路径，所以下面这些数字不会随实盘变化。</span></div>
   <div class="kpis">
     <div class="kpi"><div class="k">总净盈利</div><div class="v mono" id="kpiNet">-</div><div class="s">全部轮次累计</div></div>
     <div class="kpi"><div class="k">平均盈利因子</div><div class="v mono" id="kpiPf">-</div><div class="s">&gt; 1.2 才有意义</div></div>
@@ -2554,6 +2574,7 @@
 </section>
 
 <section id="view-eval" class="hidden">
+  <div class="arch-strip"><b>历史存档</b><span>下面是你 2026-10-19 跑的那批回测结论（记录止于 10-21），不是当前实盘 AI 交易员的成绩。Gate 2 的 PASS/FAIL 只对当时的策略文件有效。</span></div>
   <div class="card">
     <h2>选择评估结果</h2>
     <select id="evalSelect"><option value="">加载中…</option></select>
@@ -2603,6 +2624,7 @@
 </section>
 
 <section id="view-strat" class="hidden">
+  <div class="arch-strip"><b>历史存档</b><span>列出 strategies/ 下的旧策略与其回测评估记录，最后评估于 2026-10-21。实盘 AI 交易员不读这些文件——它看的是实时行情和自己的决策记录。</span></div>
   <div class="card">
     <h2>策略库（strategies/）</h2>
     <table>
