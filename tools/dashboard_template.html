@@ -111,7 +111,7 @@
 
   header {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 15px 20px;
+    padding: 8px 16px;
     background: linear-gradient(180deg, rgba(22,32,45,.9), rgba(13,19,27,.9));
     border: 1px solid var(--border);
     border-radius: var(--r-lg);
@@ -145,11 +145,13 @@
   }
   .spacer { flex: 1; }
 
-  .tabs { display: flex; gap: var(--sp1); margin: 10px 0 10px; padding: var(--sp1);
-    background: rgba(255,255,255,.02); border: 1px solid var(--border);
+  /* 在标题条里：不要自己的底色和边框——嵌在带渐变的 header 里再套一层框，
+     会变成"卡片里的卡片"。激活态那颗蓝底足够说明当前在哪。 */
+  .tabs { display: flex; gap: var(--sp1); margin: 0 0 0 var(--sp2); padding: 2px;
+    background: transparent; border: 1px solid transparent;
     border-radius: var(--r1); width: fit-content; }
   .tab {
-    padding: 7px 16px; border-radius: var(--r-md); cursor: pointer; font-size: var(--fs-4);
+    padding: 5px 14px; border-radius: var(--r-md); cursor: pointer; font-size: var(--fs-4);
     background: transparent; color: var(--muted); border: 0;
     transition: .18s ease; font-weight: 500;
   }
@@ -165,12 +167,12 @@
      状态带（sticky）与账户条刻意留在 #view-live 顶层——包进 pane 会改变
      sticky 的包含块，吸附立刻失效。pane 只装普通卡片。 */
   .live-subtabs {
-    display: flex; gap: var(--sp1); margin: 0 0 var(--sp2); padding: var(--sp1);
+    display: flex; gap: var(--sp1); margin: 0; padding: 3px;
     background: rgba(255,255,255,.02); border: 1px solid var(--border);
     border-radius: var(--r1); width: fit-content;
   }
   .live-sub {
-    padding: 6px 14px; border-radius: var(--r-md); cursor: pointer;
+    padding: 4px 12px; border-radius: var(--r-md); cursor: pointer;
     font-size: var(--fs-3); background: transparent; color: var(--muted);
     border: 0; transition: .18s ease; font-weight: 500;
   }
@@ -211,7 +213,7 @@
   .ring {
     position: relative; overflow: hidden; display: flex; flex-direction: column;
     background: var(--ring); border: 1px solid var(--ring-hi);
-    border-radius: var(--r-md); padding: var(--sp4);
+    border-radius: var(--r-md); padding: var(--sp3) var(--sp4);
   }
   /* 否决留痕：左边缘 3px 蓝条。只在「有程序建议」时亮——它是事后按
      「听了 / 没听」分桶算期望的唯一依据，不能只藏在 title 里。 */
@@ -221,12 +223,20 @@
   }
   .ring.veto::before { background: var(--veto); }
   .ring-head { display: flex; align-items: center; gap: var(--sp2);
-               margin-bottom: var(--sp3); }
-  .ring-head .t { font-size: var(--fs-2); color: var(--muted); font-weight: 600; }
+               margin-bottom: var(--sp2); min-width: 0; }
+  .ring-head .t { font-size: var(--fs-2); color: var(--muted); font-weight: 600;
+                  white-space: nowrap; }
   .ring-head .ts {
-    margin-left: auto; font-size: var(--fs-1); color: var(--dim);
+    margin-left: var(--sp3); font-size: var(--fs-1); color: var(--dim);
     font-family: var(--mono); white-space: nowrap;
   }
+  /* act / 闸门 / 待复盘：从环底那一行并到这里。三小段都不换行，
+     窄一点就整体收窄（不折行，折行会顶高环头）。 */
+  .ring-meta {
+    display: flex; gap: var(--sp3); margin-left: auto; min-width: 0;
+    font-size: var(--fs-1); color: var(--dim); white-space: nowrap; overflow: hidden;
+  }
+  .ring-meta b { color: var(--muted); font-weight: 500; font-family: var(--mono); }
   .ring-tag {
     font-size: var(--fs-1); color: var(--info-lit);
     border: 1px solid rgba(74,158,255,.5); background: rgba(74,158,255,.1);
@@ -324,7 +334,7 @@
   .ctx-lb { font-size: var(--fs-1); color: var(--dim); margin-bottom: 4px; }
   .hist {
     display: flex; align-items: center; justify-content: space-between;
-    height: 36px; position: relative; padding: 0 2px;
+    height: 30px; position: relative; padding: 0 2px;
     border-bottom: 1px solid var(--border);
   }
   .hist::before {
@@ -342,20 +352,14 @@
   .ctx-feats div { display: flex; gap: 5px; align-items: baseline; font-size: var(--fs-1); }
   .ctx-feats .k { color: var(--dim); }
   .ctx-feats b { font-family: var(--mono); color: var(--muted); font-weight: 600; }
-  .ring-foot {
-    display: flex; gap: var(--sp3); flex-wrap: wrap;
-    padding-top: var(--sp2); border-top: 1px solid var(--ring-hi);
-    font-size: var(--fs-1); color: var(--dim);
-  }
-  .ring-foot b { color: var(--muted); font-weight: 500; font-family: var(--mono); }
 
   /* ---- 持仓面板 ---- */
   .pos-panel {
     display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--r-md); padding: var(--sp4);
+    border-radius: var(--r-md); padding: var(--sp3) var(--sp4);
   }
-  .pos-head { display: flex; align-items: baseline; gap: var(--sp2); margin-bottom: var(--sp3); }
+  .pos-head { display: flex; align-items: baseline; gap: var(--sp2); margin-bottom: var(--sp2); }
   .pos-side { font-size: var(--fs-8); font-weight: 700; line-height: 1.1; }
   .pos-side.long { color: var(--up); }
   .pos-side.short { color: var(--down); }
@@ -366,9 +370,19 @@
     white-space: nowrap;
   }
   .pos-plan.trend { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
+  /* 四个数字排一行（原来 2×2 要两行 78px）。38% 栏宽下四列各约 110px，
+     标签 11px + 等宽数值够放；省下来的 40px 直接给决策流。 */
   .pos-rows {
-    display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp1) var(--sp3);
+    display: flex; justify-content: space-between; gap: var(--sp3);
     margin-bottom: var(--sp2);
+  }
+  .pos-rows .prow { flex: 0 1 auto; }
+  .pos-rows .prow .v { white-space: nowrap; }
+  /* 1200 以下 38% 栏宽撑不开四列：「当前浮盈」会折成两行、数字掉到第二行。
+     这种宽度本来就装不下一页，退回 2×2 反而清楚。 */
+  @media (max-width: 1199px) {
+    .pos-rows { display: grid; grid-template-columns: 1fr 1fr;
+                gap: var(--sp1) var(--sp3); }
   }
   .prow { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .prow .k { font-size: var(--fs-1); color: var(--dim); }
@@ -381,11 +395,11 @@
   /* 浮盈刻度尺：保本线 / 止盈线 / 当前 / 峰值画在同一根尺上，
      「离落袋还有多远」不用算。刻线位置全部由数值算出，不写死百分比。 */
   .ruler { margin-bottom: var(--sp2); }
-  .ruler-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .ruler-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
   .ruler-top .k { font-size: var(--fs-1); color: var(--dim); }
   .ruler-top .v { font-family: var(--mono); font-size: var(--fs-7); font-weight: 700; }
   .r-track {
-    position: relative; height: 26px; background: var(--bg2);
+    position: relative; height: 22px; background: var(--bg2);
     border: 1px solid var(--border); border-radius: var(--r-sm);
   }
   .r-track .end {
@@ -420,7 +434,7 @@
      三态颜色不能混——挂失败那段时间只有 5 秒快查在兜，用户必须知道。 */
   .be-badge {
     display: flex; align-items: center; gap: var(--sp2); font-size: var(--fs-3);
-    border-radius: var(--r-sm); padding: 5px var(--sp3);
+    border-radius: var(--r-sm); padding: 3px var(--sp3);
     margin-bottom: var(--sp2); white-space: nowrap;
   }
   .be-badge .dot {
@@ -451,7 +465,7 @@
                gap: var(--sp1) var(--sp2); }
   .gate-led {
     display: flex; align-items: center; gap: 6px; font-size: var(--fs-1);
-    color: var(--muted); padding: 4px 7px; border-radius: var(--r-xs);
+    color: var(--muted); padding: 3px 7px; border-radius: var(--r-xs);
     background: var(--bg2); border: 1px solid transparent;
     transition: color .15s, border-color .15s, background .15s;
     min-width: 0;
@@ -491,14 +505,21 @@
      原来 11 列里「来源 / 开仓理由 / 平仓理由 / 详情」占了 4 列，1280 宽下
      必须横向滚才看得到盈亏。现在一条理由列（最多两行，各自带 title 全文）。 */
   .stream {
-    margin-top: var(--sp3); padding-top: var(--sp3);
+    margin-top: var(--sp2); padding-top: var(--sp2);
     border-top: 1px solid var(--border);
     display: flex; flex-direction: column;
-    flex: 1 1 auto; min-height: 88px;
+    flex: 1 1 auto;
+    /* 真·下限：表头 22 + 三行（40/24 混排）+ 页脚 24 ≈ 168。
+       原来是 88px，屏幕一矮就被压成 56px——只剩表头加半行，等于没有。
+       空间不够时宁可让整页滚，也不把这个区压成一条缝。 */
+    min-height: 168px;
   }
   /* 卡片本身变成 flex 列，max-height 由 fitDesk() 按实际可用高度写内联值。
      grid 不参与收缩：决策环/持仓面板压扁就不可读了，宁可让页面滚。 */
-  #live-desk > .card.l1 { display: flex; flex-direction: column; }
+  #live-desk > .card.l1 {
+    display: flex; flex-direction: column;
+    padding: var(--sp3) var(--sp4) var(--sp3); margin-top: var(--sp2);
+  }
   #live-desk .at-grid { flex: none; }
   /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
      （表头 22px + 过滤条），决策流因此少显示整整一行。 */
@@ -515,7 +536,8 @@
     background: repeating-linear-gradient(90deg, var(--border-hi) 0 6px, transparent 6px 11px);
   }
   .stream-foot b { color: var(--muted); font-family: var(--mono); font-weight: 600; }
-  .stream-foot .btn-ghost { margin: 0; padding: 1px 8px; font-size: var(--fs-1); }
+  .stream-foot .btn-ghost { margin: 0; padding: 0 8px; font-size: var(--fs-1);
+                            line-height: 1.5; min-height: 0; }
   /* 只给屏幕阅读器/JS 用的复选框：不占位、不可见，但仍然可被 .checked 读到 */
   .sr-only {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -528,19 +550,19 @@
      窄窗口下账户条还会折行，任何 calc() 常量都会算错）。 */
   .stream-body {
     overflow-y: auto; overflow-x: hidden;
-    flex: 1 1 auto; min-height: 56px; max-height: none;
+    flex: 1 1 auto; min-height: 0; max-height: none;
     /* 底边淡出：滚动区最后一行常被切一半，看着像布局坏了。淡一下既是遮丑，
        也是「下面还有」的信号。（mask 里用黑色不等于渲染成黑色，只是透明度通道） */
     -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,1) calc(100% - 12px), rgba(0,0,0,0) 100%);
     mask-image: linear-gradient(180deg, rgba(0,0,0,1) calc(100% - 12px), rgba(0,0,0,0) 100%);
   }
   .stream table { font-size: var(--fs-3); }
-  .stream th, .stream td { padding: 4px var(--sp2); }
+  .stream th, .stream td { padding: 2px var(--sp2); }
   .stream th:first-child, .stream td:first-child { padding-left: 2px; }
   /* .tl = 文本列左对齐。原来是 .stream 专属，结果设置舱那张闸门表的
      「作用」一列整段右对齐，长句子读起来眼睛要倒着走。提成全局工具类。 */
   td.tl, th.tl { text-align: left; }
-  .stream .why-cell { max-width: 520px; min-width: 200px; white-space: normal; }
+  .stream .why-cell { max-width: 620px; min-width: 200px; white-space: normal; }
   .stream .why-out { color: var(--dim); }
   .act-badge {
     display: inline-block; font-size: var(--fs-1); padding: 0 6px;
@@ -727,8 +749,12 @@
     overflow: hidden; white-space: normal; word-break: break-word;
   }
   /* 决策流里一行只留两行理由：这条表是用来"扫"的，不是用来读的；
-     全文在 title 和「时刻」上的详情弹窗里。 */
-  .stream .why-clamp { -webkit-line-clamp: 2; }
+     全文在 title 和「时刻」上的详情弹窗里。
+     行高就是这张表的"容量"：每一行理由从 26px 收到 20px，同样高度能多显示
+     好几行。主理由给两行（模型的一句话常正好两行，砍一行等于砍半句），
+     附带的平仓理由只给一行——它是补充说明，全文在 title 里。 */
+  .stream .why-clamp { -webkit-line-clamp: 2; line-height: 1.45; }
+  .stream .why-clamp.why-out { -webkit-line-clamp: 1; }
   /* 长文本和文本类列一律左对齐。右对齐对数字有意义（个位对个位），
      对「窄幅震荡，收盘位置 50%」这种句子是灾难：每行末尾才对齐，
      眼睛每次都要横向扫到最右边才能开始读。 */
@@ -878,6 +904,56 @@
     background: rgba(46,204,113,.13); color: #47d68a; border: 1px solid rgba(46,204,113,.32);
   }
   .acct-note { font-size: var(--fs-1); color: var(--dim); margin: -6px 0 12px; padding: 0 2px; }
+  /* 空备注不占位。这一行 17px + 上下边距 23px，只有极少数时候有内容，
+     却常年吃掉 40px 高度——做单台就是这么被一口一口吃没的。 */
+  .acct-note:empty { display: none; }
+
+  /* ---- 做单台 = 一屏装完的驾驶舱 ----
+     账户条在别的页是"看一眼就走"，在做单台是常驻，必须让位给决策流。
+     压成一行（标签和数字并排）、去掉换行。切回复盘台/设置舱立刻恢复舒展版，
+     所以这些规则全部挂在 body[data-sub="desk"] 下，不改动别处。
+
+     1200 是这条规则的生死线：窗口再窄，六个数字 + 账户名 + 切换框一行放不下，
+     硬压的结果是每个标签被挤成竖排（"余 额""可 用 保 证 金"）。窄窗口本来
+     就装不下一页，这时候宁可用原来的两行版，也不要把数字挤成一条麻花。 */
+  /* 这一行是"切换账户去 MT5 终端"的常驻提示，做单台不需要看第二遍 */
+  body[data-sub="desk"] .acct-note { display: none; }
+  /* 做单台把上下留白收到最小（左右不动：横向留白一改，切回来整页会横跳）。 */
+  body[data-sub="desk"] { padding: 10px 26px 12px; }
+
+  @media (min-width: 1200px) {
+    body[data-sub="desk"] .acct {
+      padding: 4px var(--sp3); margin-bottom: var(--sp2);
+      gap: var(--sp2) var(--sp3); flex-wrap: nowrap;
+    }
+    body[data-sub="desk"] .acct .who {
+      flex-direction: row; align-items: baseline; gap: var(--sp2);
+      flex: 0 0 auto; white-space: nowrap;
+    }
+    body[data-sub="desk"] .acct .who b { font-size: var(--fs-5); }
+    body[data-sub="desk"] .acct .figs {
+      flex-wrap: nowrap; gap: var(--sp2) var(--sp3); min-width: 0; flex: 0 1 auto;
+    }
+    body[data-sub="desk"] .acct .fig {
+      display: flex; align-items: baseline; gap: 5px;
+      min-width: 0; text-align: left;
+    }
+    body[data-sub="desk"] .acct .fig i { display: block; }
+    body[data-sub="desk"] .acct .fig b { font-size: var(--fs-5); white-space: nowrap; }
+    body[data-sub="desk"] .acct .badge-mode,
+    body[data-sub="desk"] .acct .badge-live,
+    body[data-sub="desk"] .acct .acct-pick { flex: 0 0 auto; white-space: nowrap; }
+    body[data-sub="desk"] .acct-pick select { padding: 3px 8px; font-size: var(--fs-1);
+                                              max-width: 170px; }
+  }
+  /* 6 个数字 + 账户名 + 切换框一行需要约 1400px 的内容宽度（实测 1440 宽的
+     窗口刚好差 30px，于是每格被压到连「余额」两个字都竖排）。净入金和杠杆
+     在做单时一分钟也不会变一次（净值/可用才是盯的），1500 以下先让它们退场。 */
+  @media (min-width: 1200px) and (max-width: 1499px) {
+    body[data-sub="desk"] #acctDep, body[data-sub="desk"] #acctLev { display: none; }
+    body[data-sub="desk"] .acct .fig:has(#acctDep),
+    body[data-sub="desk"] .acct .fig:has(#acctLev) { display: none; }
+  }
 
   .flag { display: flex; gap: 10px; padding: 11px 13px; border-radius: var(--r-md); margin-bottom: 8px;
           border-left: 3px solid var(--border-hi); background: rgba(255,255,255,.017); }
@@ -1323,9 +1399,6 @@
      最左边，跟「开始做单」隔着半个屏——那是个会真动钱的按钮，不能让它乱跑。
      现在拆成两层：上层只放身份和状态，下层放全部控制项，用分隔线分成
      「参数 | 运维」两组。 */
-  .at-head { align-items: center; }
-  .at-head-main { display: flex; align-items: center; gap: 10px;
-                  flex-wrap: wrap; min-width: 0; }
   /* 备注（经验库条数 / 停止原因）跟在状态徽章后面，单行截断——
      它只是"这轮为什么停"的提示，全文在 title 里。 */
   .at-head-note {
@@ -1340,6 +1413,26 @@
      位置固定比"好看"重要——上一版它们挤在控件流里，窄窗口下会掉到第二行最左。 */
   .at-head-acts { display: flex; gap: var(--sp2); flex: none; }
   .at-head-acts .btn-ghost { margin: 0; }
+  /* ---- 实盘一行工具条：左「做单台/复盘台/设置舱」，右「模式 + 三颗动作」----
+     合并前是两行：子标签 41px + 卡片头 44px，而卡片头里只有标题（与顶部
+     sticky 带重复）和三颗按钮。做单台一屏装不下的主要元凶之一就是这 44px。 */
+  .live-bar {
+    display: flex; align-items: center; gap: var(--sp2) var(--sp3);
+    margin: 0 0 var(--sp2); flex-wrap: nowrap; min-width: 0;
+  }
+  .live-bar .live-subtabs { margin: 0; flex: none; }
+  .live-bar-acts {
+    display: flex; align-items: center; gap: var(--sp2);
+    margin-left: auto; min-width: 0; flex: 0 1 auto;
+  }
+  /* 备注可能很长（"经验库 12 条 · 上次线程已不在…"），这里让它独占剩余宽度
+     再截断，别去挤压按钮。 */
+  .live-bar-acts .at-head-note { max-width: 30ch; flex: 0 1 auto; min-width: 0; }
+  .live-bar-acts .at-now { white-space: nowrap; }
+  /* 吸顶带那颗「关闭并清仓」一直在视口里，这里再放一颗就是同一屏两个红按钮
+     （间距 30px），危急时反而要多看一眼才敢按。留吸顶那颗，这颗只保留 DOM
+     给 JS 改 disabled 状态。 */
+  .live-bar-acts #atStop { display: none; }
   .at-bar {
     display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
     margin: 0 0 10px; padding: 9px 12px; border-radius: var(--r-sm);
@@ -1396,7 +1489,7 @@
   .statusbar {
     position: sticky; top: 0; z-index: 30;
     display: flex; align-items: center; gap: var(--sp2) var(--sp3); flex-wrap: wrap;
-    margin: 0 0 var(--sp2); padding: 7px var(--sp4);
+    margin: 0 0 var(--sp2); padding: 5px var(--sp3);
     border-radius: var(--r1);
     background: rgba(9,13,19,.9);
     -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
@@ -1421,7 +1514,7 @@
      连续的 inline span、零间距，字号提到 13.5 之后会糊成一片。
      统一 5px：标签靠颜色（dim）与数值（等宽粗体）区分，不再靠间距区分。 */
   #atBarPos { display: inline-flex; align-items: baseline; gap: 5px; }
-  .statusbar .btn-ghost { margin: 0; padding: 5px 11px; font-size: var(--fs-3); }
+  .statusbar .btn-ghost { margin: 0; padding: 3px 10px; font-size: var(--fs-3); }
   /* 窄窗口（窗体的最小宽 1120）这条带子会折成两行、白吃 40px 纵向空间，
      还让「关闭并清仓」孤零零跳到第二行。让出「今日战绩」和「主动放弃次数」——
      这两个数在复盘台的运行计数卡里是同一份，急停按钮不能被迫换行。 */
@@ -1795,6 +1888,15 @@
 
 <header>
   <h1>AI Quant</h1>
+  <!-- 视图切换本来在标题条下面单独占一行（37px + 上下间距 12px）。它和标题
+       是同一件事——"现在在哪一页"，合并后每个视图都多出 49px 纵向空间，
+       做单台正好把这份空间还给决策流。 -->
+  <div class="tabs">
+    <button class="tab active" data-view="live">实盘复盘</button>
+    <button class="tab" data-view="iter">实时迭代</button>
+    <button class="tab" data-view="eval">策略评估</button>
+    <button class="tab" data-view="strat">策略库</button>
+  </div>
   <span class="pill"><span id="dot" class="dot"></span><span id="statusText">连接中</span></span>
   <span class="pill iter-only">轮次 <b id="roundInfo">-</b></span>
   <span class="pill iter-only">阶段 <b id="phase">-</b></span>
@@ -1808,13 +1910,6 @@
           title="停掉 AI、必要时平仓，然后关闭整个程序"
           style="margin-left:12px">退出程序</button>
 </header>
-
-<div class="tabs">
-  <button class="tab active" data-view="live">实盘复盘</button>
-  <button class="tab" data-view="iter">实时迭代</button>
-  <button class="tab" data-view="eval">策略评估</button>
-  <button class="tab" data-view="strat">策略库</button>
-</div>
 
 <section id="view-live">
   <!-- 常驻状态带：滚到哪里都能看到「在不在跑 / 有没有仓 / 现在多少」。
@@ -1866,28 +1961,22 @@
   <!-- 实盘视图三态切换。S1 = 骨架：做单台只装 AI 交易员卡，复盘台装其余全部，
        设置舱先占位（S3 再把品种/模式/模型/经验库/闸门参数搬进去）。
        切态用 display，不销毁节点——所有 render 函数与轮询仍然照常写 DOM。 -->
-  <div class="live-subtabs" role="tablist" aria-label="实盘子视图">
-    <button class="live-sub active" data-sub="desk" role="tab">做单台</button>
-    <button class="live-sub" data-sub="review" role="tab">复盘台</button>
-    <button class="live-sub" data-sub="setup" role="tab">设置舱</button>
-  </div>
-
-  <div id="live-desk" class="live-pane">
-
-  <!-- 做单台一屏四区：左决策环（这一轮模型想了什么）、右持仓面板
-       （这笔单离止损/保本/止盈还有多远）、下决策流。
-       配置项一个都不在这里——品种/模式/间隔/模型/经验库/闸门参数全部走
-       设置舱，做单台不提供可误触的入口。 -->
-  <div class="card l1">
-    <div class="card-head at-head">
-      <div class="at-head-main">
-        <h2>AI 交易员</h2>
-        <span class="badge-off" id="atState" style="display:none">未启动</span>
-        <span class="at-now" id="atNowMode">—</span>
-        <!-- 常驻备注（经验库条数 / 停止原因）。归轮询写，单独一个槽位。 -->
-        <span class="mini at-head-note" id="atNote"></span>
-      </div>
-      <!-- 做单时真正会点的只有这三颗，直接放在卡头。
+  <!-- 一行装完「切哪一态 + 现在什么模式 + 三颗动作」。
+       原来是两行：子标签 41px、卡片头 44px。卡头那行只放标题（和顶部
+       sticky 带重复）加三颗按钮，等于用 44px 换一颗「开始做单」——
+       决策流因此永远少一行。现在合并：左边切态，右边动作。 -->
+  <div class="live-bar">
+    <div class="live-subtabs" role="tablist" aria-label="实盘子视图">
+      <button class="live-sub active" data-sub="desk" role="tab">做单台</button>
+      <button class="live-sub" data-sub="review" role="tab">复盘台</button>
+      <button class="live-sub" data-sub="setup" role="tab">设置舱</button>
+    </div>
+    <div class="live-bar-acts">
+      <span class="badge-off" id="atState" style="display:none">未启动</span>
+      <span class="at-now" id="atNowMode">—</span>
+      <!-- 常驻备注（经验库条数 / 停止原因）。归轮询写，单独一个槽位。 -->
+      <span class="mini at-head-note" id="atNote"></span>
+      <!-- 做单时真正会点的只有这三颗。
            参数不在这里（设置舱），运维（重置战绩/清空经验）也在设置舱——
            它们跑起来之后本来也不该点。 -->
       <div class="at-head-acts">
@@ -1898,6 +1987,15 @@
                 title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
       </div>
     </div>
+  </div>
+
+  <div id="live-desk" class="live-pane">
+
+  <!-- 做单台一屏三区：左决策环（这一轮模型想了什么）、右持仓面板
+       （这笔单离止损/保本/止盈还有多远）、下决策流。
+       配置项一个都不在这里——品种/模式/间隔/模型/经验库/闸门参数全部走
+       设置舱，做单台不提供可误触的入口。 -->
+  <div class="card l1">
     <!-- 操作结果单独一块：atNote 归轮询用（每 15 秒被 renderAutoTrade 覆写），
          把「启动失败」写在那里等于写了个寂寞——下一秒就被清空，
          用户看到的就是「点了没反应」。 -->
@@ -1913,6 +2011,13 @@
         <div class="ring-head">
           <span class="t">本轮判断</span>
           <span class="ring-tag hidden" id="ringTag">—</span>
+          <!-- act / 闸门 / 待复盘：原来是环底单独一行（27px + 8px 内边距）。
+               三小段文字占掉一整行，而环头右侧本来就有空白——并进来。 -->
+          <span class="ring-meta" title="act = 这轮模型给的动作；闸门 = 程序闸门是否放行；待复盘 = 平仓后还没复盘的笔数">
+            <span>act <b id="fAct">—</b></span>
+            <span>闸门 <b id="fGate">—</b></span>
+            <span>待复盘 <b id="fPend">—</b></span>
+          </span>
           <span class="ts" id="ringTs">—</span>
         </div>
         <div class="ring-body">
@@ -1961,11 +2066,6 @@
           </div>
         </div>
         <div class="rspacer"></div>
-        <div class="ring-foot">
-          <span>act <b id="fAct">—</b></span>
-          <span>闸门 <b id="fGate">—</b></span>
-          <span>待复盘 <b id="fPend">—</b></span>
-        </div>
       </div>
 
       <!-- ============ 持仓面板 ============ -->
@@ -3303,13 +3403,17 @@ function renderStatusBar(a) {
     const fp = (a.float_pnl == null) ? '—' : money(a.float_pnl);
     const pk = (p.peak_pnl == null) ? null : money(Number(p.peak_pnl));
     const fpCls = (a.float_pnl == null) ? '' : signClass(a.float_pnl);
+    // 峰值分母必须跟着这一笔的 plan 走：趋势单的门槛是 tp_min_trend（7.00），
+    // 用震荡档的 tp_min_usd（3.25）会写成「峰 +3.62/3.25」——和持仓面板的
+    // 「+3.62 / 7.00」自相矛盾，还会被读成「保本是 3.25」（2026-10-31 报障）。
+    const barTp = Number((String(p.plan || '') === 'trend' ? a.tp_min_trend : a.tp_min_usd) || 0);
     $('atBarPos').innerHTML =
       `<span class="sb-v ${p.direction > 0 ? 'pos-long' : 'pos-short'}">` +
       `${dir} ${p.lots}</span>` +
       `<span class="sb-k">@</span><span class="sb-v">${fmt(p.price_open, 3)}</span>` +
       `<span class="sb-k">浮盈</span><span class="sb-v ${fpCls}">${fp}</span>` +
       (pk ? `<span class="sb-k">峰</span><span class="sb-v">${pk}` +
-            (a.tp_min_usd ? '/' + fmt(a.tp_min_usd, 2) : '') + `</span>` : '');
+            (barTp ? '/' + fmt(barTp, 2) : '') + `</span>` : '');
   } else {
     const pend = Number(a && a.pending_reviews || 0);
     $('atBarPos').innerHTML = `<span class="sb-k">空仓` +
@@ -3416,7 +3520,9 @@ function setLed(key, state, value, bad) {
   const v = $('led' + key.charAt(0).toUpperCase() + key.slice(1) + 'V');
   if (!v) return;
   if (state === 'on') v.textContent = '';
-  else if (state === 'off') v.textContent = '关闭';
+  // off 态默认写「关闭」；传了 value 就用 value（例如「不适用」——规则开着但
+  // 这笔单没有这条线，写「关闭」会让人去设置舱里找一个根本没关的开关）。
+  else if (state === 'off') v.textContent = (value == null ? '关闭' : value);
   else v.textContent = (value == null ? '' : value);
 }
 
@@ -3519,9 +3625,11 @@ function renderRing(a, p) {
   if (ring) ring.classList.toggle('veto', !!(ld && ld.advice && !ld.veto));
   if (adv && advTxt) {
     if (adviceText && ld && (ld.advice || ld.veto)) {
+      // 正文和尾部结论之间必须有分隔：原来「…再进，别追高未采纳（当前配置
+      // 只建议、不拦截）」在窄屏会连成一句，读不出哪部分是程序的话。
       advTxt.innerHTML = '<b>程序建议：</b>' + esc(adviceText)
-        + (ld.veto ? '<b>已拦截</b>'
-                   : '<b>未采纳</b>（当前配置只建议、不拦截）');
+        + (ld.veto ? '<b> · 已拦截</b>'
+                   : '<b> · 未采纳</b>（当前配置只建议、不拦截）');
       adv.classList.remove('hidden');
     } else {
       advTxt.innerHTML = '';
@@ -3587,7 +3695,12 @@ function renderPos(a, p) {
   const holdMax = Number((plan === 'trend' ? a.max_hold_trend : a.max_hold_sec) || 0);
   const fp = (a.float_pnl == null) ? null : Number(a.float_pnl);
   const beArm = Number(a.be_arm_usd || 0);
-  const beOn = !!a.be_at_entry && beArm > 0;
+  const beCfg = !!a.be_at_entry && beArm > 0;     // 规则总开关
+  // **规则开着 ≠ 这笔有保本**。后端 _be_applies 只认 plan === 'trend'，
+  // 震荡单即使峰值过线也不会挂（它的止盈门槛本来就是 3.25，摸到就该模型说话）。
+  // UI 不叠这个判断的话，震荡单持仓会亮「保本 触发 3.25」并画一条不存在的线。
+  const beFit = !p || String(plan) === 'trend';
+  const beOn = beCfg && beFit;
   const peak = (p && p.peak_pnl != null) ? Number(p.peak_pnl) : null;
 
   const side = $('posSide'), planEl = $('posPlan');
@@ -3666,7 +3779,13 @@ function renderPos(a, p) {
           // 时两线完全重合）。此时只留线，数值看下方保本徽章的 SL。
           const crowded = bePct > 70;
           cap.style.display = crowded ? 'none' : '';
-          cap.textContent = '保本 ' + fmt(beArm, 2);
+          // **这条线是「触发线」，不是「保本价」**（2026-10-31 用户按刻度尺上的
+          // 「保本 3.25」误读成「止损挂在 3.25」）。保本价恒等于开仓价，在浮盈
+          // 轴上的位置就是 0；3.25 只决定「浮盈到多少才把 SL 抬上去」。
+          // 所以标签必须带「触发」二字，实际 SL 价由下方徽章单独给出。
+          cap.textContent = '保本触发 ' + fmt(beArm, 2);
+          cap.title = '浮盈到 ' + fmt(beArm, 2) + ' 时把券商端 SL 抬到开仓价 '
+            + fmt(Number(p.be_sl || p.price_open), 3);
         }
       } else rBe.classList.add('hidden');
     }
@@ -3676,7 +3795,7 @@ function renderPos(a, p) {
       const cap = $('rTpCap');
       if (cap) cap.textContent = '止盈 ' + fmt(tp, 2);
     }
-    if (rulerLb) rulerLb.textContent = '浮盈刻度 · 距止盈门槛';
+    if (rulerLb) rulerLb.textContent = '浮盈刻度 · 0 = 开仓价';
     if (rulerV) {
       const gap = tp - cur;
       rulerV.textContent = gap > 0 ? '还差 ' + fmt(gap, 2) : '已过门槛 ' + money(cur);
@@ -3688,8 +3807,11 @@ function renderPos(a, p) {
   const be = $('beBadge');
   if (be) {
     let bcls = 'off', btxt = '保本止损', bnote = '';
-    if (!beOn) {
+    if (!beCfg) {
       btxt = '保本止损已关闭'; bnote = '设置舱 → 出场闸门可开';
+    } else if (p && !beFit) {
+      // 规则开着，但这笔是震荡单：它根本没有这条线。
+      btxt = '震荡单 · 不挂保本'; bnote = '只给趋势单（止盈门槛 7.00 的那一档才需要）';
     } else if (!p) {
       btxt = '空仓 · 无持仓保护'; bnote = '开仓后按触发线自动挂';
     } else if (p.be_ok) {
@@ -3725,7 +3847,10 @@ function renderGateLeds(a, p) {
   const iv = Number((a.cfg && a.cfg.interval_sec) || 0) || 60;
   const staleOn = !!a.stale_wake && Number(a.stale_sec || 0) > 0;
   const beArm = Number(a.be_arm_usd || 0);
-  const beOn = !!a.be_at_entry && beArm > 0;
+  const beCfg = !!a.be_at_entry && beArm > 0;
+  // 空仓时保留灰态常驻（规则开着）；持仓才按 plan 判这一笔有没有这条线。
+  const beFit = !p || String(plan) === 'trend';
+  const beOn = beCfg && beFit;
   const fp = (a.float_pnl == null) ? null : Number(a.float_pnl);
   const peak = (p && p.peak_pnl != null) ? Number(p.peak_pnl) : null;
   const held = (p && p.opened_at) ? Math.max(0, nowS - Number(p.opened_at)) : 0;
@@ -3752,12 +3877,17 @@ function renderGateLeds(a, p) {
   mark('guard', guardOn ? 'on' : 'off', '止损快查', fmt(guard, 0) + 's');
 
   // 保本：已挂 = 券商端有保护；触发未挂上 = 只有本地兜底在撑。
+  // 值一律写**状态**，不写 3.25：这一格写数字时会被读成「保本价 = 3.25」
+  // （2026-10-31 用户就是这么读的）。触发线只在未触发态出现，且必须带「触发」。
   if (beOn) {
-    if (p && p.be_ok) mark('be', 'hit', '保本', fmt(beArm, 2));
+    if (p && p.be_ok) mark('be', 'hit', '保本', '已挂');
     else if (p && p.be_arm_ts) mark('be', 'near', '保本', '未挂上');
-    else if (p && peak != null && peak >= beArm * 0.9) mark('be', 'near', '保本', fmt(beArm, 2));
-    else mark('be', 'on');
-  } else mark('be', 'off', '保本', fmt(beArm, 2));
+    else if (p && peak != null && peak >= beArm * 0.9) mark('be', 'near', '保本', '触发 ' + fmt(beArm, 2));
+    else mark('be', 'on', '保本');
+  } else if (beCfg) {
+    // 规则开着但这笔是震荡单：这条线对这笔单不成立，不能写「关闭」。
+    mark('be', 'off', '保本', '不适用');
+  } else mark('be', 'off', '保本');
 
   // 止盈门槛：过线只有一件事——模型被问过要不要落袋。
   if (tp > 0) {
@@ -3800,8 +3930,23 @@ function renderGateLeds(a, p) {
   if ($('atGateSl')) $('atGateSl').className = 'at-gate sl' + (sl > 0 ? '' : ' off');
   put('atGateGuardV', guardOn ? '每 ' + fmt(guard, 0) + ' 秒' : '关闭');
   if ($('atGateGuard')) $('atGateGuard').className = 'at-gate guard' + (guardOn ? '' : ' off');
-  put('atGateBeV', beOn ? fmt(beArm, 2) + ' · 仅趋势单' : '关闭');
-  if ($('atGateBe')) $('atGateBe').className = 'at-gate be' + (beOn ? '' : ' off');
+  // 保本止损这一行的生效值是**触发线**，不是保本价。写「3.25 · 仅趋势单」时
+  // 用户会读成「止损挂在 3.25」（2026-10-31 原话）。所以把两件事分开写：
+  // 触发条件（浮盈到 3.25）+ 落点（SL 抬到开仓价，有持仓时就是这笔的实际价）。
+  const beSlNow = (p && Number(p.be_sl || 0) > 0) ? Number(p.be_sl)
+    : ((p && Number(p.price_open || 0) > 0) ? Number(p.price_open) : 0);
+  put('atGateBeV', !beCfg ? '关闭'
+    : (beFit
+        ? '触发 ' + fmt(beArm, 2) + ' → SL ' + (beSlNow > 0 ? fmt(beSlNow, 3) : '开仓价')
+        // 规则开着、当前这笔是震荡单：写清楚是「不适用」，不是「关闭」。
+        : '触发 ' + fmt(beArm, 2) + ' · 仅趋势单'));
+  if ($('atGateBe')) {
+    $('atGateBe').className = 'at-gate be' + (beCfg ? '' : ' off');
+    $('atGateBe').title = '趋势单浮盈摸到 ' + fmt(beArm, 2) + ' 就把券商端硬止损抬到'
+      + '开仓价（不是抬到 ' + fmt(beArm, 2) + '——那是触发线，单位是美元浮盈）。'
+      + '挂在券商那边，进程崩了、面板关了都还有效，成交就在开仓价上——'
+      + '轮询式止损实测超调 13%。挂不上时由 5 秒快查在浮盈回到 0 时代平';
+  }
   put('atGateTpV', tp > 0 ? fmt(tp, 2) : '关闭');
   if ($('atGateTp')) $('atGateTp').className = 'at-gate tp' + (tp > 0 ? '' : ' off');
   const staleSec = Number(a.stale_sec || 0);
@@ -3951,7 +4096,14 @@ function renderAutoTrade(a) {
     const beN = Number(a.be_closes || 0);
     const beTxt = beN ? `（保本止损 ${beN} 笔）` : '';
     if (slN) {
-      const tpTxt = (a.tp_min_usd == null) ? '' : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`;
+      // 门槛分两档（2026-10-28 起趋势单 7.00 / 震荡 3.25）。这里只写 3.25 的话，
+      // 持仓是趋势单时用户会以为「趋势单到 3.25 就要平」——而事实是 7.00。
+      // 统计本身不分 plan，所以两个档位都写出来，不替他选。
+      const tpTrend = Number(a.tp_min_trend || 0);
+      const tpTxt = (a.tp_min_usd == null) ? ''
+        : (tpTrend > 0 && tpTrend !== Number(a.tp_min_usd)
+            ? `（门槛 震荡 ${fmt(a.tp_min_usd, 2)} / 趋势 ${fmt(tpTrend, 2)}）`
+            : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`);
       $('atSl').textContent = `程序止损 ${slN} 笔`
         + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
         + beTxt
@@ -4013,8 +4165,11 @@ function renderAutoTrade(a) {
   sigPoll(a);
 
   // 按钮：跑着的时候不许再点「开始」，避免起两个线程互相抢仓位
+  // 跑起来就把「开始做单」收走：留一颗灰着的「运行中…」和左边那句
+  // .at-now 的「运行中·实盘」同义，一行里出现两次"运行中"只会让人多读一遍。
   $('atStart').disabled = !!a.running;
-  $('atStart').textContent = a.running ? '运行中…' : '开始做单';
+  $('atStart').style.display = a.running ? 'none' : '';
+  $('atStart').textContent = '开始做单';
 
   // 跑起来之后模式锁死：中途切换会造成「界面说真实、实际发纸面」的错位
   const lockMode = !!a.running;
@@ -4087,7 +4242,13 @@ function renderAutoTrade(a) {
     }
     // 开仓理由在 open 行；平仓行会把当初的进场理由一起带上，
     // 这样一笔单的「为什么进 / 为什么出」在同一行能看完。
-    const whyIn = r.kind === 'open' ? (r.reason || '') : (r.entry_reason || '');
+    // 跳过/继续持有行没有 entry_reason，它们的理由就在 reason 里
+    // （「浮盈 +6.23 未达止盈门槛 7.00，继续持有」），原来这里只读
+    // entry_reason，于是决策流里占绝大多数的这些行理由全是「—」——
+    // 表格再高也是空的。平仓行不走这个兜底，否则进场理由和平仓理由会重复。
+    const whyIn = r.kind === 'open' ? (r.reason || '')
+      : (r.entry_reason
+         || ((r.kind === 'skip' || r.kind === 'hold') ? (r.reason || '') : ''));
     let whyOut = '';
     if (r.kind === 'close') whyOut = r.reason || '';
     else if (r.kind === 'review') whyOut = '💡 ' + (r.lesson || r.error || '');
@@ -6669,6 +6830,8 @@ document.querySelectorAll('.live-sub').forEach(b => {
     document.querySelectorAll('.live-sub').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     const s = b.dataset.sub;
+    // 挂到 body 上：做单台要压紧账户条/内边距（一屏装完），别的态不用
+    document.body.dataset.sub = s;
     $('live-desk').classList.toggle('hidden', s !== 'desk');
     $('live-review').classList.toggle('hidden', s !== 'review');
     $('live-setup').classList.toggle('hidden', s !== 'setup');
@@ -6676,50 +6839,53 @@ document.querySelectorAll('.live-sub').forEach(b => {
   });
 });
 
-/* 做单台撑满剩余视口：卡片 max-height = 视口底 − 卡片顶 − 余量。
+/* 做单台撑满剩余视口：卡片高度 = 视口底 − 卡片顶 − 呼吸位。
    上面的 sticky 状态带 / 账户条 / 子标签高度都不是常数（窄窗口会折行），
    所以这个数只能量，不能用 calc() 猜。决策流吃掉剩下的高度，自己内部滚。
-   量不出来（隐藏态 getBoundingClientRect 全 0）就直接跳过。 */
+   量不出来（隐藏态 getBoundingClientRect 全 0）就直接跳过。
+
+   为什么不再用「自然高度 vs 剩余空间」二选一（旧版做法）：
+   旧版把整个卡片当一块不可压缩的整体，空间不够时只设 max-height，
+   而 .at-grid 是 flex:none——被压的永远是决策流，56px 就是它的下场
+   （1366×768 实测：环 320 + 卡片头 44，决策流只剩表头加半行）。
+   现在反过来：决策环/持仓面板按内容定高且不参与压缩，决策流有 168px 的下限，
+   剩下的高度全给它。装不下的时候卡片按「最小可行高度」自然撑开、页面滚——
+   滚动条可以忍，把列表压成一条缝不能忍。 */
 function fitDesk() {
   const card = document.querySelector('#live-desk > .card.l1');
   if (!card || !card.offsetParent) return;
   const top = card.getBoundingClientRect().top + window.scrollY;
-  // 30 = body 的 16px 底边距 + 14px 呼吸位。之前减 44+12 是 body 还留 44px 底边距
-  // 的年代（1480×920 实测 914 vs 890）；底边距收到 16 之后那 28px 白丢了。
-  const avail = window.innerHeight - top - 30;
-  // 先按内容量一次"不被压缩时需要多高"：max-height 一旦小于内容最小高度，
-  // 子元素会溢出到卡片边框外面，看着就是布局坏了。所以取两者较大值——
-  // 剩余空间够就让决策流撑满（页面不滚），不够就保持自然高度（页面滚）。
-  // 量自然高度必须先清掉 height，否则量到的是上一次撑满的高度。
-  // 决策流滚动位置在量高过程中会被 clamp 到 0，量完要放回去。
+  // 22 = body 的 16px 底边距 + 6px 呼吸位。
+  const avail = window.innerHeight - top - 22;
   const sb = card.querySelector('.stream-body');
   const keep = sb ? sb.scrollTop : 0;
   card.style.height = '';
   card.style.maxHeight = '';
-  // 决策流必须按「最小高度」参与测量：它 flex:1 且内容溢出内部滚，
-  // 不夹住的话 card.scrollHeight 会把全部历史行都算进去（实测 688 vs 505），
-  // 卡片被算高一截，页面白白多滚一屏。
-  let natural;
+  // 量「最小可行高度」而不是「内容全展开的高度」：决策流 flex:1 且内容在内部滚，
+  // 不夹住的话 card.scrollHeight 会把全部历史行都算进去（实测 688 vs 505）。
+  // 夹到 0 之后剩下的部分 = 卡片头 + 决策环/持仓面板 + 决策流自己的 min-height。
+  let minH;
   if (sb) {
     const keepMax = sb.style.maxHeight;
-    sb.style.maxHeight = '56px';
-    natural = card.scrollHeight;
+    sb.style.maxHeight = '0px';
+    minH = card.scrollHeight;
     sb.style.maxHeight = keepMax;
   } else {
-    natural = card.scrollHeight;
+    minH = card.scrollHeight;
   }
-  if (avail > natural) {
+  if (avail > minH) {
     // 富余空间交给决策流：卡片拉满一屏，空仓/未启动时也不会在底部留一条空档。
     card.style.height = avail + 'px';
     card.style.maxHeight = avail + 'px';
     // 自校验：撑满后文档还是比视口高，说明 top 量早了（账户条/标题还没渲染出来），
-    // 或者内容确实装不下——退回自然高度让页面滚，绝不把卡片撑到视口外。
+    // 或者内容确实装不下——退回最小高度让页面滚，绝不把卡片撑到视口外。
     if (document.documentElement.scrollHeight > window.innerHeight + 1) {
       card.style.height = '';
-      card.style.maxHeight = natural + 'px';
+      card.style.maxHeight = minH + 'px';
     }
   } else {
-    card.style.maxHeight = Math.max(avail, natural) + 'px';
+    // 装不下：不压缩任何东西，按最小可行高度撑开，页面滚。
+    card.style.maxHeight = minH + 'px';
   }
   if (sb) sb.scrollTop = keep;
 }
@@ -6745,6 +6911,8 @@ if ($('atSkipShow')) {
 
 // 初始视图是实盘：先把 dataset.view 打上，否则首屏会把实时迭代的 pill 也显示出来
 document.body.dataset.view = 'live';
+// 子态默认做单台。首帧就要打上——不然账户条会先按舒展版渲染一帧再跳。
+document.body.dataset.sub = 'desk';
 window.addEventListener('load', fitDesk);
 setTimeout(fitDesk, 60);
 pollState();
