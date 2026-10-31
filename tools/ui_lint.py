@@ -14,6 +14,15 @@
     2. border-radius: <裸 px/%>  → 必须用 --r-*（0 允许）
     3. 裸 hex 颜色                → 默认只统计；--strict 下报错
     4. HTML/JS 段内联 style 里的裸 font-size
+    5. 重复的 DOM id（见下）
+
+为什么第 5 条值得单独一条规则：
+    做单台那 6 盏闸门灯的容器叫 #gateBox，策略评估页的 Gate 判定卡也叫
+    #gateBox。getElementById 只返回**文档里第一个**，而策略评估页在启动时
+    无条件加载——于是四颗 PASS 被写进了做单台的闸门灯里，6 盏灯连同
+    #ledSl 一起被销毁，setLed 找不到元素就静默返回，刷新才复原。
+    同一屏两个东西共用一个 id，症状是"做单台里凭空多出一块 Gate 2"，
+    而且没人会去怀疑 id。
 
 退出码：0 通过 / 1 有违规。
 """
@@ -65,6 +74,15 @@ def main(argv: list[str]) -> int:
     for m in re.finditer(r"style=\"[^\"]*font-size:\s*([\d.]+px)", tail):
         line = tail[: m.start()].count("\n") + 1
         errors.append(f"HTML 第 {line} 行：内联裸 font-size {m.group(1)}")
+
+    # 重复 id：getElementById 只认第一个，后写入的那份会被静默吞掉。
+    # 跳过模板字符串拼出来的（id="${...}"），那不是静态 id。
+    seen: dict[str, int] = {}
+    for m in re.finditer(r'(?<![\w-])id="([^"$]+)"', tail):
+        seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+    for name, n in sorted(seen.items()):
+        if n > 1:
+            errors.append(f"重复 DOM id：#{name} 出现 {n} 次（getElementById 只返回第一个）")
 
     for n in notes:
         print("  ·", n)

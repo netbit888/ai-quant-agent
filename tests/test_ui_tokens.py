@@ -69,3 +69,43 @@ class TestUiTokens(unittest.TestCase):
         self.assertGreaterEqual(
             ratio, 4.5,
             f"--dim {m.group(1)} 对 l1 底只有 {ratio:.2f}:1，WCAG AA 要 4.5:1")
+
+
+class TestDuplicateIds(unittest.TestCase):
+    """同一个 id 只能出现一次。
+
+    v1.5.11 的真实事故：做单台那 6 盏闸门灯的容器叫 #gateBox，策略评估页
+    的 Gate 判定卡也叫 #gateBox。getElementById 只返回文档里第一个，而策略
+    评估页在启动时无条件加载——四颗 PASS 就这么写进了做单台，6 盏灯连同
+    #ledSl 被销毁（setLed 找不到元素就静默返回），刷新才复原。症状是
+    「做单台里凭空多出一块 Gate 2」，没有任何报错，也不像 bug。
+    """
+
+    def test_template_has_no_duplicate_ids(self):
+        src = TPL.read_text(encoding="utf-8")
+        tail = src[src.index("</style>"):]
+        # 模板字符串拼出来的动态 id 不算静态 id
+        ids = re.findall(r'(?<![\w-])id="([^"$]+)"', tail)
+        dup = {i: ids.count(i) for i in set(ids) if ids.count(i) > 1}
+        self.assertEqual(dup, {}, f"重复的 DOM id：{dup}")
+
+    def test_lint_reports_duplicate_id(self):
+        """规则本身要能抓到——不然上面的测试只是因为"刚好没错"才绿。"""
+        import tempfile
+        html = (
+            "<style>\n  :root {\n    --x: 1;\n  }\n  .a { color: #fff; }\n</style>\n"
+            '<div id="dup"></div>\n<div id="dup"></div>\n'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "tpl.html"
+            f.write_text(html, encoding="utf-8")
+            orig = ui_lint.TPL
+            ui_lint.TPL = f
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = ui_lint.main([])
+            finally:
+                ui_lint.TPL = orig
+        self.assertEqual(rc, 1, "重复 id 没被拦下来：" + buf.getvalue())
+        self.assertIn("#dup", buf.getvalue())
