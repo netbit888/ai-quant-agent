@@ -921,7 +921,7 @@
      压成一行（标签和数字并排）、去掉换行。切回复盘台/设置舱立刻恢复舒展版，
      所以这些规则全部挂在 body[data-sub="desk"] 下，不改动别处。
 
-     1200 是这条规则的生死线：窗口再窄，六个数字 + 账户名 + 切换框一行放不下，
+     1200 是这条规则的生死线：窗口再窄，五个数字 + 账户名 + 切换框一行放不下，
      硬压的结果是每个标签被挤成竖排（"余 额""可 用 保 证 金"）。窄窗口本来
      就装不下一页，这时候宁可用原来的两行版，也不要把数字挤成一条麻花。 */
   /* 这一行是"切换账户去 MT5 终端"的常驻提示，做单台不需要看第二遍 */
@@ -958,10 +958,10 @@
                                               max-width: 170px; min-width: 0;
                                               text-overflow: ellipsis; }
   }
-  /* 6 个数字 + 账户名 + 切换框一行需要约 1400px 的内容宽度（实测 1440 宽的
-     窗口刚好差 30px，于是每格被压到连「余额」两个字都竖排）。净入金和杠杆
-     在做单时一分钟也不会变一次（净值/可用才是盯的），1500 以下先让它们退场。 */
-  @media (min-width: 1200px) and (max-width: 1499px) {
+  /* 净入金和杠杆在做单时一分钟也不会变一次（净值/可用才是盯的），窄窗口先让
+     它们退场。这条线的位置随账户条字数走：2026-11-02 去掉浮动盈亏后只剩
+     五个数字，1400 起就放得下全部，1400 以下才需要藏——别照搬旧的 1500。 */
+  @media (min-width: 1200px) and (max-width: 1399px) {
     body[data-sub="desk"] #acctDep, body[data-sub="desk"] #acctLev { display: none; }
     body[data-sub="desk"] .acct .fig:has(#acctDep),
     body[data-sub="desk"] .acct .fig:has(#acctLev) { display: none; }
@@ -1979,7 +1979,6 @@
       <div class="fig"><i>余额</i><b class="mono" id="acctBalance">—</b></div>
       <div class="fig"><i>净值</i><b class="mono" id="acctEquity">—</b></div>
       <div class="fig"><i>可用保证金</i><b class="mono" id="acctFree">—</b></div>
-      <div class="fig"><i>浮动盈亏</i><b class="mono" id="acctFloat">—</b></div>
       <div class="fig"><i>净入金</i><b class="mono" id="acctDep">—</b></div>
       <div class="fig"><i>杠杆</i><b class="mono" id="acctLev">—</b></div>
     </div>
@@ -3223,8 +3222,8 @@ function renderLive(d) {
   $('acctBalance').textContent = fmt(a.balance) + curSuffix;
   $('acctEquity').textContent = fmt(a.equity) + (isCentAcct ? curSuffix : '');
   $('acctFree').textContent = fmt(a.margin_free) + (isCentAcct ? curSuffix : '');
-  $('acctFloat').textContent = money(a.profit);
-  $('acctFloat').className = 'mono ' + signClass(a.profit);
+  // 浮动盈亏不在账户条上显示（2026-11-02 用户定的）：它是余额/净值能直接
+  // 看出来的差值，而且每次 tick 都在跳——常驻账户条上属于噪音。
   const sy = d.sync || {};
   $('acctDep').textContent = fmt(s.deposits);
   $('acctDep').title = sy.gross_in != null ? `入金 ${sy.gross_in} − 出金 ${sy.gross_out}` : '';
