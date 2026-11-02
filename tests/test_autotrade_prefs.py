@@ -172,6 +172,46 @@ class PrefsFileCase(unittest.TestCase):
         self.assertEqual(d["prefs"]["symbol"], "XAUUSDc")
         self.assertEqual(d["prefs"]["interval_sec"], 30)
 
+    # ------------------------------------------------- 老用户的一次性迁移
+
+    def test_migrates_from_last_run_cfg(self):
+        """prefs 文件还不存在时，用 state 里上一场的 cfg 当初始值。
+
+        升级前用户已经跑过若干场，state 里躺着他上次真用的品种/模式/间隔，
+        但从来没有地方记过「界面默认值」。不迁移的话，新版打开仍是出厂默认
+        （真实做单 / 60 秒），他还要手动再选一遍——那正是这个功能要消灭的动作。
+        """
+        autotrade.save_state({
+            "running": False,
+            "cfg": {"symbol": "XAUUSDc", "interval_sec": 30,
+                    "dry_run": True, "assist": True},
+        }, "999")
+        d = autotrade.summary()
+        self.assertEqual(d["prefs"]["symbol"], "XAUUSDc")
+        self.assertEqual(d["prefs"]["interval_sec"], 30)
+        self.assertEqual(d["prefs"]["mode"], "assist")
+        self.assertTrue(d["prefs"]["assist_paper"])
+        # 迁移只是"读出来当默认值"，不该顺手写盘——用户真改了才写。
+        self.assertFalse(prefs.prefs_file().exists())
+
+    def test_explicit_prefs_wins_over_last_run_cfg(self):
+        """有 prefs 文件时以它为准，不能被老 state 盖掉。
+
+        这条防的是"迁移逻辑每次轮询都生效"，那会让用户改完选择、下一轮
+        又被上一场的 cfg 顶回去。
+        """
+        prefs.save_prefs({"symbol": "XAUUSDm", "interval_sec": 10,
+                          "mode": "paper"}, symbols=SYMBOLS)
+        autotrade.save_state({
+            "running": False,
+            "cfg": {"symbol": "XAUUSDc", "interval_sec": 60,
+                    "dry_run": False, "assist": True},
+        }, "999")
+        d = autotrade.summary()
+        self.assertEqual(d["prefs"]["symbol"], "XAUUSDm")
+        self.assertEqual(d["prefs"]["interval_sec"], 10)
+        self.assertEqual(d["prefs"]["mode"], "paper")
+
 
 class PrefsApiCase(unittest.TestCase):
     """HTTP 契约：路由注册 + 返回体。不连 MT5、不调模型。"""

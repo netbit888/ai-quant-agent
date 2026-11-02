@@ -6121,16 +6121,29 @@ def cache_stats(login: int | str | None = None) -> dict:
     }
 
 
-def _prefs_snapshot() -> dict:
+def _prefs_snapshot(saved_cfg: dict | None = None) -> dict:
     """面板控件的上次选择。坏了就当没记过，绝不让它拖垮整个 summary。
 
     面板 1 秒轮询一次，这里会跟着读一次小文件（<1KB）。值得：
     缓存在进程里反而会和「另一个面板进程刚改过」打架——同一账户本来就
     只该跑一个面板，但这个文件是全局的，多开调试时读盘才是真相。
+
+    **prefs 文件还没生成时，用 state 里上一场的 cfg 兜底**：这是给老用户
+    的一次性迁移。他升级前已经跑过若干场，state 里躺着上次真用的品种/模式/
+    间隔，但从来没有地方记过「界面默认值」。不兜底的话，他打开新版面板看到
+    的仍是出厂默认（真实做单 / 60 秒），还得再手动选一遍——那正是这个功能
+    要消灭的动作。只在文件缺失时生效，绝不覆盖用户的显式选择。
     """
     try:
         from live import prefs
 
+        if saved_cfg and not prefs.prefs_file().exists():
+            try:
+                cfg = Cfg(**{k: v for k, v in saved_cfg.items()
+                             if k in Cfg.__dataclass_fields__})
+                return prefs.prefs_from_cfg(cfg)
+            except (TypeError, ValueError):
+                pass
         return prefs.load_prefs(TRADABLE_SYMBOLS)
     except Exception:  # noqa: BLE001
         return {}
@@ -6354,7 +6367,7 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 面板「交易参数」的默认值：上次选过的品种 / 模式 / 间隔（见 live/prefs.py）。
         # 和上面的 cfg 是两件事：cfg 是「正在跑（或上一场跑过）的参数」，
         # prefs 是「下次打开时帮用户填好」。没开跑过的人只有后者。
-        "prefs": _prefs_snapshot(),
+        "prefs": _prefs_snapshot(saved_cfg),
         # ---------------- AI 辅助做单 ----------------
         # pending_signal 的存在本身就是「现在该弹窗」。面板 1 秒轮询这一格，
         # 不去另开接口——多一个请求就多一处会不同步的地方。
