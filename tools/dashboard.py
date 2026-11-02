@@ -8,7 +8,7 @@
     data/current_state.json   —— 由 agent/core.py 每轮实时写入
     若文件不存在，页面显示「未连接」/「暂无数据」
 
-写入口（都是显式 POST，且必须带 confirm）：
+写入口（都是显式 POST；除 /api/autotrade/prefs 外都必须带 confirm）：
     /api/advice            生成账户级 AI 复盘（花钱）
     /api/session_advice    生成场次级 AI 复盘（花钱）
     /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
@@ -16,6 +16,7 @@
     /api/autotrade/signal  回答一条待确认信号（AI 辅助模式；approve 会下单）
     /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
     /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动
+    /api/autotrade/prefs   记住面板上的交易参数（品种/模式/间隔；不下单、不花钱）
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
 
 只读接口里要留意的两个：
@@ -538,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/rule": self._post_rule,
             "/api/advice": self._post_advice,
             "/api/autotrade/start": self._post_autotrade_start,
+            "/api/autotrade/prefs": self._post_autotrade_prefs,
             "/api/autotrade/stop": self._post_autotrade_stop,
             "/api/autotrade/signal": self._post_autotrade_signal,
             "/api/autotrade/reset": self._post_autotrade_reset,
@@ -594,6 +596,23 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         self._json(200, payload)
+
+    def _post_autotrade_prefs(self, body: dict) -> None:
+        """记住面板上的交易参数（品种 / 模式 / 间隔 / 纸面演练）。
+
+        **不需要 confirm**：这是「下次打开时帮我填好」，不是「现在按这个跑」。
+        真跑起来那一步仍然走 /api/autotrade/start 的确认弹窗，所以记住
+        「真实做单」不会让任何一笔单绕过授权。也不碰 MT5、不调模型。
+        """
+        try:
+            from live import autotrade, prefs
+
+            res = prefs.save_prefs(body or {}, symbols=autotrade.TRADABLE_SYMBOLS)
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        # 一律 200：前端把这条当"顺手记一下"，200 里的 ok 字段才决定要不要提示。
+        # 用 4xx 会让浏览器控制台红一片，而它并不影响任何操作。
+        self._json(200, res)
 
     def _post_autotrade_start(self, body: dict) -> None:
         """启动 AI 做单。会真下单、会花钱调模型，所以 confirm 是硬要求。"""
@@ -658,6 +677,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = autotrade.WORKER.start(cfg, login=login)
             result["login"] = login
+            if result.get("ok"):
+                # 真跑起来的参数就是下次的默认值。前端 onchange 也会存一份，
+                # 但那条路会因为页面刷新/请求失败漏掉；以实际启动的 cfg 为准，
+                # 这样哪怕用户从没碰过控件、只点了一次「开始」，下次也记得住。
+                try:
+                    from live import prefs
+
+                    prefs.save_prefs(prefs.prefs_from_cfg(cfg),
+                                     symbols=autotrade.TRADABLE_SYMBOLS)
+                except Exception:  # noqa: BLE001
+                    pass   # 记不住默认值不该让已经起飞的线程报错
             self._json(200, result)
         except Exception as exc:  # noqa: BLE001
             self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})

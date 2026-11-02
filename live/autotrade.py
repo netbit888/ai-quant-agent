@@ -6121,6 +6121,21 @@ def cache_stats(login: int | str | None = None) -> dict:
     }
 
 
+def _prefs_snapshot() -> dict:
+    """面板控件的上次选择。坏了就当没记过，绝不让它拖垮整个 summary。
+
+    面板 1 秒轮询一次，这里会跟着读一次小文件（<1KB）。值得：
+    缓存在进程里反而会和「另一个面板进程刚改过」打架——同一账户本来就
+    只该跑一个面板，但这个文件是全局的，多开调试时读盘才是真相。
+    """
+    try:
+        from live import prefs
+
+        return prefs.load_prefs(TRADABLE_SYMBOLS)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def summary(login: int | str | None = None, recent: int = 30) -> dict:
     """给面板用。全部从 state + 日志现算，不做任何缓存，避免和实际不一致。"""
     state = load_state(login)
@@ -6336,6 +6351,10 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 前端写死一份、后端校验另一份，加品种时必然漂移。
         "symbols": symbol_options(),
         "symbol": saved_cfg.get("symbol", _defaults.symbol),
+        # 面板「交易参数」的默认值：上次选过的品种 / 模式 / 间隔（见 live/prefs.py）。
+        # 和上面的 cfg 是两件事：cfg 是「正在跑（或上一场跑过）的参数」，
+        # prefs 是「下次打开时帮用户填好」。没开跑过的人只有后者。
+        "prefs": _prefs_snapshot(),
         # ---------------- AI 辅助做单 ----------------
         # pending_signal 的存在本身就是「现在该弹窗」。面板 1 秒轮询这一格，
         # 不去另开接口——多一个请求就多一处会不同步的地方。

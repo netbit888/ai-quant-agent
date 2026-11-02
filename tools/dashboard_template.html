@@ -2359,11 +2359,11 @@
 
       <div class="setup-card">
         <h3>交易参数</h3>
-        <div class="sub">中途改这些等于换了一个策略，而仓位还挂在旧参数上——所以开跑即锁。</div>
+        <div class="sub">中途改这些等于换了一个策略，而仓位还挂在旧参数上——所以开跑即锁。没在跑的时候改过的会自动记住，下次打开不用重选。</div>
         <div class="row">
           <span class="lb">品种</span>
           <label class="mini at-int" title="做单品种。只列实测过 point/contract/spread 的品种——没测过的品种点差成本会算成 0，风险失控">
-            <select id="atSymbol" onchange="updateCostHint()"></select>
+            <select id="atSymbol" onchange="updateModeHint(); saveAtPrefs()"></select>
           </label>
         </div>
         <div class="row">
@@ -2371,26 +2371,26 @@
           <div class="at-mode" role="radiogroup" aria-label="做单模式">
             <label title="只调模型、只在本地记账，不发单给券商">
               <input type="radio" name="atMode" id="atModePaper" value="paper"
-                     onchange="updateModeHint()"> 纸面
+                     onchange="updateModeHint(); saveAtPrefs()"> 纸面
             </label>
             <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
               <input type="radio" name="atMode" id="atModeLive" value="live" checked
-                     onchange="updateModeHint()"> 真实做单
+                     onchange="updateModeHint(); saveAtPrefs()"> 真实做单
             </label>
             <label title="和真实做单一样，但每次开/平仓前弹窗等你点。硬止损和持仓上限仍由程序直接执行，不弹窗">
               <input type="radio" name="atMode" id="atModeAssist" value="assist"
-                     onchange="updateModeHint()"> AI 辅助
+                     onchange="updateModeHint(); saveAtPrefs()"> AI 辅助
             </label>
             <label class="at-sub" id="atAssistPaperWrap"
                    title="演练：弹窗照弹、同意也只记账，不发真单">
-              <input type="checkbox" id="atAssistPaper" onchange="updateModeHint()"> 纸面演练
+              <input type="checkbox" id="atAssistPaper" onchange="updateModeHint(); saveAtPrefs()"> 纸面演练
             </label>
           </div>
         </div>
         <div class="row">
           <span class="lb">间隔</span>
           <label class="mini at-int" title="两次决策之间的间隔。3 秒是物理下限：模型单次调用约 2.6 秒">
-            <select id="atInterval" onchange="updateCostHint()">
+            <select id="atInterval" onchange="updateModeHint(); saveAtPrefs()">
               <option value="3">3 秒</option>
               <option value="5">5 秒</option>
               <option value="10">10 秒</option>
@@ -4250,6 +4250,12 @@ function renderAutoTrade(a) {
     const runningIv = a.cfg && a.cfg.interval_sec;
     if (runningIv) $('atInterval').value = String(runningIv);
     updateModeHint();
+    // 正在跑的这条 cfg 是最新的事实：停止之后界面就该停在它上面，
+    // 不许下一秒被 prefs 改回上一场的旧选择。
+    atPrefsApplied = true;
+  } else {
+    // 没在跑：把上次的选择填回来（只填一次，之后以用户手动改动为准）
+    applyPrefs(a);
   }
 
   // 默认只显示真执行过的行。60 秒一轮 = 一小时 60 条，其中绝大多数是
@@ -4455,11 +4461,74 @@ function fillSymbolOptions(a) {
   if (!el || !Array.isArray(a.symbols) || !a.symbols.length) return;
   const cur = a.symbol || 'XAUUSDm';
   a.symbols.forEach(s => { atSymbolSpecs[s.symbol] = s; });
-  // 运行中要把下拉框对齐到实际在跑的品种，否则界面说黄金、实际在跑 BTC
-  const want = a.running ? cur : (el.value || cur);
+  // 运行中要把下拉框对齐到实际在跑的品种，否则界面说黄金、实际在跑 BTC。
+  // 没在跑时的优先级：用户当前的选中 > 上次记住的（prefs）> state 里上一场跑过的。
+  // 首次渲染时 el.value 还是空串，所以会落到 prefs——这正是「记住上次选择」的落点。
+  const pref = (a.prefs && a.prefs.symbol) || cur;
+  const want = a.running ? cur : (el.value || pref);
   el.innerHTML = a.symbols.map(s =>
     `<option value="${esc(s.symbol)}">${esc(s.label)}</option>`).join('');
   if (a.symbols.some(s => s.symbol === want)) el.value = want;
+}
+
+/* 交易参数的「上次选择」回填（品种在 fillSymbolOptions 里单独处理）。
+
+   只回填一次。之后每 1 秒的轮询不再碰控件——用户刚点完「AI 辅助」、保存请求
+   还在路上时，轮询拿到的还是旧值，每次都覆盖就会变成「点了自己跳回去」。
+
+   期间若已经在跑（running），renderAutoTrade 走的是另一条分支：按实际在跑的
+   cfg 对齐，那才是真相，不许被 prefs 盖掉。 */
+let atPrefsApplied = false;
+
+function applyPrefs(a) {
+  const p = a && a.prefs;
+  if (!p || atPrefsApplied) return;
+  atPrefsApplied = true;
+
+  // 间隔：只认下拉框里真有的档位。赋一个不存在的 value 会让 select 变空白，
+  // 界面看起来像「参数丢了」，比没记住更糟。
+  const ivEl = $('atInterval');
+  const iv = String(p.interval_sec == null ? '' : p.interval_sec);
+  const hasIv = !!(ivEl && ivEl.options && Array.from(ivEl.options)
+    .some(o => o.value === iv));
+  if (hasIv) ivEl.value = iv;
+
+  const mode = p.mode || 'live';
+  const setChecked = (id, on) => { const e = $(id); if (e) e.checked = !!on; };
+  // 先全部落定再 updateModeHint：三条 radio 是同一组，逐条改会让 hint 拿到
+  // 中间态（比如先勾了纸面、又勾辅助，hint 会闪一下纸面）。
+  if (mode === 'assist') {
+    setChecked('atModeAssist', true);
+    setChecked('atAssistPaper', !!p.assist_paper);
+  } else if (mode === 'paper') {
+    setChecked('atModePaper', true);
+    setChecked('atAssistPaper', false);
+  } else {
+    setChecked('atModeLive', true);
+    setChecked('atAssistPaper', false);
+  }
+  updateModeHint();
+}
+
+/* 参数一改就记下来（防抖 300ms：拖下拉/连点 radio 时不会连发几次）。
+   失败静默——这是「下次帮我填好」，不是业务动作，弹个红条只会让人以为
+   做单出了问题。真正的兜底在后端：启动成功时按实际 cfg 再写一次。 */
+let atPrefsTimer = null;
+
+function saveAtPrefs() {
+  if (atPrefsTimer) clearTimeout(atPrefsTimer);
+  atPrefsTimer = setTimeout(() => {
+    atPrefsTimer = null;
+    try {
+      fetch('/api/autotrade/prefs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: atSymbol(), interval_sec: atIntervalSec(),
+          mode: atMode(), assist_paper: atAssistPaper(),
+        }),
+      }).catch(() => {});
+    } catch (e) { /* 老 WebView / 假 DOM 里没有 fetch：不影响任何操作 */ }
+  }, 300);
 }
 
 /* 全局 toast：alert() 的替代。区别：不打断操作流、样式随主题、
