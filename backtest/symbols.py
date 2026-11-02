@@ -33,6 +33,14 @@ SYMBOLS = {
     #   atr_pts=82706 点 —— H4 ATR(14) 中位数，即 827.06 USD
     # 成本占比：640 / 82706 = 0.77%，远低于 15% 的排除线，可以上。
     "BTCUSDm": {"point": 0.01, "contract": 1.0, "spread": 640, "atr_pts": 82706, "digits": 2},
+    # 2026-11-02 实测（Exness-MT5Real23 美分账户，终端里唯一的黄金品种）：
+    #   point=0.001 / digits=3 / spread=240 点 —— 与 XAUUSDm 完全一致
+    #   atr_pts 沿用 8583（point 相同，等于同一张价格图）
+    #   **contract=1.0**，这是与 XAUUSDm（100.0）唯一的差别，也是所有量纲坑的源头：
+    #   美分账户把手数放大 100 倍来配合"余额以分计"，所以 1 手 = 1 盎司。
+    #   同样的 lots 数字，这里的实际仓位只有标准户的 1/100。
+    "XAUUSDc": {"point": 0.001, "contract": 1.0, "spread": 240, "atr_pts": 8583,
+                "digits": 3, "cent_account": True},
 }
 
 STRUCT_ATR = 1.63

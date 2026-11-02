@@ -1290,11 +1290,13 @@ close —— true 表示立刻市价平仓，false 表示继续持有。
 reason —— 不超过 40 字的中文依据，必须引用具体数字。
 
 【系统的自动规则（不用你判断，也不要跟它较劲）】
-- 浮亏达到 {SL_USD} USD：系统直接市价平，不会问你；
+- 浮亏达到 {SL_USD} {MONEY_UNIT}：系统直接市价平，不会问你；
 - 持仓满 {MAX_HOLD_MIN} 分钟：系统无条件平掉，不管盈亏；
-- 浮盈不到 {TP_MIN_USD} USD：系统也不问你要不要平，直接继续持有。
+- 浮盈不到 {TP_MIN_USD} {MONEY_UNIT}：系统也不问你要不要平，直接继续持有。
 这些数字会随配置变，以本段显示的为准，不要引用你记忆里的旧值。
-所以**你被问到，就说明这笔单已经浮盈 ≥ {TP_MIN_USD} USD**，而且还没到 {MAX_HOLD_MIN} 分钟。
+所以**你被问到，就说明这笔单已经浮盈 ≥ {TP_MIN_USD} {MONEY_UNIT}**，而且还没到 {MAX_HOLD_MIN} 分钟。
+（金额单位是账户的结算货币：美元户是 USD，美分户是 USC。同一个数字在两种
+账户上的实际价值差 100 倍，所以以这里写明的单位为准，不要自己换算。）
 
 【判断原则】
 - 主看 K 线结构，tick 只做辅证；两者冲突时以 K 线为准。
@@ -1350,7 +1352,7 @@ lesson —— 一句话，不超过 60 字，说清「主要因为什么赚/亏�
 
 REVIEW_PROMPT = """这一笔刚平掉。
 方向：{direction_text}　手数：{lots}　开仓 {entry} → 平仓 {exit_price}
-最终盈亏：{pnl:+.2f} USD　持仓 {held_text}
+最终盈亏：{pnl:+.2f} {MONEY_UNIT}　持仓 {held_text}
 开仓理由：{why_in}
 平仓理由：{why_out}
 
@@ -1393,6 +1395,10 @@ def exit_params(cfg: Cfg, plan: str | None) -> dict:
 
     返回 dict 而不是 tuple：调用方只取自己关心的键，以后加参数不用改签名。
     `plan` 为空（旧数据、state 里没存）一律按震荡参数，保持历史行为不变。
+
+    金额单位统一是**账户结算货币**：美元户读到 3.00 就是 3 美元，
+    美分户读到 3.00 就是 3 分。同一个 3.00 在美分户上正好对应小 100 倍的
+    仓位（0.01 手 XAUUSDc = 0.01 盎司），价距仍然是 3.00 美元——两者等价。
     """
     if plan == "trend":
         return {
@@ -2307,7 +2313,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
     seconds_ago = int(rc.get("seconds_ago") or 0)
     if 0 < seconds_ago < 300:
         pnl = rc.get("pnl")
-        pnl_text = f"（盈亏 {float(pnl):+.2f} USD）" if pnl is not None else ""
+        pnl_text = (f"（盈亏 {float(pnl):+.2f} {money_label(_acct_currency())}）"
+                    if pnl is not None else "")
         rc_text = (
             f"【刚平仓提醒】{seconds_ago} 秒前你刚平掉一笔{pnl_text}。\n"
             "刚平仓后的几分钟是「报复单」高发窗口——你自己的教训库标着"
@@ -2342,12 +2349,15 @@ def build_exit_prompt(rows: list[dict], position: dict, bid: float, ask: float,
     entry = float(position.get("price_open") or 0.0)
     lots = float(position.get("lots") or 0.0)
     cur = bid if direction > 0 else ask  # 平仓价：多头看 bid，空头看 ask
-    pnl = (cur - entry) * direction * contract * lots
+    # × _acct_factor()：价差 × 合约 × 手数 算出来是美元，模型和阈值都用
+    # 账户货币（美分户是分），两边必须同口径，否则「浮盈 0.01」和
+    # 「止盈门槛 3.25」在美分户上永远对不上。
+    pnl = (cur - entry) * direction * contract * lots * _acct_factor()
 
     held = int(time.time()) - int(position.get("opened_at") or time.time())
     held_text = f"{held // 60} 分 {held % 60} 秒" if held >= 60 else f"{max(held, 0)} 秒"
     dg = _digits(symbol)
-    pnl_text = f"{pnl:+.2f} USD（{cur - entry:+.{dg}f}）"
+    pnl_text = f"{pnl:+.2f} {money_label(_acct_currency())}（{cur - entry:+.{dg}f}）"
     # 打法在开仓那一刻就定死了（见 exit_params）。这里只是把它讲给模型听：
     # 不知道自己是趋势单还是震荡单，模型会拿震荡的"贴反向沿就走"去管趋势单。
     plan = position.get("plan") or "range"
@@ -2442,8 +2452,10 @@ def review_window(rows: list[dict], close_ts: int, tf_sec: int = 60,
 def _sl_price_for(cfg, pos: dict) -> float:
     """这笔单子的**硬止损价**。0 表示没有止损线。
 
-    `cfg.sl_usd` 是美元金额，必须按 `contract × lots` 换成价格距离，
-    不能直接当价格用：0.01 手黄金时 1 美元价格 = 1 USD，0.05 手就是 5 USD。
+    `cfg.sl_usd` 的金额单位是**账户结算货币**（美元户是 USD，美分户是分），
+    必须换成价格距离才能当价格用。换算两头都要换算成同一口径：
+        单位数 × (1 USD 折多少账户货币) = 每 1.00 价距亏多少账户货币
+    美分户 0.01 手 XAUUSDc：0.01 盎司 × 100 = 1，所以 3.00 分 → 价距 3.00。
     """
     if not cfg.sl_usd or float(cfg.sl_usd) <= 0:
         return 0.0
@@ -2452,7 +2464,7 @@ def _sl_price_for(cfg, pos: dict) -> float:
         entry = float(pos.get("price_open") or 0.0)
         if lots <= 0 or entry <= 0:
             return 0.0
-        unit = float(_symbol_contract(cfg.symbol)) * lots
+        unit = float(_symbol_contract(cfg.symbol)) * lots * _acct_factor()
         if unit <= 0:
             return 0.0
         dist = abs(float(cfg.sl_usd)) / unit
@@ -2538,6 +2550,7 @@ def build_review_prompt(rows: list[dict], position: dict, exit_price: float,
         lots=float(position.get("lots") or 0.0),
         entry=_px(symbol, position.get("price_open")),
         exit_price=_px(symbol, exit_price), pnl=pnl, held_text=held_text,
+        MONEY_UNIT=money_label(_acct_currency()),
         why_in=(position.get("entry_reason") or "未记录")[:120],
         why_out=(position.get("exit_reason") or "外部平仓")[:120],
         before=REVIEW_BEFORE_BARS, after=after, n=len(rows), tf=tf,
@@ -3374,11 +3387,18 @@ MIN_OPEN_GAP_SEC = 3
 # 允许上真单的品种。不直接用 SYMBOLS.keys()：那张表是回测用的全量清单，
 # 里面的外汇/指数没在实盘验证过——实盘白名单必须显式列出来，加一个要想一次。
 # 每个品种的 point/contract/spread/atr 都在 backtest/symbols.py 里带实测来源。
-TRADABLE_SYMBOLS = ("XAUUSDm", "BTCUSDm")
+#
+# XAUUSDc = 美分账户的黄金（2026-11-02 加）。同一个行情图、同一条 K 线，
+# contract=1 盎司（标准户是 100 盎司/手），所以**同一个手数在这里的仓位只有
+# 1/100**；而账户余额、profit、阈值又都按「分」计——两边同时缩 100 倍，
+# 于是 0.01 手 + 止损 3.00 分 与 标准户 0.01 手 + 止损 3.00 美元 落在
+# 同一个价格位置上。**不要为了"对齐仓位"把手数乘 100**，那样保证金会不够。
+TRADABLE_SYMBOLS = ("XAUUSDm", "XAUUSDc", "BTCUSDm")
 
 # 给面板用的品种展示名（下拉框文案）。键必须都在 TRADABLE_SYMBOLS 里。
 SYMBOL_LABELS = {
     "XAUUSDm": "黄金 XAUUSD",
+    "XAUUSDc": "黄金 XAUUSD（美分）",
     "BTCUSDm": "比特币 BTCUSD",
 }
 
@@ -3412,6 +3432,9 @@ def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
     out = template.replace("{SYMBOL_LABEL}", _symbol_label(cfg.symbol))
     out = out.replace("{SL_USD}", f"{ep['sl_usd']:g}")
     out = out.replace("{TP_MIN_USD}", f"{ep['tp_min_usd']:g}")
+    # 金额单位跟着账户走（USD / USC）。模型看到「3」和「3 分」是两件事，
+    # 而它给出的浮盈数字已经是账户货币——不给单位会让它按美元理解。
+    out = out.replace("{MONEY_UNIT}", money_label(_acct_currency()))
     out = out.replace("{MAX_HOLD_MIN}", f"{int(ep['max_hold_sec']) // 60}")
     # 贴上沿做多的分位门槛（= 1 - zone_edge）。写成 100-... 而不是硬编码 65：
     # 面板上一改 zone_edge，system 里那句话就必须跟着变，否则又是"说一套做一套"。
@@ -3467,7 +3490,8 @@ def can_open(state: dict, now: int, has_position: bool, cfg: Cfg,
         return False, f"已达开仓上限 {cfg.max_trades} 笔"
 
     if cfg.max_loss_usd and float(state.get("pnl") or 0.0) <= -abs(cfg.max_loss_usd):
-        return False, f"累计亏损已达 {cfg.max_loss_usd:.2f} USD 上限"
+        return False, (f"累计亏损已达 {cfg.max_loss_usd:.2f} "
+                       f"{money_label(_acct_currency())} 上限")
 
     left = cooldown_left(state, now, direction, cfg)
     if left > 0:
@@ -3502,21 +3526,100 @@ def _positions(symbol: str) -> list[dict] | None:
     return [p for p in rows if str(p.get("symbol")) == symbol]
 
 
+_CONTRACT_CACHE: dict[str, float] = {}
+
+
 def _symbol_contract(symbol: str) -> float:
+    hit = _CONTRACT_CACHE.get(symbol)
+    if hit:
+        return hit
+    value = 0.0
     try:
         from live.journal import _mt5, mt5_call
 
         info = mt5_call(_mt5().symbol_info, symbol)
         if info is not None and getattr(info, "trade_contract_size", 0):
-            return float(info.trade_contract_size)
+            value = float(info.trade_contract_size)
     except Exception:  # noqa: BLE001
-        pass
-    try:
-        from backtest.symbols import SYMBOLS
+        value = 0.0
+    if not value:
+        try:
+            from backtest.symbols import SYMBOLS
 
-        return float((SYMBOLS.get(symbol) or {}).get("contract") or 100.0)
+            value = float((SYMBOLS.get(symbol) or {}).get("contract") or 100.0)
+        except Exception:  # noqa: BLE001
+            value = 100.0
+    # 同一进程内合约规格不会变，缓存住：止损价换算、金额核算每轮都要用，
+    # 每次都去碰 MT5 等于把一次 tick 读取变成两次，还得排队拿锁。
+    _CONTRACT_CACHE[symbol] = value
+    return value
+
+
+_ACCT_CUR = {"code": "", "ts": 0.0}
+_ACCT_TTL = 60.0
+
+
+def _acct_currency() -> str:
+    """当前账户的结算币种（USD / USC …）。读不到按 USD。
+
+    **必须缓存**：这个函数被每一行流水文案、每一条闸门 reason 调用，
+    而背后是一次 `account_info`——要拿 MT5 的锁。不缓存的话，一段
+    30 行的流水会变成 30 次账户查询，止损快查被自己的日志拖死。
+    账户币种在进程生命周期内不会变（换账户本来就该重启面板）。
+    """
+    now = time.time()
+    hit = _ACCT_CUR["code"]
+    if hit and now - float(_ACCT_CUR["ts"]) < _ACCT_TTL:
+        return hit
+    code = "USD"
+    try:
+        from live.journal import _mt5, mt5_call
+
+        info = mt5_call(_mt5().account_info)
+        if info is not None and getattr(info, "currency", None):
+            code = str(info.currency).upper()
     except Exception:  # noqa: BLE001
-        return 100.0
+        code = "USD"
+    _ACCT_CUR.update(code=code, ts=now)
+    return code
+
+
+def money_label(currency: str | None = None) -> str:
+    """金额后缀。**配置里的金额、面板上的金额、模型看到的金额都用这个单位。**
+
+    USD 户显示 USD，美分户显示 USC —— 光写个数字会让「3.00」在两种账户上
+    相差 100 倍，而界面上看起来一模一样，这是最难自己发现的一类错。
+    """
+    c = (currency or "USD").upper()
+    return "USC" if c in {"USC", "XUSC", "CNT"} else c
+
+
+_ACCT_F = {"factor": 0.0, "ts": 0.0}
+
+
+def _acct_factor() -> float:
+    """1 USD 等于多少**账户结算货币**：美元户 1，美分户 100。
+
+    代码内部按「价差 × 合约 × 手数」算出来的钱都是美元，而 MT5 的 profit、
+    账户余额、cfg 里的阈值全是账户货币。两者只差这一个系数：
+        账户金额 = 美元金额 × _acct_factor()
+    只在需要和账户货币对齐的地方用它，不要往别处扩散。
+    """
+    now = time.time()
+    hit = _ACCT_F["factor"]
+    if hit and now - float(_ACCT_F["ts"]) < _ACCT_TTL:
+        return hit
+    factor = 1.0
+    try:
+        from live.journal import usd_rate
+
+        rate = usd_rate(_acct_currency())
+        if rate > 0:
+            factor = 1.0 / rate
+    except Exception:  # noqa: BLE001
+        factor = 1.0
+    _ACCT_F.update(factor=factor, ts=now)
+    return factor
 
 
 def _quote(symbol: str) -> tuple[float, float] | None:
@@ -3580,12 +3683,53 @@ def retcode_hint(rc: int | None) -> str | None:
     return _RETCODE_HINT.get(int(rc)) if rc is not None else None
 
 
-def precheck(cfg: Cfg) -> dict:
-    """发真单之前的体检。纸面模式直接放行。"""
-    if cfg.dry_run:
-        return {"ok": True, "errors": []}
+def _symbol_probe(symbol: str) -> tuple[bool, object | None, list[str]]:
+    """品种在这个终端里存不存在；不存在时给出名字相近的候选。
 
+    返回 `(查过没有, info, 近名候选)`。**第一个值是三态的钥匙**：
+    没连上终端时无从判断，必须返回 False 让调用方跳过检查——否则
+    「读不到」会被当成「不存在」，无终端环境下每条配置都过不了体检。
+
+    为什么必须单独查（2026-11-02）：换账户后品种名会变（标准户 XAUUSDm →
+    美分户 XAUUSDc），而名字不存在时 `symbol_info_tick` 只是返回 None，
+    不报错——流水里留一行「拿不到报价」，看着像行情断了，其实是配错了名字。
+    启动时当场点出来，比让他盯着一小时的空跑日志强。
+    """
+    try:
+        from live.journal import _mt5, mt5_call
+
+        mt5 = _mt5()
+        info = mt5_call(mt5.symbol_info, symbol)
+        if info is not None:
+            return True, info, []
+        near: list[str] = []
+        try:
+            prefix = symbol[:3]
+            for s in (mt5_call(mt5.symbols_get, prefix + "*") or []):
+                near.append(str(getattr(s, "name", "")))
+        except Exception:  # noqa: BLE001
+            near = []
+        return True, None, [n for n in near if n][:8]
+    except Exception:  # noqa: BLE001
+        return False, None, []
+
+
+def precheck(cfg: Cfg) -> dict:
+    """发真单之前的体检。纸面模式只查品种（没报价连纸面也跑不动）。"""
     issues: list[str] = []
+    # 品种存在性排最前：它决定后面所有检查有没有意义。
+    # 换账户后最常见的坑就是名字变了，而错误表现只有「拿不到报价」。
+    checked, info, near = _symbol_probe(cfg.symbol)
+    if checked and info is None:
+        hint = f"；终端里相近的品种：{'/'.join(near)}" if near else ""
+        issues.append(
+            f"终端里没有品种 {cfg.symbol}（换账户后品种名会变，"
+            f"美分账户的黄金是 XAUUSDc）{hint}"
+        )
+
+    if cfg.dry_run:
+        return {"ok": not issues, "errors": issues}
+
     try:
         from execution.live import ExecConfig, Executor
 
@@ -3754,7 +3898,8 @@ def _tick_body(cfg: Cfg, login, now: int,
         if now - int(state["started_at"]) >= cfg.max_minutes * 60:
             return _stop(state, f"到达运行上限 {cfg.max_minutes} 分钟", now, login)
     if cfg.max_loss_usd and float(state.get("pnl") or 0.0) <= -abs(cfg.max_loss_usd):
-        return _stop(state, f"累计亏损 {state['pnl']:.2f} USD 触发上限", now, login)
+        return _stop(state, f"累计亏损 {state['pnl']:.2f} "
+                                f"{money_label(_acct_currency())} 触发上限", now, login)
 
     # --- 行情 ------------------------------------------------------------
     q = quote if quote is not None else _quote(cfg.symbol)
@@ -4504,20 +4649,27 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
         return None   # 到门槛了，让模型决定平还是继续跑
 
     # tp_min_usd=0：回退到旧的最短持仓保护
+    # 豁免线同样是账户结算货币，与浮盈亏同单位，直接比。
     guard = abs(cfg.min_hold_exempt_usd)
     if cfg.min_hold_sec > 0 and held_sec < cfg.min_hold_sec and float_pnl > -guard:
         return {"close": False, "source": "min_hold",
                 "reason": (f"最短持仓中：已 {held_sec}s / 需 {cfg.min_hold_sec}s，"
-                           f"浮盈亏 {float_pnl:+.2f} USD（未触及 -{guard:.2f} 豁免线），"
+                           f"浮盈亏 {float_pnl:+.2f} {money_label(_acct_currency())}"
+                           f"（未触及 -{guard:.2f} 豁免线），"
                            f"本轮不调模型")
                 }
     return None
 
 
 def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
-    """这一笔的净盈亏。优先读券商成交记录，读不到就用价差估。
+    """这一笔的净盈亏，单位是**账户结算货币**（与 cfg 里的阈值同单位）。
 
-    估算不含点差和佣金，只能看方向对不对；真实数字以 MT5 账本为准。
+    优先读券商成交记录，读不到就用价差估。估算不含点差和佣金，
+    只能看方向对不对；真实数字以 MT5 账本为准。
+
+    这里**不做币种换算**（2026-11-02 定）：`deal.profit` 本来就是账户货币，
+    美分户返回的是「分」。配置里的 sl_usd / max_loss_usd 也按账户货币写，
+    两边同单位才能直接比。若在这换算成美元，反而要把每个阈值都改成 1/100。
     """
     try:
         from live.journal import mt5_call, _mt5 as _conn
@@ -4544,7 +4696,8 @@ def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
     lots = float(pos.get("lots") or 0.0)
     if not entry or not lots:
         return 0.0
-    return round((cur - entry) * direction * _symbol_contract(cfg.symbol) * lots, 2)
+    return round((cur - entry) * direction * _symbol_contract(cfg.symbol)
+                 * lots * _acct_factor(), 2)
 
 
 # ------------------------------------------------------------------ 主循环
@@ -4558,7 +4711,8 @@ def _fmt(row: dict) -> str:
         return (f"{clock} 开仓 {arrow} {row.get('lots')} @ {row.get('price')} "
                 f"p_up={row.get('p_up')} [{row.get('source')}] {row.get('reason') or ''}")
     if kind == "close":
-        return (f"{clock} 平仓 #{row.get('ticket')} 盈亏 {row.get('pnl'):+.2f} USD "
+        return (f"{clock} 平仓 #{row.get('ticket')} 盈亏 {row.get('pnl'):+.2f} "
+                f"{money_label(_acct_currency())} "
                 f"[{row.get('source')}] {row.get('reason') or ''}")
     if kind == "hold":
         return f"{clock} 持有 {row.get('reason') or ''}"
@@ -4623,10 +4777,16 @@ def validate_cfg(cfg: Cfg) -> list[str]:
     # 止损/止盈这对参数是配套的，单独调一个只会换一种亏法：
     #   止盈门槛 ≤ 止损 → 盈亏比还在 1 附近甚至更差，白加止损；
     #   止损太接近点差 → 直接被点差打掉，等于每开一单就主动交一次过路费。
+    #
+    # 金额单位是**账户结算货币**：美元户 0.5 = 0.5 美元，美分户 0.5 = 0.5 分。
+    # 这条判据在两种账户下天然等价 —— 价距 = 金额 / (合约 × 手数 × 每美元折
+    # 多少账户货币)，美分户的金额小 100 倍、分母也大 100 倍，比值不变。
+    # 所以阈值不需要按币种改，只需要把单位标出来，别让人对着两个 3.00 猜。
     if cfg.sl_usd > 0 and cfg.sl_usd < 0.5:
+        unit = money_label(_acct_currency())
         issues.append(
-            f"止损 {cfg.sl_usd:.2f} 太小：单笔点差就 0.24，"
-            "止损不到 0.5 等于一开仓就被点差打掉"
+            f"止损 {cfg.sl_usd:.2f} {unit} 太小：单笔点差就 0.24 的价距，"
+            f"止损不到 0.5 {unit} 等于一开仓就被点差打掉"
         )
     if cfg.tp_min_usd > 0 and cfg.sl_usd > 0 and cfg.tp_min_usd <= cfg.sl_usd:
         issues.append(
@@ -6117,6 +6277,14 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 所以缺了就回退到 Cfg 的当前默认值，而不是显示 None。
         "sl_usd": saved_cfg.get("sl_usd", _defaults.sl_usd),
         "tp_min_usd": saved_cfg.get("tp_min_usd", _defaults.tp_min_usd),
+        # 金额单位（USD / USC）。上面这些阈值是**账户结算货币**的数字，
+        # 面板必须把它贴在数字旁边：美分户的 3.00 是 3 分，不标出来
+        # 会和美元户的 3.00 长得一模一样，差 100 倍也看不出来。
+        "money_unit": money_label(_acct_currency()),
+        "account_currency": _acct_currency(),
+        # 1 USD 折多少账户货币（美元户 1，美分户 100）。面板上的成本估算
+        # 都是按美元算的，要乘这个系数才能和上面的阈值同口径。
+        "acct_factor": _acct_factor(),
         "max_hold_sec": saved_cfg.get("max_hold_sec", _defaults.max_hold_sec),
         # 趋势打法（2026-10-28 分 regime）。这三个字段旧 state 里没有，
         # 回退到当前默认值；面板持仓行按 position.plan 选用哪套显示。

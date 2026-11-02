@@ -3198,11 +3198,18 @@ function renderLive(d) {
   $('acctServer').textContent = `${a.server || '—'} · ${a.name || ''}`;
   const modeEl = $('acctMode');
   const isReal = a.trade_mode === 'real';
-  modeEl.textContent = isReal ? '真实账户' : (a.trade_mode === 'demo' ? '模拟账户' : (a.trade_mode || '—'));
+  // 美分账户（Exness 的 USC 等）：balance / profit / 阈值全部以「分」计，
+  // 1453 其实是 14.53 美元。不折算、不标注的话，它和美元账户长得一模一样，
+  // 而数字差 100 倍——这是最难自己发现的一类错，必须写在界面上。
+  const curCode = String(a.currency || '').toUpperCase();
+  const isCentAcct = !!curCode && curCode !== 'USD' && Number(a.usd_rate || 1) < 1;
+  modeEl.textContent = (isReal ? '真实账户' : (a.trade_mode === 'demo' ? '模拟账户' : (a.trade_mode || '—')))
+    + (isCentAcct ? ' · 美分账户' : '');
   modeEl.className = 'badge-mode ' + (isReal ? 'badge-real' : 'badge-demo');
-  $('acctBalance').textContent = fmt(a.balance) + ' ' + (a.currency || '');
-  $('acctEquity').textContent = fmt(a.equity);
-  $('acctFree').textContent = fmt(a.margin_free);
+  $('acctBalance').textContent = fmt(a.balance) + ' ' + (a.currency || '')
+    + (isCentAcct && a.balance_usd != null ? `（≈ ${fmt(a.balance_usd)} USD）` : '');
+  $('acctEquity').textContent = fmt(a.equity) + (isCentAcct ? ' ' + curCode : '');
+  $('acctFree').textContent = fmt(a.margin_free) + (isCentAcct ? ' ' + curCode : '');
   $('acctFloat').textContent = money(a.profit);
   $('acctFloat').className = 'mono ' + signClass(a.profit);
   const sy = d.sync || {};
@@ -3359,12 +3366,22 @@ function renderLive(d) {
  */
 let atLoading = false;
 
+// 当前账户的金额单位（USD / USC）。美分账户的一切金额都是「分」，
+// 界面上每一处提到钱的地方都要带上它，否则数字看着一样、实际差 100 倍。
+let AT_MONEY = 'USD';
+// 1 USD 折多少账户货币（美元户 1，美分户 100）。成本估算内部按美元算，
+// 只有乘上它才能和「止损 3.00」这种账户货币阈值摆在一起比较。
+let AT_FACTOR = 1;
+
 async function loadAutoTrade() {
   if (atLoading) return;          // 慢响应时别把请求堆起来
   atLoading = true;
   try {
     const r = await fetch('/api/autotrade');
-    renderAutoTrade(await r.json());
+    const d = await r.json();
+    if (d && d.money_unit) AT_MONEY = d.money_unit;
+    if (d && d.acct_factor) AT_FACTOR = Number(d.acct_factor) || 1;
+    renderAutoTrade(d);
   } catch (e) {
     // 静默失败：这块挂了不该把整个实盘面板拖下水
     const st = $('atState');
@@ -4127,12 +4144,15 @@ function renderAutoTrade(a) {
       // 持仓是趋势单时用户会以为「趋势单到 3.25 就要平」——而事实是 7.00。
       // 统计本身不分 plan，所以两个档位都写出来，不替他选。
       const tpTrend = Number(a.tp_min_trend || 0);
+      // 金额单位跟着账户币种走（USD / USC）。美分户的 3.00 是 3 分，
+      // 不标单位就会和美元户的 3.00 看起来一样，实际差 100 倍。
+      const mu = a.money_unit || 'USD';
       const tpTxt = (a.tp_min_usd == null) ? ''
         : (tpTrend > 0 && tpTrend !== Number(a.tp_min_usd)
-            ? `（门槛 震荡 ${fmt(a.tp_min_usd, 2)} / 趋势 ${fmt(tpTrend, 2)}）`
-            : `（止盈门槛 ${fmt(a.tp_min_usd, 2)}）`);
+            ? `（门槛 震荡 ${fmt(a.tp_min_usd, 2)} / 趋势 ${fmt(tpTrend, 2)} ${mu}）`
+            : `（止盈门槛 ${fmt(a.tp_min_usd, 2)} ${mu}）`);
       $('atSl').textContent = `程序止损 ${slN} 笔`
-        + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)}）` : '')
+        + (a.sl_usd ? `（−${fmt(a.sl_usd, 2)} ${mu}）` : '')
         + beTxt
         + (a.tp_min_usd ? ` · 未达止盈门槛不平${tpTxt}` : '');
       $('atSl').style.color = 'var(--warn)';
@@ -4383,7 +4403,9 @@ function updateModeHint() {
       + `硬止损与持仓上限由程序直接执行${paper ? ' · 不发真单' : ''}`;
     el.className = paper ? 'mini' : 'mini red';
   } else if (atLiveMode()) {
-    const total = perTrip == null ? '未知' : fmt(trips * perTrip, 2) + ' USD/小时（上限）';
+    // × AT_FACTOR：perTrip 是美元，界面统一按账户货币显示。
+    const total = perTrip == null ? '未知'
+      : fmt(trips * perTrip * AT_FACTOR, 2) + ' ' + AT_MONEY + '/小时（上限）';
     el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
       + `往返上限 ${trips} 笔 ≈ 点差上限 ${total}`;
     el.className = 'mini red';
@@ -4493,7 +4515,8 @@ async function startAutoTrade() {
             ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
               + `每小时约 ${calls} 次模型调用；平仓后冷却 60 秒、同向重进 180 秒，往返上限 60 笔/小时`
               + `（模型可跳过，实际通常更少），`
-              + `最坏点差约 ${perTrip == null ? '未知' : fmt(60 * perTrip, 2) + ' USD'}。`
+              + `最坏点差约 ${perTrip == null ? '未知'
+                  : fmt(60 * perTrip * AT_FACTOR, 2) + ' ' + AT_MONEY}。`
             : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
               + `每小时约 ${calls} 次模型调用。`),
       cost: assist ? (paper ? '辅助演练 + 模型调用' : '弹窗确认 + 真实下单')
@@ -5063,7 +5086,7 @@ async function quitApp() {
   }
   const f = Number(p.float_pnl || 0);
   $('quitDesc').textContent =
-    `账户上有 ${p.count} 笔持仓，浮动盈亏 ${f >= 0 ? '+' : ''}${f.toFixed(2)} USD。`;
+    `账户上有 ${p.count} 笔持仓，浮动盈亏 ${f >= 0 ? '+' : ''}${f.toFixed(2)} ${AT_MONEY}。`;
   $('quitCost').textContent = p.dry_run === false
     ? '强制退出会把仓位留在券商那边——这套策略不挂止盈止损，没人看着。'
     : '纸面仓位只存在本地，强制退出等于直接丢弃。';

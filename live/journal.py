@@ -294,6 +294,51 @@ def disconnect() -> None:
 
 # ------------------------------------------------------------------ 账户
 
+# 账户结算币种 → 1 单位该币种折合多少 USD。
+#
+# **只有美分账户不等于 1**：Exness 这一类把余额、profit、commission、swap
+# 全部按「分」记账，数值是美元口径的 100 倍。余额 1453 不是 1453 美元，
+# 是 14.53 美元。不换算的话：
+#   · 成交记录里 -300 会被当成亏 300 美元（实际亏 3 美元）
+#   · `max_loss_usd` / `sl_usd` 这些按 USD 写的阈值晚 100 倍才生效
+#   · 面板战绩卡的均值、盈亏比全部放大 100 倍（比值不受影响，绝对值全错）
+# 佣金/库存费同样按账户货币，所以这个系数要作用在**所有**落账金额上。
+_CENT_CURRENCIES = frozenset({
+    "USC",   # Exness 美分账户（实测 Exness-MT5Real23）
+    "EUC", "GBC", "AUC", "JPC",   # 同类：欧元/英镑/澳元/日元中心账户
+    "XUSC", "CNT",
+})
+
+
+def usd_rate(currency: str | None) -> float:
+    """1 单位账户货币 = 多少 USD。认不出的一律按 1.0（当美元看）。"""
+    if not currency:
+        return 1.0
+    c = str(currency).strip().upper()
+    if not c or c in ("USD", "USDT"):
+        return 1.0
+    if c in _CENT_CURRENCIES:
+        return 0.01
+    # 未知币种静默按 1.0 会把 100 倍误差藏起来，所以留一条降级记录。
+    try:
+        from live.autotrade import _degrade  # 延迟导入：autotrade 也 import 本模块
+
+        _degrade("currency", "", f"未识别的账户币种 {c}，按 1:1 USD 处理")
+    except Exception:  # noqa: BLE001
+        pass
+    return 1.0
+
+
+def current_usd_rate() -> float:
+    """当前账户的换算系数。读不到账户信息按 1.0（等于不换算）。"""
+    try:
+        info = mt5_call(_mt5().account_info)
+        if info is None:
+            return 1.0
+        return usd_rate(getattr(info, "currency", None))
+    except Exception:  # noqa: BLE001
+        return 1.0
+
 
 def is_demo_mode(trade_mode) -> bool:
     """MT5 `trade_mode` → 这个账户是不是虚拟资金。
@@ -318,12 +363,20 @@ def account_snapshot(allow_launch: bool = False) -> dict:
         if ai is None:
             raise RuntimeError(f"读不到账户信息: {mt5.last_error()}")
         ti = mt5.terminal_info()
+    rate = usd_rate(getattr(ai, "currency", None))
     return {
         "login": ai.login,
         "server": ai.server,
         "name": ai.name,
         "currency": ai.currency,
+        # 美分账户的 balance 是「分」。这两个字段是同一笔钱的两种口径：
+        # balance 用账户货币原值（和 MT5 终端显示一致，对账用这个），
+        # balance_usd 换成美元（跨账户比较、和阈值对账用这个）。
+        "usd_rate": rate,
         "balance": round(ai.balance, 2),
+        "balance_usd": round(ai.balance * rate, 2),
+        "equity_usd": round(ai.equity * rate, 2),
+        "margin_free_usd": round(ai.margin_free * rate, 2),
         "equity": round(ai.equity, 2),
         "margin": round(ai.margin, 2),
         "margin_free": round(ai.margin_free, 2),

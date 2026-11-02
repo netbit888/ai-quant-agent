@@ -92,6 +92,52 @@ class TestSymbolSupport(unittest.TestCase):
         issues = autotrade.validate_cfg(autotrade.Cfg(symbol="EURUSDm"))
         self.assertTrue(any("白名单" in i for i in issues), issues)
 
+    def test_cent_symbol_spec_is_measured(self):
+        """美分账户的黄金 XAUUSDc（2026-11-02 实测 Exness-MT5Real23）。
+
+        那个终端里**只有 XAUUSDc，没有 XAUUSDm**。面板配 XAUUSDm 时
+        `symbol_info_tick` 返回 None，不会报错，只会在流水里留一行
+        「拿不到报价」——这正是用户换美分账户后看到的现象。
+        """
+        from backtest.symbols import SYMBOLS
+
+        s = SYMBOLS["XAUUSDc"]
+        self.assertEqual(s["point"], 0.001)
+        self.assertEqual(s["digits"], 3)
+        self.assertEqual(s["spread"], 240)      # 与标准户同点差
+        self.assertEqual(s["contract"], 1.0)    # 1 手 = 1 盎司（标准户 1 手 = 100 盎司）
+        self.assertTrue(s.get("cent_account"))
+        self.assertIn("XAUUSDc", autotrade.TRADABLE_SYMBOLS)
+        self.assertIn("美分", autotrade.SYMBOL_LABELS["XAUUSDc"])
+        self.assertEqual(autotrade.validate_cfg(autotrade.Cfg(symbol="XAUUSDc")), [])
+
+    def test_money_unit_follows_account_currency(self):
+        """金额单位必须跟着账户结算货币标出来，不能一律写 USD。"""
+        self.assertEqual(autotrade.money_label("USD"), "USD")
+        self.assertEqual(autotrade.money_label("USC"), "USC")
+        self.assertEqual(autotrade.money_label(None), "USD")
+
+    def test_cent_account_sl_distance_matches_standard(self):
+        """3.00 在美元户是 3 美元、在美分户是 3 分 —— 价距必须一样。
+
+        这是「美元换成美分」的核心：门槛按账户结算货币读，美分户的仓位
+        同时小 100 倍（0.01 手 = 0.01 盎司 vs 1 盎司），两边落在同一个
+        价格位置上。少乘那 100 倍，止损会跑到 300 美元外，单子只能靠超时平。
+        """
+        pos = {"direction": 1, "lots": 0.01, "price_open": 4000.0}
+        cfg_cent = autotrade.Cfg(symbol="XAUUSDc", lots=0.01, sl_usd=3.0)
+        cfg_usd = autotrade.Cfg(symbol="XAUUSDm", lots=0.01, sl_usd=3.0)
+        try:
+            # ts 设成远期：白拿缓存命中，不去碰 MT5
+            autotrade._ACCT_F.update(factor=100.0, ts=1e18)
+            cent = 4000.0 - autotrade._sl_price_for(cfg_cent, pos)
+            autotrade._ACCT_F.update(factor=1.0, ts=1e18)
+            usd = 4000.0 - autotrade._sl_price_for(cfg_usd, pos)
+        finally:
+            autotrade._ACCT_F.update(factor=0.0, ts=0.0)
+        self.assertAlmostEqual(cent, 3.0, places=6)
+        self.assertAlmostEqual(usd, 3.0, places=6)
+
     def test_symbol_options_only_whitelisted(self):
         """面板下拉框的数据源必须等于后端白名单，前端不许另存一份。"""
         opts = autotrade.symbol_options()
