@@ -872,9 +872,17 @@
   .acct .who b { font-size: var(--fs-6); letter-spacing: .3px; }
   .acct .who span { font-size: var(--fs-1); color: var(--muted); }
   .acct .figs { display: flex; gap: var(--sp4) var(--sp5); flex-wrap: wrap; margin-left: auto; }
-  .acct .fig { text-align: right; min-width: 68px; }
-  .acct .fig i { display: block; font-style: normal; font-size: var(--fs-label); color: var(--dim); letter-spacing: .4px; }
-  .acct .fig b { font-size: var(--fs-7); font-family: var(--mono); font-weight: 700; }
+  /* 数字格**绝不允许被压缩**（flex: 0 0 auto + nowrap）。
+     账户数字是这一条里唯一有意义的内容，`min-width: 68px` 只是下限、不是
+     最小内容宽：金额变长（"1453.00 USC"）以后，flex 会把每格压到 68px 以内，
+     文字溢出格子，于是标签被挤成竖排（"余 额"）、相邻数字叠在一起——看着像
+     渲染坏了，其实是宽度预算没有留出来。空间不够就让左边的账户名/切换框
+     去省略号，数字一位都不许省。 */
+  .acct .fig { text-align: right; min-width: 68px; flex: 0 0 auto; }
+  .acct .fig i { display: block; font-style: normal; font-size: var(--fs-label); color: var(--dim);
+                 letter-spacing: .4px; white-space: nowrap; }
+  .acct .fig b { font-size: var(--fs-7); font-family: var(--mono); font-weight: 700;
+                 white-space: nowrap; }
 
   .badge-mode {
     display: inline-flex; align-items: center; gap: 5px;
@@ -941,10 +949,14 @@
     body[data-sub="desk"] .acct .fig i { display: block; }
     body[data-sub="desk"] .acct .fig b { font-size: var(--fs-5); white-space: nowrap; }
     body[data-sub="desk"] .acct .badge-mode,
-    body[data-sub="desk"] .acct .badge-live,
-    body[data-sub="desk"] .acct .acct-pick { flex: 0 0 auto; white-space: nowrap; }
+    body[data-sub="desk"] .acct .badge-live { flex: 0 0 auto; white-space: nowrap; }
+    /* 切换框是这一行里唯一可以牺牲的东西（内容重复：登录号 + 服务器在左边
+       已经写过一遍）。数字格占满后剩下的空间归它，不够就省略号，绝不反过来
+       压数字——2026-11-02 就是反过来压，4 个数字全叠在一起。 */
+    body[data-sub="desk"] .acct .acct-pick { flex: 0 1 auto; min-width: 0; }
     body[data-sub="desk"] .acct-pick select { padding: 3px 8px; font-size: var(--fs-1);
-                                              max-width: 170px; }
+                                              max-width: 170px; min-width: 0;
+                                              text-overflow: ellipsis; }
   }
   /* 6 个数字 + 账户名 + 切换框一行需要约 1400px 的内容宽度（实测 1440 宽的
      窗口刚好差 30px，于是每格被压到连「余额」两个字都竖排）。净入金和杠杆
@@ -3198,18 +3210,19 @@ function renderLive(d) {
   $('acctServer').textContent = `${a.server || '—'} · ${a.name || ''}`;
   const modeEl = $('acctMode');
   const isReal = a.trade_mode === 'real';
-  // 美分账户（Exness 的 USC 等）：balance / profit / 阈值全部以「分」计，
-  // 1453 其实是 14.53 美元。不折算、不标注的话，它和美元账户长得一模一样，
-  // 而数字差 100 倍——这是最难自己发现的一类错，必须写在界面上。
+  // 美分账户（Exness 的 USC 等）：balance / profit / 阈值全部以「分」计。
+  // **只标注单位，不折算成美元**（2026-11-02 用户定的）：写 "1453.00 USC"
+  // 就够让人知道这不是 1453 美元，再挂一个（≈ 14.53 USD）等于同一格里塞两种
+  // 口径——屏幕上两个不一样的数字，看哪个都对，看哪个也都不对。
   const curCode = String(a.currency || '').toUpperCase();
+  const curSuffix = curCode ? ' ' + curCode : '';
   const isCentAcct = !!curCode && curCode !== 'USD' && Number(a.usd_rate || 1) < 1;
   modeEl.textContent = (isReal ? '真实账户' : (a.trade_mode === 'demo' ? '模拟账户' : (a.trade_mode || '—')))
     + (isCentAcct ? ' · 美分账户' : '');
   modeEl.className = 'badge-mode ' + (isReal ? 'badge-real' : 'badge-demo');
-  $('acctBalance').textContent = fmt(a.balance) + ' ' + (a.currency || '')
-    + (isCentAcct && a.balance_usd != null ? `（≈ ${fmt(a.balance_usd)} USD）` : '');
-  $('acctEquity').textContent = fmt(a.equity) + (isCentAcct ? ' ' + curCode : '');
-  $('acctFree').textContent = fmt(a.margin_free) + (isCentAcct ? ' ' + curCode : '');
+  $('acctBalance').textContent = fmt(a.balance) + curSuffix;
+  $('acctEquity').textContent = fmt(a.equity) + (isCentAcct ? curSuffix : '');
+  $('acctFree').textContent = fmt(a.margin_free) + (isCentAcct ? curSuffix : '');
   $('acctFloat').textContent = money(a.profit);
   $('acctFloat').className = 'mono ' + signClass(a.profit);
   const sy = d.sync || {};
