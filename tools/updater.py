@@ -582,7 +582,12 @@ def _verify(path: Path, total: int, sha: str | None) -> None:
         magic = fh.read(2)
     if magic != b"MZ":
         raise _IntegrityError("下载的不是 Windows 可执行文件（缺 MZ 头）")
-    if sha and _sha256_of(path) != sha.lower():
+    # 2026-11-05 审查加固：digest 缺失时旧逻辑只剩 MZ 头校验——那只能证明
+    # "是个 exe"，证明不了"是官方编译的那个"。没有 sha256 就没有完整性可言，
+    # 宁可拒装（多半是 API 异常），不留"半个校验"的假象。
+    if not sha:
+        raise _IntegrityError("缺少 sha256 摘要（GitHub digest 为空），拒绝安装")
+    if _sha256_of(path) != sha.lower():
         raise _IntegrityError("sha256 校验失败（文件被改过或传坏了）")
 
 

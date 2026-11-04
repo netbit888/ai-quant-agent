@@ -48,6 +48,27 @@ class TestResolveImportPath(unittest.TestCase):
             self.assertIsNone(got)
             self.assertEqual(err, "缺少 path")
 
+    def test_oversize_file_rejected(self):
+        """2026-11-05 审查加固：超大 jsonl 会把面板读进内存，必须拒。"""
+        from tools.dashboard import _MAX_PACK_IMPORT_BYTES, _resolve_import_path
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "big.jsonl"
+            with p.open("wb") as fh:
+                fh.truncate(_MAX_PACK_IMPORT_BYTES + 1)
+            got, err = _resolve_import_path(str(p))
+        self.assertIsNone(got)
+        self.assertIn("MB", err)
+
+    def test_size_at_limit_accepted(self):
+        from tools.dashboard import _MAX_PACK_IMPORT_BYTES, _resolve_import_path
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "edge.jsonl"
+            with p.open("wb") as fh:
+                fh.truncate(_MAX_PACK_IMPORT_BYTES)
+            got, err = _resolve_import_path(str(p))
+        self.assertIsNone(err)
+        self.assertEqual(got, p)
+
 
 class TestImportFromPath(unittest.TestCase):
     """_import_lesson_pack_from_path：走真实 lesson_packs 落盘。"""
@@ -148,6 +169,12 @@ class TestExportTo(unittest.TestCase):
         self.assertTrue(res["custom"])
         self.assertEqual(Path(res["path"]), dest)
         self.assertEqual(self._lines(dest), 3)      # 父目录也一并建出来了
+
+    def test_relative_dest_rejected(self):
+        """2026-11-05 审查加固：相对路径会落到进程 CWD，不受控，拒绝。"""
+        res = self.lp.export_to(self.pid, "backup/相对路径.jsonl")
+        self.assertFalse(res["ok"])
+        self.assertIn("绝对路径", res["error"])
 
     def test_missing_suffix_is_appended(self):
         """手打文件名忘了后缀时要补上，否则产出个打不开的文件。"""

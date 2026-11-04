@@ -7,6 +7,7 @@ daemon 线程用同步替身，断言才能看到终态。
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -228,12 +229,14 @@ class TestDownload(unittest.TestCase):
                      notes="", error=None)
         updater._set("download", status="idle", received=0, total=0, pct=0,
                      file=None, error=None, segments=0, retries=0)
-        # 默认下载地址（个别用例会自己再铺 urlopen）
+        # 默认下载地址（个别用例会自己再铺 urlopen）。
+        # 2026-11-05 起 digest 缺失=拒绝安装，所以这里必须给真实 sha256，
+        # 下载流程测试才能走通；空 digest 的行为由 test_missing_sha_refuses_install 专门测。
         self._info = mock.patch.object(
             updater, "fetch_latest",
             return_value={"tag": "v1.2.0", "version": "1.2.0", "notes": "",
                           "asset_url": "https://x/setup.exe", "asset_size": 8,
-                          "asset_sha": ""})
+                          "asset_sha": hashlib.sha256(self.PAYLOAD).hexdigest()})
         self._info.start()
         self.addCleanup(self._info.stop)
 
@@ -433,6 +436,20 @@ class TestDownload(unittest.TestCase):
                                   side_effect=_Server(self.PAYLOAD)):
             updater._do_download("https://x/setup.exe", len(self.PAYLOAD), dest,
                                  "00" * 32)
+        self.assertEqual(updater.snapshot()["download"]["status"], "error")
+        self.assertIn("sha256", updater.snapshot()["download"]["error"])
+        self.assertFalse(dest.exists())
+        self.assertEqual(list(updater._update_dir().glob("*.part*")), [])
+
+    def test_missing_sha_refuses_install(self):
+        """2026-11-05 审查加固：digest 缺失时只剩 MZ 头校验，证明不了是官方
+        包——旧逻辑放行，现在必须拒装并清掉所有段。"""
+        dest = self._dest()
+        with _sync_threads(), \
+                mock.patch.object(updater.urllib.request, "urlopen",
+                                  side_effect=_Server(self.PAYLOAD)):
+            updater._do_download("https://x/setup.exe", len(self.PAYLOAD), dest,
+                                 "")
         self.assertEqual(updater.snapshot()["download"]["status"], "error")
         self.assertIn("sha256", updater.snapshot()["download"]["error"])
         self.assertFalse(dest.exists())

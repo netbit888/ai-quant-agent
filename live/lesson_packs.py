@@ -233,6 +233,10 @@ def export_to(id: str, dest: str | Path | None = None) -> dict:
 
     if dest:
         dst = Path(dest)
+        # 2026-11-05 审查加固：dest 历史上来自原生对话框，但接口本身接受任意
+        # 字符串。只写绝对路径，避免相对路径落到进程 CWD 这种不受控位置。
+        if not dst.is_absolute():
+            return {"ok": False, "error": "导出目标必须是绝对路径"}
         # 用户可能手打了没后缀的名字：补上，别产出个打不开的文件
         if not dst.name.lower().endswith(".jsonl"):
             dst = dst.with_name(dst.name + ".jsonl")

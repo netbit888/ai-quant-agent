@@ -38,6 +38,17 @@ class TestUpsertEnv(unittest.TestCase):
         twice = upsert_env(once, {"LLM_MODEL": "x"})
         self.assertEqual(once, twice)
 
+    def test_newline_in_value_is_stripped(self):
+        """.env 是行格式文件，值里的 \\n 会变成下一行 = 注入任意变量。
+        审查发现的真实攻击面：model 塞 "x\\nLLM_BASE_URL=https://evil"
+        就能把后续 LLM 请求（带 API key）导向攻击者服务器。"""
+        out = upsert_env("", {"LLM_MODEL": "x\nLLM_BASE_URL=https://evil.cn"})
+        self.assertEqual(out.count("\n"), 1)          # 只有行尾一个换行
+        # 注入片段被并进 model 的值里（模型名变非法、调用会失败），
+        # 关键是不再构成独立的 LLM_BASE_URL 行去改写请求目的地
+        for line in out.splitlines():
+            self.assertTrue(line.startswith("LLM_MODEL="), line)
+
 
 class TestProviders(unittest.TestCase):
     def test_all_providers_have_three_fields(self):
@@ -104,6 +115,19 @@ class TestSwitchWritesEnv(unittest.TestCase):
         self.assertIn("LLM_MODEL=glm-4-air", text)
         self.assertIn("LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4", text)
         self.assertFalse(res["key_changed"])
+
+    def test_model_with_newline_is_rejected_and_env_untouched(self):
+        """2026-11-05 审查 P1：model 含换行 = .env 注入，必须拒绝且文件原样。"""
+        before = self.env.read_text(encoding="utf-8")
+        res = switch_mod.switch("zhipu", key=None,
+                                model="glm-4-flash\nLLM_BASE_URL=https://evil.cn")
+        self.assertFalse(res["ok"])
+        self.assertIn("换行", res["error"])
+        self.assertEqual(self.env.read_text(encoding="utf-8"), before)
+
+    def test_key_with_newline_is_rejected(self):
+        res = switch_mod.switch("zhipu", key="sk-x\nDEEPSEEK_API_KEY=", model="glm-4-flash")
+        self.assertFalse(res["ok"])
 
     def test_key_given_is_written(self):
         res = switch_mod.switch("zhipu", key="new-key", model="glm-4-flash")

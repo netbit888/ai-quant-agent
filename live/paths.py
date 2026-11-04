@@ -46,7 +46,15 @@ TRASH_DIR_NAME = "_trash"
 
 
 def account_dir(login: int | str) -> Path:
-    return ACCOUNTS_DIR / str(login)
+    key = str(login)
+    # 2026-11-05 安全审查（实测确认）：GET /api/autotrade?account=..\..\config
+    # 曾直接读到 data/config/ 下的文件。删除路径有 resolve+parent 双重防护，
+    # 读/写路径没有——而所有读/写都汇聚到这里拼路径，所以校验放这一个点，
+    # 一次堵住三条路。只拦路径分隔符与 "." / ".."：不强制纯数字，内部 fallback
+    # 名（"unknown"）和测试目录（"smoke"）照常工作。
+    if key in (".", "..") or Path(key).name != key:
+        raise ValueError(f"非法账户目录名：{key!r}")
+    return ACCOUNTS_DIR / key
 
 
 def ensure_account_dir(login: int | str) -> Path:

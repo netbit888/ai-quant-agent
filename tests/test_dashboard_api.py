@@ -57,10 +57,13 @@ class LiveServerCase(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, self._decode(exc.read())
 
-    def post(self, path: str, body: dict | None = None) -> tuple[int, dict | str]:
+    def post(self, path: str, body: dict | None = None,
+             headers: dict | None = None) -> tuple[int, dict | str]:
         data = json.dumps(body or {}).encode()
+        h = {"Content-Type": "application/json"}
+        h.update(headers or {})
         req = urllib.request.Request(self.url(path), data=data, method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers=h)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, self._decode(resp.read())
@@ -92,6 +95,55 @@ class TestReadOnlyRoutes(LiveServerCase):
         status, payload = self.post("/api/nope")
         self.assertEqual(status, 404)
         self.assertFalse(payload["ok"])
+
+
+class TestOriginGuard(LiveServerCase):
+    """POST 的跨站护栏（2026-11-05 安全审查 P0）。
+
+    背景：浏览器里任何网页都能向 127.0.0.1 的面板发请求，body 想写什么写什么，
+    confirm=true 挡不住——审查时一个带恶意 Origin 的 curl 就真实开了一单（亏 1.2）。
+    所以写接口必须校验 Origin/Referer 指向本面板。
+    载体选 /api/rule：不带 Origin 时它返回 400 unknown action（无副作用、不碰文件），
+    一旦看到 400 就说明 Origin 检查放行、请求走到了路由层。
+    """
+
+    def test_foreign_origin_is_403(self):
+        status, payload = self.post("/api/rule", {"action": "__origin_probe__"},
+                                    headers={"Origin": "https://evil.example.com"})
+        self.assertEqual(status, 403)
+        self.assertIn("跨站", payload["error"])
+
+    def test_foreign_referer_is_403(self):
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"},
+                              headers={"Referer": "https://evil.example.com/page"})
+        self.assertEqual(status, 403)
+
+    def test_local_origin_is_allowed(self):
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"},
+                              headers={"Origin": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(status, 400)   # 走到了路由层，只是 action 不认识
+
+    def test_localhost_origin_any_port_is_allowed(self):
+        """自动换端口场景：Origin 的端口可能不是启动时的默认端口。"""
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"},
+                              headers={"Origin": "http://localhost:9999"})
+        self.assertEqual(status, 400)
+
+    def test_missing_origin_is_allowed(self):
+        """curl / 脚本 / 单测没有 Origin 头，是本机合法调用方，必须放行。"""
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"})
+        self.assertEqual(status, 400)
+
+    def test_null_origin_is_rejected(self):
+        """sandbox iframe 的 Origin 是字符串 "null"，不是本地面板，拒。"""
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"},
+                              headers={"Origin": "null"})
+        self.assertEqual(status, 403)
+
+    def test_non_http_scheme_is_rejected(self):
+        status, _ = self.post("/api/rule", {"action": "__origin_probe__"},
+                              headers={"Origin": "file:///etc/passwd"})
+        self.assertEqual(status, 403)
 
 
 class TestMoneyGates(LiveServerCase):
