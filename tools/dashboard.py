@@ -1785,7 +1785,7 @@ def _live_recorder(interval_s: int = 300, allow_launch: bool = True) -> None:
 def _parse_args(argv=None):
     import argparse
 
-    p = argparse.ArgumentParser(description="AI Quant Agent 状态面板")
+    p = argparse.ArgumentParser(description="SeatOne 状态面板")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--no-open", action="store_true",
@@ -1865,7 +1865,7 @@ def _run_windowed(server, url: str, args) -> int:
     try:
         desktop.run_window(
             url=url,
-            title="AI Quant Agent — 实盘账本",
+            title="SeatOne — 实盘账本",
             js_api=_Bridge(),
             on_window=_register_window,
             on_closing=_on_window_closing,
@@ -1904,7 +1904,7 @@ def _run_attach(args, url: str, existing: dict) -> int:
     try:
         desktop.run_window(
             url=url,
-            title="AI Quant Agent — 实盘账本（已有一份在运行）",
+            title="SeatOne — 实盘账本（已有一份在运行）",
             js_api=None,              # attach 窗口不能有任何写入口
             on_window=_register_window_attach,
             on_closing=lambda: True,  # 点 X 直接关，不影响主进程

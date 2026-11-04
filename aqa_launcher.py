@@ -54,8 +54,8 @@ def _install_stdio_shim() -> None:
 _ERROR_ALREADY_EXISTS = 183
 # 主窗口 + attach 窗口的标题。改标题时这两处要跟着动。
 _WINDOW_TITLES = (
-    "AI Quant Agent — 实盘账本",
-    "AI Quant Agent — 实盘账本（已有一份在运行）",
+    "SeatOne — 实盘账本",
+    "SeatOne — 实盘账本（已有一份在运行）",
 )
 
 
@@ -133,7 +133,7 @@ def main() -> int:
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(
-                None, "AI Quant Agent 已经在运行了。", "AI Quant Agent",
+                None, "SeatOne 已经在运行了。", "SeatOne",
                 0x40 | 0x4000)   # MB_ICONINFORMATION | MB_TOPMOST
         except Exception:  # noqa: BLE001
             pass
@@ -170,7 +170,7 @@ if __name__ == "__main__":
                 ctypes.windll.user32.MessageBoxW(
                     None,
                     f"{msg}\n\n{_short_tb()}",
-                    "AI Quant Agent",
+                    "SeatOne",
                     0x10 | 0x4000,      # MB_ICONERROR | MB_TOPMOST
                 )
             except Exception:  # noqa: BLE001

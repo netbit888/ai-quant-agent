@@ -1,4 +1,4 @@
-; AI Quant Agent 安装包
+; SeatOne 安装包
 ;
 ; 编译：iscc.exe installer\aqa.iss
 ;   或  tools\build_installer.bat  （打包 + 编译一条龙）
@@ -14,7 +14,7 @@
 ;   3. 卸载保留 data\ 和 config\
 ;      账本是唯一副本（MT5 历史有保留期、换服务器就丢），删了不可恢复。
 
-#define MyAppName "AI Quant Agent"
+#define MyAppName "SeatOne"
 ; 版本号不再写死在这里：build_installer.bat 从仓库根 app_version.py 读出
 ; APP_VERSION 后用 /DMyAppVersion= 传入。0.0.0 是"忘了传参"的醒目信号，
 ; 故意不用任何真实版本——宁可看着离谱，也别静默发出版本号重复的包。
@@ -22,7 +22,9 @@
   #define MyAppVersion "0.0.0"
 #endif
 #define MyAppExe "AIQuant.exe"
-#define MyAppPublisher "AI Quant Agent"
+; 显示名换成 SeatOne，但 exe 名 / 安装目录 / AppId 一律不动：
+; 三者是更新通道和卸载注册表的锚点，改了老用户升级会落在另一份程序上。
+#define MyAppPublisher "SeatOne"
 ; 固定 GUID：升级和卸载靠它识别同一个产品，**永远不要改**
 #define MyAppId "{{7C3F1A62-9D24-4F0B-9A61-2E5B7C1D8A44}"
 
@@ -69,6 +71,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\AIQuant\*"; DestDir: "{app}"; \
   Flags: ignoreversion recursesubdirs createallsubdirs; \
   Excludes: "data\*,config\*,*.log"
+
+[InstallDelete]
+; 旧版显示名是 "AI Quant Agent"，改名后快捷方式换了名字，
+; 旧图标不会被覆盖，升级完桌面/开始菜单会并排两个。
+; 这里只匹配旧名，装新文件前先清掉。
+Type: files;          Name: "{autoprograms}\AI Quant Agent.lnk"
+Type: filesandordirs; Name: "{autoprograms}\AI Quant Agent"
+Type: files;          Name: "{autodesktop}\AI Quant Agent.lnk"
 
 [Dirs]
 ; uninsneveruninstall：卸载时这两个目录即使空了也留着
