@@ -137,8 +137,12 @@ def run_window(*, url: str, title: str, js_api, on_window, on_closing,
         # 默认最大化：这是个看板，宽屏能同时放下状态带 + 流水表。
         # width/height 仍然有用——用户点「还原」时回到这个尺寸。
         maximized=True,
-        # 1120 是 .at-bar 折行的临界值（flex-wrap），再小程序顶部会变两行
-        min_size=(1120, 720),
+        # 1200 是账户条（#acct）的折行临界值，比 .at-bar 的 1120 更靠上：
+        # 1120~1199 这一段数字格排不下一行，账户条会从 38px 涨到 126px，
+        # 做单台因此被顶出视口 66px——而做单台的硬约束是一屏不许滚。
+        # 与其在那 80px 里做省略号手术（数字一旦被压就开始溢出叠字），
+        # 不如把窗口下限设在这一侧。720 高配合 #live-desk.tight 刚好装下。
+        min_size=(1200, 720),
         js_api=js_api,
         text_select=True,
         confirm_close=False,     # 关窗确认由我们自己的 closing 事件做

@@ -533,6 +533,21 @@
   /* 面板内部只有 5 个区块，撑高后不能让空白全堆在闸门灯下面：
      按原有区块均匀铺开。**只调间距，不动内容**——加东西属于另一件事。 */
   #live-desk .pos-panel { justify-content: space-between; }
+
+  /* ---- 矮窗口紧凑排版（.tight 由 fitPane 实测后挂到 #live-desk 上）----
+     1120×720 是窗口允许的最小尺寸（desktop.py 的 min_size），在这一档下
+     宽松版自然高度 638px，而可用只有 550px——差 88px 全靠空档：
+     `grid-template-rows: 1.05fr / 1fr` 在「容器高度不定」时会把两行一起
+     往上抬，环里那两个 .rspacer 各被撑到 42px（设计意图是 4px），
+     持仓面板的 space-between 同理。改 auto 之后这两处空白立刻归零，
+     内容一个字没动。
+     只在装不下时才挂 .tight：宽屏上那些留白是刻意铺开的呼吸位，不能删。 */
+  #live-desk.tight .at-grid { grid-template-rows: auto minmax(0, 1fr); }
+  #live-desk.tight > .card.l1 { padding-top: var(--sp2); padding-bottom: var(--sp2); }
+  #live-desk.tight #ring { padding: 10px 14px; }
+  #live-desk.tight .pos-panel { padding: 10px 14px; }
+  #live-desk.tight .put-track { height: 28px; }
+  #live-desk.tight .hist { height: 34px; }
   /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
      （表头 22px + 过滤条），决策流因此少显示整整一行。 */
   .stream-foot {
@@ -2515,21 +2530,25 @@
       </div>
     </details>
   </div>
+
+  <!-- 程序名 / 版本 / 检查更新：**只属于设置舱**，跟着设置舱一起显示。
+       原来它挂在页面最底下、所有视图共用一条页脚，等于让「做单台」每天
+       交出一条 30px 的高度去摆一样交易时一眼都不看的东西——而做单台的
+       硬约束是一屏装完不许滚。移进来之后做单台 / 决策流 / 复盘台都没有
+       这一条，需要看版本或检查更新时切到设置舱即可。
+       「退出程序」按钮已删除——窗口右上角本来就有 X，而 X 走的关闭路径
+       （_on_window_closing → onCloseRequested → /api/app/quit）和按钮
+       完全同一条，确认弹窗、停线程、必要时平仓一个都不少。 -->
+  <footer class="foot">
+    <span class="foot-brand">AI QUANT</span>
+    <span class="foot-ver" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
+    <button class="foot-link" id="appUpdate" onclick="manualCheckUpdate()"
+            title="检查是否有新版本">检查更新</button>
+    <button class="foot-link hidden" id="footQuit" onclick="quitApp()"
+            title="停掉 AI、必要时平仓，然后关闭程序">退出</button>
+  </footer>
   </div><!-- /#live-setup -->
 </section>
-
-<!-- 程序名 / 版本 / 检查更新：都在页面最底下，不在第一屏抢位置。
-     「退出程序」按钮已删除——窗口右上角本来就有 X，而 X 走的关闭路径
-     （_on_window_closing → onCloseRequested → /api/app/quit）和按钮
-     完全同一条，确认弹窗、停线程、必要时平仓一个都不少。 -->
-<footer class="foot">
-  <span class="foot-brand">AI QUANT</span>
-  <span class="foot-ver" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
-  <button class="foot-link" id="appUpdate" onclick="manualCheckUpdate()"
-          title="检查是否有新版本">检查更新</button>
-  <button class="foot-link hidden" id="footQuit" onclick="quitApp()"
-          title="停掉 AI、必要时平仓，然后关闭程序">退出</button>
-</footer>
 
 <script>
 /* ==================== 原生窗口桥（pywebview）====================
@@ -6682,15 +6701,21 @@ document.querySelectorAll('.live-sub').forEach(b => {
 function fitPane(paneId) {
   const card = document.querySelector('#' + paneId + ' > .card.l1');
   if (!card || !card.offsetParent) return;
+  const pane = document.getElementById(paneId);
   const top = card.getBoundingClientRect().top + window.scrollY;
-  // 页脚是页面最后一行，它自己也要占高度（+12 是它的 margin-top）。
-  // 不扣掉的话卡片会把它顶到视口外，版本号永远看不见。
-  const foot = document.querySelector('footer.foot');
-  const footH = foot ? Math.round(foot.getBoundingClientRect().height) + 12 : 0;
+  // 页脚现在挂在设置舱里，做单台 / 决策流态下它是 display:none，
+  // getBoundingClientRect 全 0。只有真的占位置时才扣它的高度，
+  // 否则每条页面都白扣 12px——而做单台的预算是按像素算的。
+  const foot = document.querySelector('#live-setup footer.foot');
+  const footH = (foot && foot.offsetParent)
+    ? Math.round(foot.getBoundingClientRect().height) + 12 : 0;
   // 22 = body 的 16px 底边距 + 6px 呼吸位。
   const avail = window.innerHeight - top - 22 - footH;
   const sb = card.querySelector('.stream-body');
   const keep = sb ? sb.scrollTop : 0;
+  // 先退回宽松版再量：上一轮可能挂过 .tight，带着它量出来的
+  // 「最小高度」是紧凑值，窗口拉大之后就再也不会换回宽松排版了。
+  pane.classList.remove('tight');
   card.style.height = '';
   card.style.maxHeight = '';
   // 量「最小可行高度」而不是「内容全展开的高度」：决策流 flex:1 且内容在内部滚，
@@ -6716,6 +6741,22 @@ function fitPane(paneId) {
     if (document.documentElement.scrollHeight > window.innerHeight + 1) {
       card.style.height = '';
       card.style.maxHeight = minH + 'px';
+    }
+  } else if (paneId === 'live-desk') {
+    // 宽松版装不下：换成紧凑版再量一次。做单台的硬约束是一屏不滚
+    // （1120×720 就是窗口下限），而宽松版那 88px 全是拉伸出来的空档，
+    // 压掉之后内容一个字不少。紧凑版仍装不下才允许滚。
+    pane.classList.add('tight');
+    const minTight = card.scrollHeight;
+    if (avail > minTight) {
+      card.style.height = avail + 'px';
+      card.style.maxHeight = avail + 'px';
+      if (document.documentElement.scrollHeight > window.innerHeight + 1) {
+        card.style.height = '';
+        card.style.maxHeight = minTight + 'px';
+      }
+    } else {
+      card.style.maxHeight = minTight + 'px';
     }
   } else {
     // 装不下：不压缩任何东西，按最小可行高度撑开，页面滚。
