@@ -19,7 +19,6 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from pathlib import Path
 from unittest import mock
 
 from tests._stubs import install_missing_stubs
@@ -34,8 +33,6 @@ class LiveServerCase(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self._orig_state = dashboard.STATE_FILE
-        dashboard.STATE_FILE = Path(self._tmp.name) / "current_state.json"
         self.server = dashboard.Server(("127.0.0.1", 0), dashboard.Handler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever,
@@ -46,7 +43,6 @@ class LiveServerCase(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        dashboard.STATE_FILE = self._orig_state
         self._tmp.cleanup()
 
     # -------------------------------------------------- 请求工具
@@ -80,18 +76,6 @@ class LiveServerCase(unittest.TestCase):
 
 
 class TestReadOnlyRoutes(LiveServerCase):
-    def test_state_idle_when_no_file(self):
-        """没有 state 文件时返回 idle，不能 500——这是面板冷启动的第一屏。"""
-        status, payload = self.get("/api/state")
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["status"], "idle")
-
-    def test_state_reads_file(self):
-        dashboard.STATE_FILE.write_text(json.dumps({"status": "running"}), encoding="utf-8")
-        status, payload = self.get("/api/state")
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["status"], "running")
-
     def test_autotrade_summary_is_passed_through(self):
         """只读接口不能自己下单，只把 summary 转出来。"""
         fake = {"ok": True, "running": False, "kpi": {"trades": 3}}

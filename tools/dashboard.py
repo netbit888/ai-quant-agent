@@ -28,8 +28,6 @@
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import json
 import os
 import threading
@@ -42,15 +40,11 @@ from urllib.parse import parse_qs, urlparse
 from app_version import APP_VERSION
 from live import appdirs
 
-# 四种路径，两种来源，别混：
-#   TEMPLATE / CODE_ROOT  → 只读资源，走 bundle（冻结后是 _MEIPASS/_internal）
-#   STATE_FILE / EVAL_DIR → 可写数据，走 app_root（冻结后是 exe 同级）
-# 混了就会出两种事故：模板 500，或者账本写进临时目录随进程消失。
+# 两种路径，别混：模板走 bundle（冻结后是 _MEIPASS/_internal，只读），
+# 数据走 app_root（冻结后是 exe 同级，可写）。混了会出两种事故：
+# 模板 500，或者账本写进临时目录随进程消失。
 ROOT = appdirs.app_root()
-STATE_FILE = appdirs.data_dir() / "current_state.json"
-EVAL_DIR = appdirs.data_dir() / "evaluations"
 TEMPLATE = appdirs.template_file()
-CODE_ROOT = appdirs.strategies_dir()
 
 
 class Server(ThreadingHTTPServer):
@@ -133,19 +127,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, b"template missing", "text/plain; charset=utf-8")
                 return
             self._send(200, TEMPLATE.read_bytes(), "text/html; charset=utf-8")
-            return
-
-        if parsed.path == "/api/state":
-            if not STATE_FILE.exists():
-                payload = {"status": "idle", "phase": "等待任务", "rounds": []}
-                self._send(200, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-                return
-            try:
-                payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json; charset=utf-8")
-                return
-            self._send(200, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             return
 
         if parsed.path == "/api/accounts":
@@ -347,103 +328,6 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             self._send(200, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                        "application/json; charset=utf-8")
-            return
-
-        if parsed.path == "/api/strategies":
-            items = []
-            for path in sorted(CODE_ROOT.glob("*.py")):
-                if path.name.startswith("_"):
-                    continue
-                name = path.stem
-                try:
-                    spec = importlib.util.spec_from_file_location(f"_dash_{name}", path)
-                    if spec is None or spec.loader is None:
-                        continue
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    cls = getattr(module, "Strategy", None)
-                    if cls is None:
-                        continue
-                    sig = inspect.signature(cls.__init__)
-                    params = {
-                        p.name: ("..." if p.default is inspect.Parameter.empty else p.default)
-                        for p in sig.parameters.values()
-                        if p.name != "self"
-                    }
-                    doc = ((module.__doc__ or cls.__doc__ or "").strip().split("\n")[0])[:80]
-                    items.append({"name": name, "doc": doc, "params": params,
-                                  "lines": len(path.read_text(encoding="utf-8").splitlines())})
-                except Exception:  # noqa: BLE001
-                    continue
-            self._send(200, json.dumps(items, ensure_ascii=False, default=str).encode(), "application/json; charset=utf-8")
-            return
-
-        if parsed.path == "/api/evaluations":
-            items = []
-            if EVAL_DIR.exists():
-                # sweep_*.json 是参数扫描结果，结构不同（没有 yearly），不进评估列表
-                files = sorted(
-                    (p for p in EVAL_DIR.glob("*.json") if not p.name.startswith("sweep_")),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-                for path in files[:30]:
-                    try:
-                        data = json.loads(path.read_text(encoding="utf-8"))
-                    except (OSError, json.JSONDecodeError):
-                        continue
-                    yearly = data.get("yearly") or []
-                    items.append(
-                        {
-                            "file": path.name,
-                            "strategy": data.get("strategy", "?"),
-                            "verdict": bool(data.get("verdict")),
-                            "years": len(yearly),
-                            "profit_years": sum(1 for r in yearly if (r.get("net_profit") or 0) > 0),
-                            "net_profit": round(sum((r.get("net_profit") or 0) for r in yearly), 2),
-                            "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime)),
-                        }
-                    )
-            self._send(200, json.dumps(items, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            return
-
-        if parsed.path == "/api/evaluation":
-            name = (parse_qs(parsed.query).get("file") or [""])[0]
-            # 只允许 evaluations 目录下的纯文件名，防止路径穿越
-            if not name or Path(name).name != name or not name.endswith(".json"):
-                self._send(400, b"bad name", "text/plain; charset=utf-8")
-                return
-            target = EVAL_DIR / name
-            if not target.is_file():
-                self._send(404, b"not found", "text/plain; charset=utf-8")
-                return
-            try:
-                self._send(200, target.read_bytes(), "application/json; charset=utf-8")
-            except OSError:
-                self._send(500, b"read error", "text/plain; charset=utf-8")
-            return
-
-        if parsed.path == "/api/code":
-            rel = (parse_qs(parsed.query).get("path") or [""])[0]
-            try:
-                # 前端传的形如 "strategies/xxx.py"（相对仓库根），而 CODE_ROOT
-                # 本身就是 strategies 目录、且冻结后在只读包里。所以先剥掉开头的
-                # "strategies" 再拼到 CODE_ROOT——直接 ROOT/rel 在绿化版会指到
-                # exe 同级的空目录上，永远 404。
-                raw = Path(rel)
-                parts = raw.parts
-                if parts and parts[0] == CODE_ROOT.name:
-                    parts = parts[1:]
-                if not parts:
-                    raise FileNotFoundError(rel)
-                target = (CODE_ROOT / Path(*parts)).resolve()
-                # 只允许读 strategies/ 下的文件，防止路径穿越
-                if (not target.is_relative_to(CODE_ROOT.resolve())
-                        or not target.is_file()):
-                    raise FileNotFoundError(rel)
-                self._send(200, target.read_bytes(), "text/plain; charset=utf-8")
-            except (OSError, ValueError):
-                self._send(404, b"not found", "text/plain; charset=utf-8")
             return
 
         if parsed.path == "/api/app/info":
@@ -1920,8 +1804,6 @@ def _print_banner(url: str, args, port: int) -> None:
     print(f"面板地址: {url}")
     if port != args.port:
         print(f"注意：{args.port} 被别的程序占用，已自动改用 {port}")
-    print(f"状态文件: {STATE_FILE}  "
-          f"({'存在' if STATE_FILE.exists() else '尚未生成，跑一次 agent.core 后出现'})")
     print(f"数据目录: {appdirs.app_root()}")
 
 

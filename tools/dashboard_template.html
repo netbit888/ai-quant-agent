@@ -145,23 +145,6 @@
   }
   .spacer { flex: 1; }
 
-  /* 在标题条里：不要自己的底色和边框——嵌在带渐变的 header 里再套一层框，
-     会变成"卡片里的卡片"。激活态那颗蓝底足够说明当前在哪。 */
-  .tabs { display: flex; gap: var(--sp1); margin: 0 0 0 var(--sp2); padding: 2px;
-    background: transparent; border: 1px solid transparent;
-    border-radius: var(--r1); width: fit-content; }
-  .tab {
-    padding: 5px 14px; border-radius: var(--r-md); cursor: pointer; font-size: var(--fs-4);
-    background: transparent; color: var(--muted); border: 0;
-    transition: .18s ease; font-weight: 500;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.active {
-    color: #fff;
-    background: rgba(74,158,255,.16);
-    box-shadow: 0 0 0 1px rgba(74,158,255,.3) inset;
-  }
-
   /* ---- 实盘视图内部三态：做单台 / 复盘台 / 设置舱 ----
      S1 只做结构分层：卡片原样搬，不动任何 id / class / 事件绑定。
      状态带（sticky）与账户条刻意留在 #view-live 顶层——包进 pane 会改变
@@ -646,7 +629,6 @@
                            min-width: 52px; flex: none; }
 
   /* 轮次/阶段/耗时是「实时迭代」页的字段，实盘页留着它仨只是在抢宽度 */
-  body[data-view="live"] .iter-only { display: none; }
 
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: var(--sp3); }
   .kpi {
@@ -1083,22 +1065,6 @@
     background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.28); color: var(--gold-lit);
   }
   .warn-strip b { color: #f6d78a; }
-
-  /* 三个回测侧视图（实时迭代 / 策略评估 / 策略库）的数据链早已停更，
-     内容冻结在 2026-10-21。这条提示条的唯一作用是让"打开就是 10-19 的
-     回测结论"不再被误读成当前实盘数据——所以用中性色，不用 warn-strip
-     的琥珀色，那会让人以为实盘出了状况。 */
-  .arch-strip {
-    display: flex; align-items: flex-start; gap: 9px; margin-bottom: 12px;
-    padding: 9px 13px; border-radius: var(--r-md); font-size: var(--fs-2); line-height: 1.55;
-    color: var(--muted); background: rgba(255,255,255,.025);
-    border: 1px dashed var(--border-hi);
-  }
-  .arch-strip b {
-    flex: none; font-size: var(--fs-1); font-weight: 700; letter-spacing: .3px;
-    color: var(--muted); background: rgba(255,255,255,.06);
-    border: 1px solid var(--border-hi); border-radius: var(--r-sm); padding: 2px 7px;
-  }
 
   .verdict-chip { font-size: var(--fs-1); font-weight: 700; padding: 3px 9px; border-radius: var(--r-pill); }
   .vc-better { background: rgba(46,204,113,.18); color: var(--good-lit); }
@@ -1952,22 +1918,14 @@
 
 <header>
   <h1>AI Quant</h1>
-  <!-- 视图切换本来在标题条下面单独占一行（37px + 上下间距 12px）。它和标题
-       是同一件事——"现在在哪一页"，合并后每个视图都多出 49px 纵向空间，
-       做单台正好把这份空间还给决策环与持仓面板。 -->
-  <div class="tabs">
-    <button class="tab active" data-view="live">实盘复盘</button>
-    <button class="tab" data-view="iter">实时迭代</button>
-    <button class="tab" data-view="eval">策略评估</button>
-    <button class="tab" data-view="strat">策略库</button>
-  </div>
-  <span class="pill"><span id="dot" class="dot"></span><span id="statusText">连接中</span></span>
-  <span class="pill iter-only">轮次 <b id="roundInfo">-</b></span>
-  <span class="pill iter-only">阶段 <b id="phase">-</b></span>
-  <span class="pill iter-only">耗时 <b id="elapsed">-</b></span>
+  <!-- 2026-11-04：顶部四个视图标签只剩「实盘复盘」，连导航行一起删掉——
+       只有一个选项的切换器是噪音，还白占 40px。三个回测侧视图（实时迭代 /
+       策略评估 / 策略库）的数据链 10-21 就停更了，实盘模块从不写它们。
+       连带下线的是「● 已完成」胶囊和右上角时间戳：两者都由 renderState 从
+       current_state.json 写，显示的是旧流水线的死状态和四天前的时间，
+       而实盘的实时状态在下面的 #atBar 里，那才是真的。 -->
   <span class="spacer"></span>
   <span class="pill" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
-  <span class="muted mono" id="updated" style="font-size:var(--fs-2)">-</span>
   <button class="btn-ghost" id="appUpdate" onclick="manualCheckUpdate()"
           title="检查是否有新版本" style="margin-left:12px">检查更新</button>
   <button class="btn-ghost btn-danger" id="appQuit" onclick="quitApp()"
@@ -2589,115 +2547,6 @@
   </div><!-- /#live-setup -->
 </section>
 
-<section id="view-iter" class="hidden">
-  <!-- 这三条 .arch-strip 的日期是写死的：下面的数据源（data/current_state.json、
-       data/evaluations/）只由旧的回测流水线写，实盘 AI 交易员不碰。真跑了新的
-       aqa.py evaluate 才需要回来改这三个日期。 -->
-  <div class="arch-strip"><b>历史存档</b><span>这里的轮次来自旧的「策略生成 → 回测 → 迭代」流水线，最后一次运行是 2026-10-21。实盘 AI 交易员不走这条路径，所以下面这些数字不会随实盘变化。</span></div>
-  <div class="kpis">
-    <div class="kpi"><div class="k">总净盈利</div><div class="v mono" id="kpiNet">-</div><div class="s">全部轮次累计</div></div>
-    <div class="kpi"><div class="k">平均盈利因子</div><div class="v mono" id="kpiPf">-</div><div class="s">&gt; 1.2 才有意义</div></div>
-    <div class="kpi"><div class="k">完成轮次</div><div class="v mono" id="kpiRounds">-</div><div class="s">每次迭代一轮</div></div>
-    <div class="kpi"><div class="k">最差回撤</div><div class="v mono neut" id="kpiDd">-</div><div class="s">&gt; 30% 不可用</div></div>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <div class="card-head">
-        <h2>净盈利（每轮）</h2>
-        <button class="btn-ghost btn-max" data-chart="chartProfit" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
-      </div>
-      <svg id="chartProfit" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="card">
-      <div class="card-head">
-        <h2>最大回撤 %（每轮）</h2>
-        <button class="btn-ghost btn-max" data-chart="chartDd" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
-      </div>
-      <svg id="chartDd" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>轮次明细</h2>
-    <table>
-      <thead><tr><th>#</th><th>净盈利</th><th>交易</th><th>胜率</th><th>PF</th><th>回撤%</th><th>约束</th></tr></thead>
-      <tbody id="rows"><tr><td colspan="7" class="empty">暂无数据</td></tr></tbody>
-    </table>
-  </div>
-
-  <div class="card">
-    <h2>当前轮次</h2>
-    <div id="detail" class="empty">暂无数据</div>
-  </div>
-</section>
-
-<section id="view-eval" class="hidden">
-  <div class="arch-strip"><b>历史存档</b><span>下面是你 2026-10-19 跑的那批回测结论（记录止于 10-21），不是当前实盘 AI 交易员的成绩。Gate 2 的 PASS/FAIL 只对当时的策略文件有效。</span></div>
-  <div class="card">
-    <h2>选择评估结果</h2>
-    <select id="evalSelect"><option value="">加载中…</option></select>
-  </div>
-
-  <div class="kpis">
-    <div class="kpi"><div class="k">累计净盈利</div><div class="v mono" id="eNet">-</div><div class="s">逐年之和</div></div>
-    <div class="kpi"><div class="k">盈利年份</div><div class="v mono" id="eYears">-</div><div class="s">≥70% 才达标</div></div>
-    <div class="kpi"><div class="k">平均 PF</div><div class="v mono" id="ePf">-</div><div class="s">≥1.2 才达标</div></div>
-    <div class="kpi"><div class="k">最差年度回撤</div><div class="v mono neut" id="eDd">-</div><div class="s">≤30% 才达标</div></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2>逐年净盈利</h2>
-      <button class="btn-ghost btn-max" data-chart="chartYear" onclick="openChartMax(this.dataset.chart)" title="最大化查看">⤢</button>
-    </div>
-    <svg id="chartYear" viewBox="0 0 620 156" preserveAspectRatio="none"></svg>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <h2>逐年表现</h2>
-      <table>
-        <thead><tr><th>年份</th><th>净盈利</th><th>笔数</th><th>胜率</th><th>PF</th><th>回撤%</th></tr></thead>
-        <tbody id="yearRows"><tr><td colspan="6" class="empty">—</td></tr></tbody>
-      </table>
-    </div>
-    <div class="card">
-      <h2>成本压力</h2>
-      <table>
-        <thead><tr><th>点差</th><th>净盈利</th><th>PF</th><th>回撤%</th></tr></thead>
-        <tbody id="stressRows"><tr><td colspan="4" class="empty">—</td></tr></tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Gate 判定</h2>
-    <!-- id 不能叫 gateBox：做单台那 6 盏闸门灯的容器也叫这个名，而
-         getElementById 只返回**文档里第一个**——策略评估页在启动时无条件
-         加载，于是把这四颗 PASS 直接写进了做单台的闸门灯里，6 盏灯连同
-         #ledSl 等元素一起被销毁（setLed 找不到元素就静默返回），刷新才复原。
-         同一屏两个东西共用一个 id，症状是"做单台里多了一块 Gate 2"。 -->
-    <div id="evalGateBox" class="gate"><div class="empty">—</div></div>
-  </div>
-</section>
-
-<section id="view-strat" class="hidden">
-  <div class="arch-strip"><b>历史存档</b><span>列出 strategies/ 下的旧策略与其回测评估记录，最后评估于 2026-10-21。实盘 AI 交易员不读这些文件——它看的是实时行情和自己的决策记录。</span></div>
-  <div class="card">
-    <h2>策略库（strategies/）</h2>
-    <table>
-      <thead><tr><th>策略</th><th>说明</th><th>代码行数</th><th>最近评估</th></tr></thead>
-      <tbody id="stratRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
-    </table>
-  </div>
-
-  <div class="card">
-    <h2>参数详情</h2>
-    <div id="stratParams" class="empty">点击上方策略名查看参数</div>
-  </div>
-</section>
-
 <script>
 /* ==================== 原生窗口桥（pywebview）====================
    打包版会把页面装进一个原生窗口，由 Python 侧通过 js_api 暴露几个方法。
@@ -2939,187 +2788,6 @@ function drawBars(svgId, labels, values, opt) {
     t.textContent = labels[i];
     svg.appendChild(t);
   });
-}
-
-function renderState(s) {
-  const rounds = s.rounds || [];
-  const statusMap = { running: ['运行中', 'running'], done: ['已完成', ''], error: ['出错', 'error'] };
-  const pair = statusMap[s.status] || ['空闲', ''];
-
-  $('dot').className = 'dot ' + pair[1];
-  $('statusText').textContent = pair[0];
-  $('roundInfo').textContent = s.current_round ? `${s.current_round}/${s.total_rounds || '?'}` : '—';
-  $('phase').textContent = s.phase || '—';
-  $('elapsed').textContent = s.elapsed_s != null ? s.elapsed_s + 's' : '—';
-  $('updated').textContent = (s.updated_at || '').replace('T', ' ');
-
-  const net = rounds.reduce((a, r) => a + (r.net_profit || 0), 0);
-  const pfs = rounds.map(r => r.profit_factor).filter(v => v != null);
-  const worstDd = rounds.reduce((a, r) => Math.max(a, r.max_drawdown_pct || 0), 0);
-  $('kpiNet').textContent = fmt(net);
-  $('kpiNet').className = 'v mono ' + signClass(net);
-  $('kpiPf').textContent = pfs.length ? fmt(pfs.reduce((a, b) => a + b, 0) / pfs.length) : '—';
-  $('kpiRounds').textContent = String(rounds.length);
-  $('kpiDd').textContent = worstDd ? fmt(worstDd) + '%' : '—';
-
-  $('rows').innerHTML = rounds.length ? rounds.map(r => `
-    <tr class="${r.round === s.current_round ? 'current' : ''}">
-      <td class="mono">${r.round}</td>
-      <td class="mono ${signClass(r.net_profit)}">${fmt(r.net_profit)}</td>
-      <td class="mono">${r.total_trades ?? '—'}</td>
-      <td class="mono">${fmt(r.win_rate)}%</td>
-      <td class="mono">${fmt(r.profit_factor)}</td>
-      <td class="mono">${fmt(r.max_drawdown_pct)}%</td>
-      <td>${r.constraints_ok === false ? '<span class="neut">⚠</span>' : '✓'}</td>
-    </tr>`).join('') : '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
-
-  drawArea('chartProfit', rounds.map(r => r.net_profit || 0), 'line-info', '#4a9eff');
-  drawArea('chartDd', rounds.map(r => r.max_drawdown_pct || 0), 'line-bad', '#ff4d4f');
-
-  const last = rounds[rounds.length - 1];
-  if (!rounds.length && !s.hypothesis) {
-    $('detail').className = 'empty';
-    $('detail').textContent = '暂无数据';
-  } else {
-    $('detail').className = '';
-    $('detail').innerHTML = `
-      <div class="muted" style="font-size:var(--fs-1);letter-spacing:1px;text-transform:uppercase;margin-bottom:5px">当前假设</div>
-      <div>${s.hypothesis || (last && last.hypothesis) || '—'}</div>
-      ${last && last.diagnosis ? `<div class="muted" style="font-size:var(--fs-1);letter-spacing:1px;text-transform:uppercase;margin-top:14px;margin-bottom:5px">LLM 诊断</div><div style="color:#c3d2e2">${last.diagnosis}</div>` : ''}
-      ${last && last.next_hypothesis ? `<div class="muted" style="font-size:var(--fs-1);letter-spacing:1px;text-transform:uppercase;margin-top:14px;margin-bottom:5px">下一轮方向</div><div style="color:#c3d2e2">${last.next_hypothesis}</div>` : ''}
-      ${last && last.code_file ? `<button class="link" style="margin-top:14px" onclick="toggleCode('${last.code_file}')">查看代码 ${last.code_file}</button><pre id="codeBox" class="hidden"></pre>` : ''}`;
-  }
-}
-
-async function toggleCode(path) {
-  const box = $('codeBox');
-  if (!box) return;
-  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
-  const res = await fetch('/api/code?path=' + encodeURIComponent(path));
-  box.textContent = res.ok ? await res.text() : '读取失败';
-  box.classList.remove('hidden');
-}
-
-async function pollState() {
-  try {
-    const res = await fetch('/api/state');
-    if (!res.ok) throw new Error();
-    renderState(await res.json());
-  } catch (e) {
-    $('statusText').textContent = '未连接';
-    $('dot').className = 'dot';
-  }
-}
-
-let evalList = [];
-let stratList = [];
-
-async function loadEvalList() {
-  try {
-    const res = await fetch('/api/evaluations');
-    evalList = await res.json();
-  } catch (e) { evalList = []; }
-
-  const sel = $('evalSelect');
-  if (!evalList.length) {
-    sel.innerHTML = '<option value="">暂无评估结果（跑一次 aqa.py evaluate）</option>';
-    return;
-  }
-  sel.innerHTML = evalList.map(e =>
-    `<option value="${e.file}">${e.strategy} · ${e.profit_years}/${e.years} 盈利年 · ${e.verdict ? 'PASS' : 'FAIL'} · ${e.mtime}</option>`
-  ).join('');
-  loadEvalDetail(evalList[0].file);
-}
-
-async function loadEvalDetail(file) {
-  if (!file) return;
-  let data;
-  try {
-    const res = await fetch('/api/evaluation?file=' + encodeURIComponent(file));
-    data = await res.json();
-  } catch (e) { return; }
-
-  const yearly = data.yearly || [];
-  const stress = data.stress || [];
-  const net = yearly.reduce((a, r) => a + (r.net_profit || 0), 0);
-  const profitable = yearly.filter(r => (r.net_profit || 0) > 0).length;
-  const pfs = yearly.map(r => r.profit_factor || 0);
-  const worstDd = yearly.reduce((a, r) => Math.max(a, r.max_drawdown_pct || 0), 0);
-
-  $('eNet').textContent = fmt(net);
-  $('eNet').className = 'v mono ' + signClass(net);
-  $('eYears').textContent = `${profitable}/${yearly.length}`;
-  $('eYears').className = 'v mono ' + (yearly.length && profitable / yearly.length >= 0.7 ? 'txt-good' : 'txt-bad');
-  $('ePf').textContent = pfs.length ? fmt(pfs.reduce((a, b) => a + b, 0) / pfs.length) : '—';
-  $('eDd').textContent = worstDd ? fmt(worstDd) + '%' : '—';
-
-  $('yearRows').innerHTML = yearly.length ? yearly.map(r => `
-    <tr>
-      <td class="mono">${r.year}</td>
-      <td class="mono ${signClass(r.net_profit)}">${fmt(r.net_profit)}</td>
-      <td class="mono">${r.total_trades ?? '—'}</td>
-      <td class="mono">${fmt(r.win_rate)}%</td>
-      <td class="mono">${fmt(r.profit_factor)}</td>
-      <td class="mono">${fmt(r.max_drawdown_pct)}%</td>
-    </tr>`).join('') : '<tr><td colspan="6" class="empty">—</td></tr>';
-
-  $('stressRows').innerHTML = stress.length ? stress.map(r => `
-    <tr>
-      <td class="mono">${r.spread}</td>
-      <td class="mono ${signClass(r.net_profit)}">${fmt(r.net_profit)}</td>
-      <td class="mono">${fmt(r.profit_factor)}</td>
-      <td class="mono">${fmt(r.max_drawdown_pct)}%</td>
-    </tr>`).join('') : '<tr><td colspan="4" class="empty">未跑压力测试</td></tr>';
-
-  const checks = data.checks || {};
-  const keys = Object.keys(checks);
-  $('evalGateBox').innerHTML = keys.length ? `
-    ${keys.map(k => `<div class="gate-row"><span class="badge ${checks[k] ? 'pass' : 'fail'}">${checks[k] ? 'PASS' : 'FAIL'}</span><span>${k}</span></div>`).join('')}
-    <div class="verdict ${data.verdict ? 'ok' : 'no'}">${data.verdict ? '通过 Gate 2 — 可进入 demo 验证' : '未通过 — 需要改策略逻辑（不是调参）'}</div>`
-    : '<div class="empty">—</div>';
-
-  drawBars('chartYear', yearly.map(r => String(r.year)), yearly.map(r => r.net_profit || 0));
-}
-
-async function loadStrategies() {
-  try {
-    const res = await fetch('/api/strategies');
-    stratList = await res.json();
-  } catch (e) { stratList = []; }
-
-  const tbody = $('stratRows');
-  if (!stratList.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">strategies/ 下没有可用策略</td></tr>';
-    return;
-  }
-
-  const evalByStrategy = {};
-  for (const e of evalList) {
-    const key = (e.strategy || '').split('.').pop();
-    if (!evalByStrategy[key]) evalByStrategy[key] = e;
-  }
-
-  tbody.innerHTML = stratList.map(s => {
-    const ev = evalByStrategy[s.name];
-    const badge = ev
-      ? `<span class="badge ${ev.verdict ? 'pass' : 'fail'}">${ev.verdict ? 'PASS' : 'FAIL'}</span> <span class="muted mono" style="font-size:var(--fs-1)">${ev.profit_years}/${ev.years} 年盈利</span>`
-      : '<span class="muted" style="font-size:var(--fs-2)">未评估</span>';
-    return `<tr>
-      <td><button class="link mono" onclick="showParams('${s.name}')">${s.name}</button></td>
-      <td class="muted">${s.doc || '—'}</td>
-      <td class="mono">${s.lines}</td>
-      <td>${badge}</td>
-    </tr>`;
-  }).join('');
-}
-
-function showParams(name) {
-  const s = stratList.find(x => x.name === name);
-  if (!s) return;
-  const box = $('stratParams');
-  box.className = '';
-  box.innerHTML = `<div class="muted" style="font-size:var(--fs-2);margin-bottom:10px">${s.doc || s.name}</div>` +
-    `<pre class="mono">${Object.entries(s.params).map(([k, v]) => `${k.padEnd(24)} = ${v}`).join('\n')}</pre>`;
 }
 
 /* ==================== 实盘复盘 ==================== */
@@ -6985,25 +6653,6 @@ function renderApiMeter(info) {
     : '尚未调用过 API';
 }
 
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    const v = tab.dataset.view;
-    // 顶部 pill 里「轮次/阶段/耗时」只属于实时迭代页，靠这个属性在实盘页隐藏
-    document.body.dataset.view = v;
-    $('view-live').classList.toggle('hidden', v !== 'live');
-    $('view-iter').classList.toggle('hidden', v !== 'iter');
-    $('view-eval').classList.toggle('hidden', v !== 'eval');
-    $('view-strat').classList.toggle('hidden', v !== 'strat');
-    if (v === 'live' && !liveData) refreshLive();
-    if (v === 'eval' && !evalList.length) loadEvalList();
-    if (v === 'strat' && !stratList.length) loadStrategies();
-  });
-});
-
-$('evalSelect').addEventListener('change', e => loadEvalDetail(e.target.value));
-
 /* ---- 实盘视图三态切换（S1 骨架）----
    纯 display 切换：不重绘、不清数据、不发请求。
    各 render 函数继续往隐藏的 DOM 里写，切回来看到的就是最新一轮。
@@ -7104,23 +6753,19 @@ if ($('atSkipShow')) {
   });
 }
 
-// 初始视图是实盘：先把 dataset.view 打上，否则首屏会把实时迭代的 pill 也显示出来
-document.body.dataset.view = 'live';
 // 子态默认做单台。首帧就要打上——不然账户条会先按舒展版渲染一帧再跳。
 document.body.dataset.sub = 'desk';
 window.addEventListener('load', fitDesk);
 setTimeout(fitDesk, 60);
-pollState();
-setInterval(pollState, 1500);
 
 // 实盘视图：进入页面先加载一次，之后每 20 秒刷新（只在实盘页可见时）
 // 刷新分三档，别再整体 20 秒一次——盯着做单的人等不起。
 //   1 秒：AI 交易员（只读 state + 日志，6KB，完全不碰 MT5）
 //   3 秒：账本/持仓/账户数字（服务端缓存 TTL 也是 3 秒，读一次 MT5 约 33ms）
 //  20 秒：账户下拉列表（只在你于终端里切账户时才变）
-// 页面不可见 / 不在实盘页时不发请求，免得长期开着白烧 MT5。
+// 页面不可见时不发请求，免得长期开着白烧 MT5。
 function pollVisible() {
-  return !document.hidden && !$('view-live').classList.contains('hidden');
+  return !document.hidden;
 }
 
 refreshLive();
@@ -7174,7 +6819,6 @@ document.addEventListener('fullscreenchange', () => {
   }
 });
 
-loadEvalList().then(() => loadStrategies());
 </script>
 
 <!-- 全屏提醒幕布：默认隐藏，点「全屏提醒」才出来。

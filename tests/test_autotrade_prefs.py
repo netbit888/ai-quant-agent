@@ -219,8 +219,6 @@ class PrefsApiCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         paths.set_root(self._tmp.name)
-        self._orig_state = dashboard.STATE_FILE
-        dashboard.STATE_FILE = Path(self._tmp.name) / "current_state.json"
         self.server = dashboard.Server(("127.0.0.1", 0), dashboard.Handler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever,
@@ -231,7 +229,6 @@ class PrefsApiCase(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        dashboard.STATE_FILE = self._orig_state
         paths.set_root(None)
         self._tmp.cleanup()
 
