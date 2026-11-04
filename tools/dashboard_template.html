@@ -109,41 +109,34 @@
   body > * { position: relative; z-index: 1; }
   .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
-  header {
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 8px 16px;
-    background: linear-gradient(180deg, rgba(22,32,45,.9), rgba(13,19,27,.9));
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 8px 28px -12px rgba(0,0,0,.8);
+  /* 页脚：程序名 / 版本 / 检查更新。
+     这三样原来占着页面最顶上一整条带边框、带渐变的 header——而交易时
+     一眼都不看它们，却每天要为此交出一条 50px 高的视觉重量。改成网站
+     页脚的做法：最底下、一条淡分隔线、11px 小字、无框。
+     顶部让给状态带，第一眼看到的就是「在跑吗 / 有没有仓 / 现在多少」。 */
+  .foot {
+    display: flex; align-items: center; gap: 18px;
+    margin: var(--sp3) 0 0; padding: 11px 2px 0;
+    border-top: 1px solid var(--border);
+    font-size: var(--fs-1); color: var(--dim);
   }
-  header h1 {
-    margin: 0; font-size: var(--fs-6); font-weight: 700; letter-spacing: 2px;
-    background: linear-gradient(90deg, var(--text), #7fb0ff 70%, #b58cff);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    text-transform: uppercase;
+  .foot-brand { font-weight: 600; letter-spacing: 1.8px; color: var(--muted); }
+  .foot-ver { font-family: var(--mono); }
+  .foot-ver b { font-weight: 600; color: var(--muted); }
+  .foot-link {
+    background: none; border: 0; padding: 0; min-height: 0;
+    font: inherit; color: var(--muted); cursor: pointer;
+    text-decoration: underline; text-underline-offset: 3px;
+    text-decoration-color: var(--border-hi);
   }
-  .pill {
-    display: inline-flex; align-items: center; gap: 7px;
-    padding: 5px 11px; border-radius: var(--r-md);
-    background: rgba(255,255,255,.025);
-    border: 1px solid var(--border);
-    font-size: var(--fs-2); color: var(--muted);
-  }
-  .pill b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+  .foot-link:hover { color: var(--text); text-decoration-color: currentColor; }
+  .foot-link:disabled { opacity: .6; cursor: default; }
   .dot { width: 8px; height: 8px; border-radius: var(--r-round); background: var(--dim); transition: .3s; }
-  .dot.running {
-    background: var(--good);
-    box-shadow: 0 0 0 0 rgba(46,204,113,.7), 0 0 12px rgba(46,204,113,.9);
-    animation: pulse 1.6s infinite;
-  }
-  .dot.error { background: var(--bad); box-shadow: 0 0 12px rgba(255,77,79,.8); }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 rgba(46,204,113,.6), 0 0 10px rgba(46,204,113,.8); }
     70%  { box-shadow: 0 0 0 8px rgba(46,204,113,0), 0 0 10px rgba(46,204,113,.4); }
     100% { box-shadow: 0 0 0 0 rgba(46,204,113,0),   0 0 10px rgba(46,204,113,.8); }
   }
-  .spacer { flex: 1; }
 
   /* ---- 实盘视图内部三态：做单台 / 复盘台 / 设置舱 ----
      S1 只做结构分层：卡片原样搬，不动任何 id / class / 事件绑定。
@@ -1751,12 +1744,6 @@
   select, input:not([type=radio]):not([type=checkbox]) { min-height: 28px; }
   .at-mode label, .at-mode .at-sub { min-height: 28px; padding: 0 var(--sp2); }
 
-  /* 2) 顶部「退出程序」去常驻红。
-        它每小时也用不到一次，却和「检查更新」并列占了全页最贵的右上角。
-        红色改成 hover 才给——退出本来就有二次确认弹窗，功能路径没变。 */
-  #appQuit { color: var(--muted); border-color: var(--border); background: rgba(255,255,255,.03); }
-  #appQuit:hover { color: var(--bad-lit); border-color: rgba(255,77,79,.45); background: rgba(255,77,79,.1); }
-
   /* 3) 真正的窗口区间断点。
         原来只有 900 / 820 两个，而 desktop.py 的 min_size=1120 让它们永远
         触发不了（只有把页面当普通网页在浏览器里打开时才可能命中，故保留）。
@@ -1916,22 +1903,6 @@
   </div>
 </div>
 
-<header>
-  <h1>AI Quant</h1>
-  <!-- 2026-11-04：顶部四个视图标签只剩「实盘复盘」，连导航行一起删掉——
-       只有一个选项的切换器是噪音，还白占 40px。三个回测侧视图（实时迭代 /
-       策略评估 / 策略库）的数据链 10-21 就停更了，实盘模块从不写它们。
-       连带下线的是「● 已完成」胶囊和右上角时间戳：两者都由 renderState 从
-       current_state.json 写，显示的是旧流水线的死状态和四天前的时间，
-       而实盘的实时状态在下面的 #atBar 里，那才是真的。 -->
-  <span class="spacer"></span>
-  <span class="pill" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
-  <button class="btn-ghost" id="appUpdate" onclick="manualCheckUpdate()"
-          title="检查是否有新版本" style="margin-left:12px">检查更新</button>
-  <button class="btn-ghost btn-danger" id="appQuit" onclick="quitApp()"
-          title="停掉 AI、必要时平仓，然后关闭整个程序"
-          style="margin-left:12px">退出程序</button>
-</header>
 
 <section id="view-live">
   <!-- 常驻状态带：滚到哪里都能看到「在不在跑 / 有没有仓 / 现在多少」。
@@ -2546,6 +2517,19 @@
   </div>
   </div><!-- /#live-setup -->
 </section>
+
+<!-- 程序名 / 版本 / 检查更新：都在页面最底下，不在第一屏抢位置。
+     「退出程序」按钮已删除——窗口右上角本来就有 X，而 X 走的关闭路径
+     （_on_window_closing → onCloseRequested → /api/app/quit）和按钮
+     完全同一条，确认弹窗、停线程、必要时平仓一个都不少。 -->
+<footer class="foot">
+  <span class="foot-brand">AI QUANT</span>
+  <span class="foot-ver" id="verPill" style="display:none">v<b id="appVersion">-</b></span>
+  <button class="foot-link" id="appUpdate" onclick="manualCheckUpdate()"
+          title="检查是否有新版本">检查更新</button>
+  <button class="foot-link hidden" id="footQuit" onclick="quitApp()"
+          title="停掉 AI、必要时平仓，然后关闭程序">退出</button>
+</footer>
 
 <script>
 /* ==================== 原生窗口桥（pywebview）====================
@@ -4578,6 +4562,18 @@ async function loadAppVersion() {
       $('verPill').style.display = '';
     }
   } catch (e) { /* 展示性元素，静默失败 */ }
+}
+
+/* 页脚「退出」只在没有窗口外壳的场景出现（浏览器模式 / --web）。
+   原生窗口有标题栏的 X，而 X 走的是同一条关闭流程（_on_window_closing →
+   onCloseRequested → quitApp），再摆一个按钮就是同一个动作两个入口。
+   但浏览器模式关标签页 ≠ 退出：服务端和 AI 线程会继续跑，必须留出口。
+   拿不到 shell 时按原生处理——宁可少一个按钮，也不要在窗口里冒出重复的退出。 */
+async function loadShellQuit() {
+  try {
+    const j = await (await fetch('/api/app/info', { cache: 'no-store' })).json();
+    if (j && j.shell !== 'native') $('footQuit').classList.remove('hidden');
+  } catch (e) { /* 静默：这个按钮是兜底，不是主路径 */ }
 }
 
 async function lpExportActive() {
@@ -6687,8 +6683,12 @@ function fitPane(paneId) {
   const card = document.querySelector('#' + paneId + ' > .card.l1');
   if (!card || !card.offsetParent) return;
   const top = card.getBoundingClientRect().top + window.scrollY;
+  // 页脚是页面最后一行，它自己也要占高度（+12 是它的 margin-top）。
+  // 不扣掉的话卡片会把它顶到视口外，版本号永远看不见。
+  const foot = document.querySelector('footer.foot');
+  const footH = foot ? Math.round(foot.getBoundingClientRect().height) + 12 : 0;
   // 22 = body 的 16px 底边距 + 6px 呼吸位。
-  const avail = window.innerHeight - top - 22;
+  const avail = window.innerHeight - top - 22 - footH;
   const sb = card.querySelector('.stream-body');
   const keep = sb ? sb.scrollTop : 0;
   card.style.height = '';
@@ -6779,6 +6779,7 @@ checkSetup();
 loadLessonPacks();
 // 版本号常驻 header。失败就保持隐藏，别让一个展示性元素报错。
 loadAppVersion();
+loadShellQuit();
 // 更新检测：安装版启动时静默查一次，有新版才弹窗；其他形态自动藏按钮
 startupUpdateCheck();
 (() => {
