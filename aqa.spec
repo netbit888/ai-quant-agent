@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""AI Quant Agent 安装版打包配置。
+"""SeatOne 安装版打包配置。
 
 构建：
     .venv\\Scripts\\pyinstaller.exe --noconfirm aqa.spec

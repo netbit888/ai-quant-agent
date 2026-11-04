@@ -1,4 +1,4 @@
-"""AI Quant Agent — 统一 CLI
+"""SeatOne — 统一 CLI
 
 用法：
     python aqa.py data pull --symbol XAUUSDm --tf H4
@@ -714,7 +714,7 @@ def cmd_serve(args) -> None:
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(prog="aqa", description="AI Quant Agent CLI")
+    parser = argparse.ArgumentParser(prog="aqa", description="SeatOne CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # data

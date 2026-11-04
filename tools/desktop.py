@@ -29,7 +29,7 @@ MB_TOPMOST = 0x4000
 IDYES = 6
 
 
-def message_box(text: str, title: str = "AI Quant Agent", style: int = MB_OK) -> bool:
+def message_box(text: str, title: str = "SeatOne", style: int = MB_OK) -> bool:
     """Win32 消息框，返回 True 表示点了「是」。
 
     `console=False` 之后所有 print 都进虚空，这是**唯一**能让用户看见错误

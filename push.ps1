@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  AI Quant Agent  -  一键提交 + 推送
+#  SeatOne  -  一键提交 + 推送
 #
 #  由 push.bat 调用（双击 push.bat 即可）。单独运行：
 #      powershell -NoProfile -ExecutionPolicy Bypass -File push.ps1
@@ -35,7 +35,7 @@ function Pause-And-Exit([int]$code = 0) {
 }
 
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  AI Quant Agent  -  提交 + 推送" -ForegroundColor Cyan
+Write-Host "  SeatOne  -  提交 + 推送" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 

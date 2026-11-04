@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  AI Quant Agent  -  one-click commit + push
+rem  SeatOne  -  one-click commit + push
 rem
 rem  Double-click this file.
 rem
