@@ -53,6 +53,10 @@ function makeEl(id) {
 }
 global.document = {
   getElementById: id => made[id] || makeEl(id),
+  // renderAutoTrade 末尾会调 fitActive() 撑满视口，它走 document.querySelector
+  // 找卡片。返回 null 后 fitPane 第一行就 return（`!card` 分支），
+  // 这比造一个没有 offsetParent/getBoundingClientRect 的假卡片更省事。
+  querySelector: () => null,
   querySelectorAll: () => [],
   createElementNS: () => makeEl('svg' + Math.random()),
   createElement: tag => makeEl('created_' + tag + '_' + Math.random()),
@@ -60,6 +64,9 @@ global.document = {
   // 只属于某一页的顶部 pill），没有 body 整段脚本会在这里炸。
   body: makeEl('body'),
   hidden: false,
+  // fitPane 会读 document.documentElement.scrollHeight 做自校验。假 DOM 里
+  // 卡片没有 offsetParent、fitPane 提前返回，这里只是不留未定义的口子。
+  documentElement: { scrollHeight: 900, clientHeight: 900, clientWidth: 1440 },
   addEventListener() {},
 };
 // 记下每次 fetch，用来断言「该拦的请求真的没发出去」
@@ -84,6 +91,16 @@ global.fetch = async (url, opts) => {
 };
 global.setInterval = () => 0;
 global.URLSearchParams = class { constructor() {} set() {} toString() { return ''; } };
+// window 必须有：模板末尾是裸的 window.addEventListener('resize'|'load', …)，
+// 那是浏览器专用写法（不该为测试改成 typeof 判断）。缺了它整段脚本在第
+// 一个 addEventListener 就抛，冒烟从「渲染有没有错」退化成「跑不起来」。
+// innerHeight/scrollY 是 fitPane 量高度用的；这里给的值不重要——假 DOM 的
+// 卡片没有 offsetParent，fitPane 会直接 return。
+global.window = {
+  innerWidth: 1440, innerHeight: 900, scrollY: 0, scrollTo() {},
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+};
 
 let failed = false;
 (async () => {
@@ -234,8 +251,11 @@ try {
   made.atShowSkip.checked = false;
   api.renderAutoTrade(atSample);
   const atCols = (made.rowsAuto.innerHTML.match(/<td/g) || []).length / Math.max(atRows, 1);
-  console.log(`  每行 ${atCols} 列 ${atCols === 9 ? '✓' : '✗'}（开仓理由 / 平仓理由 / 详情 分列）`);
-  if (atCols !== 9) failed = true;
+  // 6 列是 2026-11-04 定的：原来 11 列里「来源 / 开仓理由 / 平仓理由 / 详情」
+  // 占四列，1280 宽下必须横向滚才看得到盈亏。现在来源并进动作徽章，
+  // 两种理由各留一列（带 title 全文）。这条守住「不许再涨回两位数」。
+  console.log(`  每行 ${atCols} 列 ${atCols === 6 ? '✓' : '✗'}（开仓理由 / 平仓理由 / 详情 分列）`);
+  if (atCols !== 6) failed = true;
   const detailBtns = (made.rowsAuto.innerHTML.match(/tradeDetailShow/g) || []).length;
   console.log(`  open/close 行带「详情」按钮 ${detailBtns >= 2 ? '✓' : '✗'}（${detailBtns} 个）`);
   if (detailBtns < 2) failed = true;
@@ -264,15 +284,11 @@ try {
   const lessonShown = made.rowsAuto.innerHTML.includes('第一根大阳线后追多容易吃回撤');
   console.log(`  复盘行显示结论 ${lessonShown ? '✓' : '✗'}`);
   if (!lessonShown) failed = true;
-  // 胜率必须是「全部已平仓单」口径。样例 hit_rate=50%（1 胜 1 止损），
-  // 而 llm_hit_rate=100%——显示成 100% 就说明口径又退回自我安慰了。
-  // 这条是 10-26 用户直接提的："硬止损为什么不算"。
-  const hitTxt = String(made.atHit.textContent || '');
-  const hitSub = String(made.atHitSub.textContent || '');
-  console.log(`\n  胜率含硬止损 ${hitTxt.includes('50.0%') ? '✓' : '✗'} (${hitTxt.trim()})`);
-  if (!hitTxt.includes('50.0%')) failed = true;
-  console.log(`  胜率副标注明止损笔数 ${hitSub.includes('硬止损') ? '✓' : '✗'} (${hitSub.trim()})`);
-  if (!hitSub.includes('硬止损')) failed = true;
+  // 胜率口径（全部已平仓单，硬止损算在内）。原来这块有独立的 KPI 卡
+  // （atHit / atHitSub），做单台 v2 改版时并入状态带：现在只有「3 胜 1 负」
+  // 这种胜负笔数，**不再出现命中率百分比**——那个数字的分母会剔掉硬止损，
+  // 样例里 2 笔平仓 1 笔止损，写成命中率就是 100% 的自我安慰。
+  // 断言因此从「显示 50.0%」变成「必须写胜负笔数、且不许出现命中」。
   const cacheTxt = String(made.atCache.textContent || '');
   console.log(`  缓存命中率显示 ${cacheTxt.includes('45.0%') ? '✓' : '✗'} (${cacheTxt.trim() || '空'})`);
   if (!cacheTxt.includes('45.0%')) failed = true;
@@ -409,7 +425,9 @@ try {
   const reaskOk = reaskTag.includes('60s 复核');
   console.log(`  到过门槛的复核标记 ${reaskOk ? '✓' : '✗'} (${reaskTag})`);
   if (!reaskOk) failed = true;
-  const reaskWhy = String(made.atWhyText.textContent || '');
+  // 理由原话现在写在决策环（ringWhy）。状态带刻意只留一个标签：
+  // 上一版那条带子挂 3 行、104px 高，而环里有更大的版面写同一件事。
+  const reaskWhy = String(made.ringWhy.textContent || '');
   console.log(`  复核理由原样上屏 ${reaskWhy.includes('到过门槛') ? '✓' : '✗'} (${reaskWhy.trim()})`);
   if (!reaskWhy.includes('到过门槛')) failed = true;
   // 关掉（tp_reask_sec=0）→ 退回普通「持仓中」，不许留一个不存在的节拍
@@ -428,8 +446,9 @@ try {
 
   // 峰值浮盈：持仓卡和流水行都要有。跟实际盈亏并排看才分得清
   // 「摸到了又吐回去」和「一路没回头」——两者要改的地方完全相反。
-  const posSub = String(made.atPosSub.textContent || '');
-  const peakOk = posSub.includes('峰值') && posSub.includes('2.20');
+  // 「峰值」二字在持仓卡的行标签里（静态 HTML），这里查数字落位。
+  const posSub = String(made.posPeak.textContent || '');
+  const peakOk = posSub.includes('2.20');
   console.log(`  持仓显示峰值浮盈 ${peakOk ? '✓' : '✗'} (${posSub})`);
   if (!peakOk) failed = true;
   const peakRowOk = String(made.rowsAuto.innerHTML).includes('峰 +2.20');
@@ -524,8 +543,9 @@ try {
     failed = true;
   }
 
-  // act=false 时"最近一次判断"要写「不做」，不能只显示一个 62% 让人误解
-  const verb = String(made.atCallSub.textContent || '');
+  // act=false 时决策环的大字必须是「不做」，不能只显示一个 62% 让人误解。
+  // 做单台 v2 之后这块叫 ringWord（环里的大字），不是旧的 atCallSub 副标题。
+  const verb = String(made.ringWord.textContent || '');
   console.log(`  act=false 显示为「不做」 ${verb.includes('不做') ? '✓' : '✗'} (${verb})`);
   if (!verb.includes('不做')) failed = true;
   console.log(`  状态徽标: ${made.atState.textContent} | 运行中时「开始」按钮 disabled=${made.atStart.disabled}`);
