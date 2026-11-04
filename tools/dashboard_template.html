@@ -189,11 +189,13 @@
      三态是高频切换，25 张卡每次切过去闪一遍既费性能也晃眼——只让做单台
      （首屏）保留进场动效，复盘台/设置舱直接落位。 */
   #live-review .card, #live-review .kpi,
-  #live-setup .card, #live-setup .kpi { animation: none; }
+  #live-setup .card, #live-setup .kpi,
+  #live-flow .card, #live-flow .kpi { animation: none; }
 
   /* ==================== 做单台 v2 ====================
      设计依据 docs/ui-v2-spec.md。分区：状态带（顶层 sticky）→ 操作条 →
-     决策环 + 持仓面板（62/38 分栏）→ 决策流（横跨）。
+     决策环（上）+ 持仓面板（下）两区 ----2026-11-04 由左右分栏改成上下，
+     决策流同日搬去独立标签，做单台专注当前这一笔。
      为什么重做：改造前这一张卡里有 25 个块，其中配置 20 个、运维 4 个，
      真正「做单时要读」的只有 6 个——98% 的面积服务于开跑之前和出事之后。
      这里只留那 6 个，其余全部搬进设置舱。 */
@@ -204,8 +206,15 @@
   .at-desk-bar .at-grow { flex: 1 1 auto; }
   .at-desk-bar .at-now { font-size: var(--fs-1); color: var(--dim); }
 
+  /* 上下分栏（2026-11-04 由左右 62/38 改成）。
+     决策流搬走之后卡片又宽又高，横着并排反而两头都不够用：环里的理由原话
+     被挤成两行半，持仓面板那 38% 宽度下四个数字已经挤到要退回 2×2。
+     改成上下铺满之后，p_up 条和理由一行能放的字数翻了近一倍，持仓面板也能
+     把 6 盏闸门灯从 3×2 摊成一行 6 个，省下整整一行高度。
+     行高 1.05 : 1 —— 环里要放模型原话，天然比四个数字需要多一点。 */
   .at-grid {
-    display: grid; grid-template-columns: minmax(0, 62fr) minmax(0, 38fr);
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.05fr) minmax(0, 1fr);
     gap: var(--sp3); align-items: stretch;
   }
 
@@ -370,10 +379,11 @@
     white-space: nowrap;
   }
   .pos-plan.trend { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
-  /* 四个数字排一行（原来 2×2 要两行 78px）。38% 栏宽下四列各约 110px，
-     标签 11px + 等宽数值够放；省下来的 40px 直接给决策流。 */
+  /* 四个数字排一行（原来 2×2 要两行 78px）。上下分栏之后面板是整幅宽度，
+     再用 space-between 会把四个数拉到两个极端（中间空一米），
+     改成左对齐 + 固定间距。 */
   .pos-rows {
-    display: flex; justify-content: space-between; gap: var(--sp3);
+    display: flex; justify-content: flex-start; gap: var(--sp6);
     margin-bottom: var(--sp2);
   }
   .pos-rows .prow { flex: 0 1 auto; }
@@ -461,8 +471,13 @@
      改造前这里是 6 个常驻胶囊，写着 −3.00 / 每5秒 / 3.25 …——这些数
      整个交易日不变，看了等于没看。参数挪进设置舱，这里只回答一个问题：
      现在有没有哪条在逼近。 */
-  .gate-leds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 6 盏灯一行铺满（上下分栏之后宽度够了，原来 3×2 要占两行约 40px）；
+     窄窗口退回 3×2，否则每格放不下「止盈门槛」四个字。 */
+  .gate-leds { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
                gap: var(--sp1) var(--sp2); }
+  @media (max-width: 1199px) {
+    .gate-leds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
   .gate-led {
     display: flex; align-items: center; gap: 6px; font-size: var(--fs-1);
     color: var(--muted); padding: 3px 7px; border-radius: var(--r-xs);
@@ -501,6 +516,16 @@
   .sb-alarm { color: var(--dim); white-space: nowrap; }
   .sb-alarm:not(:empty) { color: var(--warn); }
 
+  /* ---- 决策流独立页 ----
+     整块从做单台卡片底部搬出来（2026-11-04）。.stream 原来靠 border-top
+     与上方的决策环分隔，独立成页后上面没有东西了，那条线要去掉；
+     卡片撑满视口，列表自己内部滚（和它在做单台时一样）。 */
+  #live-flow > .card.l1 {
+    display: flex; flex-direction: column;
+    padding: var(--sp3) var(--sp4); margin-top: var(--sp2);
+  }
+  #live-flow .stream { border-top: 0; margin-top: 0; padding-top: 0; }
+
   /* ---- 决策流：11 列压成 6 列 ----
      原来 11 列里「来源 / 开仓理由 / 平仓理由 / 详情」占了 4 列，1280 宽下
      必须横向滚才看得到盈亏。现在一条理由列（最多两行，各自带 title 全文）。 */
@@ -515,12 +540,23 @@
     min-height: 168px;
   }
   /* 卡片本身变成 flex 列，max-height 由 fitDesk() 按实际可用高度写内联值。
-     grid 不参与收缩：决策环/持仓面板压扁就不可读了，宁可让页面滚。 */
+     决策流搬走之后，卡片里只剩决策环 + 持仓面板：这两块按内容定高只有 245px，
+     而卡片撑满视口有 ~480px，多出来的高度必须由它们自己吸收——所以 at-grid
+     从 flex:none 改成 flex:1。网格项本身是 stretch，两栏跟着等高。 */
   #live-desk > .card.l1 {
     display: flex; flex-direction: column;
     padding: var(--sp3) var(--sp4) var(--sp3); margin-top: var(--sp2);
   }
-  #live-desk .at-grid { flex: none; }
+  #live-desk .at-grid { flex: 1 1 auto; min-height: 0; }
+  /* 上下分栏之后这两块都是整幅宽度，原来为「半宽」定的尺寸全显得单薄：
+     22px 的判断条拉成 1000px 就像一条细装饰线，直方图 30px 也压不住底部。
+     加高它们同时把「理由 → 直方图」之间那段空档吃掉。 */
+  #live-desk .put-track { height: 36px; }
+  #live-desk .hist { height: 44px; }
+  #live-desk .r-track { height: 30px; }
+  /* 面板内部只有 5 个区块，撑高后不能让空白全堆在闸门灯下面：
+     按原有区块均匀铺开。**只调间距，不动内容**——加东西属于另一件事。 */
+  #live-desk .pos-panel { justify-content: space-between; }
   /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
      （表头 22px + 过滤条），决策流因此少显示整整一行。 */
   .stream-foot {
@@ -917,7 +953,7 @@
   .acct-note:empty { display: none; }
 
   /* ---- 做单台 = 一屏装完的驾驶舱 ----
-     账户条在别的页是"看一眼就走"，在做单台是常驻，必须让位给决策流。
+     账户条在别的页是"看一眼就走"，在做单台是常驻，必须让位给决策环与持仓面板。
      压成一行（标签和数字并排）、去掉换行。切回复盘台/设置舱立刻恢复舒展版，
      所以这些规则全部挂在 body[data-sub="desk"] 下，不改动别处。
 
@@ -1918,7 +1954,7 @@
   <h1>AI Quant</h1>
   <!-- 视图切换本来在标题条下面单独占一行（37px + 上下间距 12px）。它和标题
        是同一件事——"现在在哪一页"，合并后每个视图都多出 49px 纵向空间，
-       做单台正好把这份空间还给决策流。 -->
+       做单台正好把这份空间还给决策环与持仓面板。 -->
   <div class="tabs">
     <button class="tab active" data-view="live">实盘复盘</button>
     <button class="tab" data-view="iter">实时迭代</button>
@@ -1985,16 +2021,16 @@
   </div>
   <div class="acct-note" id="acctNote"></div>
 
-  <!-- 实盘视图三态切换。S1 = 骨架：做单台只装 AI 交易员卡，复盘台装其余全部，
-       设置舱先占位（S3 再把品种/模式/模型/经验库/闸门参数搬进去）。
+  <!-- 实盘视图四态切换：做单台 / 决策流 / 复盘台 / 设置舱。
        切态用 display，不销毁节点——所有 render 函数与轮询仍然照常写 DOM。 -->
   <!-- 一行装完「切哪一态 + 现在什么模式 + 三颗动作」。
        原来是两行：子标签 41px、卡片头 44px。卡头那行只放标题（和顶部
        sticky 带重复）加三颗按钮，等于用 44px 换一颗「开始做单」——
-       决策流因此永远少一行。现在合并：左边切态，右边动作。 -->
+       内容区因此永远少一行。现在合并：左边切态，右边动作。 -->
   <div class="live-bar">
     <div class="live-subtabs" role="tablist" aria-label="实盘子视图">
       <button class="live-sub active" data-sub="desk" role="tab">做单台</button>
+      <button class="live-sub" data-sub="flow" role="tab">决策流</button>
       <button class="live-sub" data-sub="review" role="tab">复盘台</button>
       <button class="live-sub" data-sub="setup" role="tab">设置舱</button>
     </div>
@@ -2018,8 +2054,9 @@
 
   <div id="live-desk" class="live-pane">
 
-  <!-- 做单台一屏三区：左决策环（这一轮模型想了什么）、右持仓面板
-       （这笔单离止损/保本/止盈还有多远）、下决策流。
+  <!-- 做单台一屏两区：上决策环（这一轮模型想了什么）、下持仓面板
+       （这笔单离止损/保本/止盈还有多远）。决策流 2026-11-04 已搬去独立标签，
+       做单台只留「当前这一笔」，不再兼职流水。
        配置项一个都不在这里——品种/模式/间隔/模型/经验库/闸门参数全部走
        设置舱，做单台不提供可误触的入口。 -->
   <div class="card l1">
@@ -2144,6 +2181,17 @@
       </div>
     </div>
 
+  </div>
+  </div><!-- /#live-desk -->
+
+  <!-- 决策流独立成页（2026-11-04）。
+       原来它挂在做单台卡片底部，一做单台首屏就吃掉卡片 40%~58% 的高度
+       （1600x900 实测：卡片 532 里决策流占 253），而做单台真正要盯的
+       只有决策环和持仓面板。整块搬出来，做单台把那部分空间还给上面两块。
+       结构一个字没改：还是 .stream / #rowsAuto / #atRowsHint / 跳过带，
+       所以 renderAutoTrade 的渲染路径与所有事件绑定原样可用。 -->
+  <div id="live-flow" class="live-pane hidden">
+    <div class="card l1" id="flowCard">
     <!-- ============ 决策流 ============
          11 列压成 6 列。原来「来源 / 开仓理由 / 平仓理由 / 详情」占 4 列，
          1280 宽下必须横向滚才看得到盈亏。现在一条理由列（最多两行，
@@ -2175,8 +2223,8 @@
         <button class="btn-ghost" id="atSkipShow">看全量</button>
       </div>
     </div>
-  </div>
-  </div><!-- /#live-desk -->
+    </div>
+  </div><!-- /#live-flow -->
 
   <div id="live-review" class="live-pane hidden">
   <!-- 以下全部是原「实盘复盘」页的卡片，S1 原样搬入复盘台，一个字未改。 -->
@@ -3724,10 +3772,13 @@ function renderRing(a, p) {
     // 量程 = 开仓阈值本身：柱高到顶就代表"这一轮的信号刚好够开仓"。
     // 按 0.5 满量程画时典型偏离 0.02–0.05 只剩 2–4px，看上去像没画出来。
     const RANGE = Math.max(0.02, minEdge);
+    // 柱高上限 = 直方图容器高度的一半（.hist 44px，见 #live-desk .hist）。
+    // 写死 17 是在 30px 容器时代的数，容器长高后柱子还是那么矮，等于没长。
+    const HALF = 21;
     const list = (a.recent || []).filter(r => r.p_up != null).slice(-8);
     hist.innerHTML = list.length ? list.map(r => {
       const d = Number(r.p_up) - 0.5;
-      const h = Math.max(2, Math.min(17, (Math.abs(d) / RANGE) * 17));
+      const h = Math.max(2, Math.min(HALF, (Math.abs(d) / RANGE) * HALF));
       return '<div class="hbar"><i class="' + (d >= 0 ? 'up' : 'down')
         + '" style="height:' + h.toFixed(1) + 'px"></i></div>';
     }).join('') : '<span class="mini" style="opacity:.6">还没有记录</span>';
@@ -4361,7 +4412,8 @@ function renderAutoTrade(a) {
 
   // 内容高度会随持仓/空仓变化（差 ~9px），每次渲染后重新分配一次富余空间，
   // 否则开仓那一刻决策流会短一截，底部留一条缝。
-  fitDesk();
+  // 决策流搬走之后这个函数在两条页面上都跑：当前是哪个 pane 就量哪个。
+  fitActive();
 }
 
 /* 开始 / 关闭。
@@ -6964,26 +7016,26 @@ document.querySelectorAll('.live-sub').forEach(b => {
     // 挂到 body 上：做单台要压紧账户条/内边距（一屏装完），别的态不用
     document.body.dataset.sub = s;
     $('live-desk').classList.toggle('hidden', s !== 'desk');
+    $('live-flow').classList.toggle('hidden', s !== 'flow');
     $('live-review').classList.toggle('hidden', s !== 'review');
     $('live-setup').classList.toggle('hidden', s !== 'setup');
-    if (s === 'desk') fitDesk();
+    if (s === 'desk' || s === 'flow') fitActive();
   });
 });
 
-/* 做单台撑满剩余视口：卡片高度 = 视口底 − 卡片顶 − 呼吸位。
+/* 做单台 / 决策流都是「撑满剩余视口」：卡片高度 = 视口底 − 卡片顶 − 呼吸位。
    上面的 sticky 状态带 / 账户条 / 子标签高度都不是常数（窄窗口会折行），
-   所以这个数只能量，不能用 calc() 猜。决策流吃掉剩下的高度，自己内部滚。
+   所以这个数只能量，不能用 calc() 猜。
    量不出来（隐藏态 getBoundingClientRect 全 0）就直接跳过。
 
-   为什么不再用「自然高度 vs 剩余空间」二选一（旧版做法）：
-   旧版把整个卡片当一块不可压缩的整体，空间不够时只设 max-height，
-   而 .at-grid 是 flex:none——被压的永远是决策流，56px 就是它的下场
-   （1366×768 实测：环 320 + 卡片头 44，决策流只剩表头加半行）。
-   现在反过来：决策环/持仓面板按内容定高且不参与压缩，决策流有 168px 的下限，
-   剩下的高度全给它。装不下的时候卡片按「最小可行高度」自然撑开、页面滚——
-   滚动条可以忍，把列表压成一条缝不能忍。 */
-function fitDesk() {
-  const card = document.querySelector('#live-desk > .card.l1');
+   两条页面的区别只在卡片里装什么：
+   - 做单台：决策环 + 持仓面板，at-grid 是 flex:1，多出来的高度由它吸收
+     （2026-11-04 决策流搬走之前，这里是 flex:none，被压的永远是决策流）；
+   - 决策流：一张表，.stream-body 内部滚，所以量最小高度时要先把它的高度夹掉。
+   装不下的时候卡片按「最小可行高度」自然撑开、页面滚——滚动条可以忍，
+   把列表压成一条缝不能忍。 */
+function fitPane(paneId) {
+  const card = document.querySelector('#' + paneId + ' > .card.l1');
   if (!card || !card.offsetParent) return;
   const top = card.getBoundingClientRect().top + window.scrollY;
   // 22 = body 的 16px 底边距 + 6px 呼吸位。
@@ -6995,6 +7047,7 @@ function fitDesk() {
   // 量「最小可行高度」而不是「内容全展开的高度」：决策流 flex:1 且内容在内部滚，
   // 不夹住的话 card.scrollHeight 会把全部历史行都算进去（实测 688 vs 505）。
   // 夹到 0 之后剩下的部分 = 卡片头 + 决策环/持仓面板 + 决策流自己的 min-height。
+  // 做单台没有滚动区（sb 为 null），它的最小高度就是 at-grid 的自然高度。
   let minH;
   if (sb) {
     const keepMax = sb.style.maxHeight;
@@ -7005,7 +7058,8 @@ function fitDesk() {
     minH = card.scrollHeight;
   }
   if (avail > minH) {
-    // 富余空间交给决策流：卡片拉满一屏，空仓/未启动时也不会在底部留一条空档。
+    // 富余空间交给卡片自己：做单台给 at-grid（各区块按间距铺开），
+    // 决策流给 .stream-body（列表变长）。空仓/未启动时也不会在底部留一条空档。
     card.style.height = avail + 'px';
     card.style.maxHeight = avail + 'px';
     // 自校验：撑满后文档还是比视口高，说明 top 量早了（账户条/标题还没渲染出来），
@@ -7020,8 +7074,18 @@ function fitDesk() {
   }
   if (sb) sb.scrollTop = keep;
 }
-window.addEventListener('resize', fitDesk);
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitDesk);
+/* 做单台和决策流都是「撑满剩余视口」的页面，量法完全一样，区别只在卡片里
+   装的是 at-grid 还是 stream。两条页面各自量自己那张卡，隐藏态直接返回。 */
+function fitDesk() { fitPane('live-desk'); }
+function fitFlow() { fitPane('live-flow'); }
+/* 轮询每轮都会重渲决策流，渲完要重新分配富余空间（内容高度会变）。 */
+function fitActive() {
+  const s = document.body.dataset.sub || 'desk';
+  if (s === 'desk') fitDesk();
+  else if (s === 'flow') fitFlow();
+}
+window.addEventListener('resize', fitActive);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitActive);
 
 // 流水过滤开关：勾上立刻重渲染，不用等下一轮轮询
 if ($('atShowSkip')) {
