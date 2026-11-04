@@ -58,6 +58,8 @@ hiddenimports = [
     "live.paths", "live.journal", "live.advisor", "live.stats", "live.rules",
     "live.sessions", "live.autotrade", "live.positions",
     "live.scoring", "live.quality", "live.cost", "live.profile",
+    # 备份轮转：只在 dashboard.main 里函数内 import，漏了安装版就没有备份
+    "live.backup",
     "agent.llm",
     "tools.lesson_stats", "tools.switch_llm", "tools.desktop",
     "tools.updater",

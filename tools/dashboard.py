@@ -1962,6 +1962,17 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[!] 更新器初始化失败（不影响启动）：{type(exc).__name__}: {exc}")
 
+    # 账本日切备份：data/live/accounts/<login>/ 是唯一副本，MT5 历史有保留期，
+    # 写坏了没有任何地方能恢复。启动即备份一次，后台线程每 30 分钟检查一次
+    # （面板可能连着开几天，只备份一次的话跨天就没有新快照）。
+    # 只读源目录、只写 data/backups/，失败不影响启动。
+    try:
+        from live import backup
+
+        backup.start_daily()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] 备份轮转启动失败（不影响启动）：{type(exc).__name__}: {exc}")
+
     # 信号提醒：AI 辅助模式出信号时，把窗口还原并短暂置顶。
     # 注册要早（在起服务之前）：回调在 worker 线程里被调，只判 _WINDOW 是否为
     # None，窗口创建前就注册好，信号来了才不至于漏。没窗口（headless/CLI）
