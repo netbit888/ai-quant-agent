@@ -222,7 +222,10 @@ class TestBeInTick(TempLedger):
     def test_external_close_marked_be(self):
         """券商端那条线打的：成交在开仓价附近，来源要记 be 而不是 external。"""
         self._save(peak_pnl=3.6, be_ok=1, be_sl=4000.0)
-        with mock.patch.object(autotrade, "_close_deal_reason", return_value=4):
+        # 桩打在 _close_fills 上（2026-11-06 起盈亏/来源/出场价统一由它给）：
+        # 这一笔就是保本止损成交，profit 恰好 0.00。
+        fills = {"pnl": 0.0, "price": 4000.0, "reason": 4, "time": NOW}
+        with mock.patch.object(autotrade, "_close_fills", return_value=fills):
             row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
                                  rows=bars_up(), positions=[])
         self.assertEqual(row["kind"], "close")
@@ -234,10 +237,12 @@ class TestBeInTick(TempLedger):
     def test_manual_close_after_arm_stays_external(self):
         """挂着保本线的时候人手动平了：deal.reason=0，不能算成规则生效。"""
         self._save(peak_pnl=3.6, be_ok=1, be_sl=4000.0)
-        with mock.patch.object(autotrade, "_close_deal_reason", return_value=0):
+        fills = {"pnl": 1.5, "price": 4002.0, "reason": 0, "time": NOW}
+        with mock.patch.object(autotrade, "_close_fills", return_value=fills):
             row = autotrade.tick(self.cfg, now=NOW, quote=(4002.0, 4002.24),
                                  rows=bars_up(), positions=[])
         self.assertEqual(row["source"], "external")
+        self.assertAlmostEqual(row["pnl"], 1.5, places=2)
         # 文案必须写明是"人工/终端操作"。写成"仓位已在终端消失"，复盘模型会读成
         # 程序故障，产出「别被终端消失吓出」这种教模型下次该走也别走的教训
         # （2026-10-29 那笔 +7.39→+3.71 的人工平仓就这么被写了）。

@@ -354,7 +354,11 @@ class Executor:
         self._record("close_sent" if ok else "close_failed",
                      {"retcode": getattr(result, "retcode", None), **meta})
         return {"ok": ok, "retcode": getattr(result, "retcode", None),
-                "comment": getattr(result, "comment", None), "filling": meta}
+                "comment": getattr(result, "comment", None), "filling": meta,
+                # 真实成交价 follow 回执走。调用方拿它算盈亏：用发单前的报价
+                # 记账会把滑点整段吞掉，保本止损那种"刚好压在开仓价"的单子
+                # 尤其经不起这个误差。
+                "price": float(getattr(result, "price", 0.0) or 0.0)}
 
     def modify_sl(self, ticket: int, sl: float) -> dict:
         """把持仓的硬止损改到指定价，**不动止盈**。

@@ -4224,7 +4224,18 @@ def _tick_body(cfg: Cfg, login, now: int,
     if pos and not paper and not any(
         int(p.get("ticket") or 0) == int(pos.get("ticket") or -1) for p in live_positions
     ):
-        pnl = _realized_pnl(cfg, pos, bid, ask)
+        # 盈亏与出场价**以券商成交为准**，不拿此刻的报价估。
+        # 这一条路的延迟是几十秒级的：2026-11-06 那笔券商端保本 SL 在
+        # 4110.781 成交、profit 0.00，程序 48 秒后才在下一轮发现仓位没了，
+        # 用当时的 bid 一算记成 -0.96——保本平掉的单子变成亏损，还进了
+        # 胜率统计。成交只有一个可信来源：成交回执。
+        fills = _close_fills(pos)
+        if fills is not None:
+            pnl = fills["pnl"]
+            exit_price = fills["price"] or _exit_price(pos, bid, ask)
+        else:
+            pnl = _realized_pnl(cfg, pos, bid, ask)
+            exit_price = _exit_price(pos, bid, ask)
         # 平仓来源：这笔单挂了券商端保本止损（be_ok）时，「仓在终端消失」十有
         # 八九是那条线被打了，不是人手动平的。再用 deal.reason 复核一次——
         # 有人在你挂着保本线的时候手动平仓是完全可能的，那种情况记 external。
@@ -4237,7 +4248,7 @@ def _tick_body(cfg: Cfg, login, now: int,
                        "外部平仓（人工或终端操作，非程序决策）：模型没发平仓单，"
                        "仓位已不在券商端")
         if pos.get("be_ok"):
-            deal_reason = _close_deal_reason(pos)
+            deal_reason = None if fills is None else fills["reason"]
             if deal_reason is None or deal_reason == 4:      # 4 = DEAL_REASON_SL
                 source = "be"
                 why = (f"券商端保本止损 {float(pos.get('be_sl') or 0):.3f} 被触发"
@@ -4245,13 +4256,17 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 计数 / 清仓位 / close 行统一走 _book_close：这条路上的单子以前不带
         # peak_pnl/peak_ts/plan/atr，于是"人工平仓的单子在 ATR 统计里不存在"。
         row = _book_close(state, pos, pnl, now, source=source, reason=why)
+        row["exit_price"] = round(float(exit_price), 5)
+        # 这一笔的盈亏是券商成交还是报价估的，落盘留着。以后怀疑"记账不对"时
+        # 先看这个字段，不用再去反推。
+        row["pnl_src"] = "deal" if fills is not None else "quote"
         if pos.get("be_ok"):
             row["be_sl"] = float(pos.get("be_sl") or 0.0)
 
         # 复盘排进队列：等 7 根 K 线走完再复盘，这期间照常判断下一笔。
         # 平仓当刻就复盘看不出「平完之后怎么走」，等于白问。
         pos["exit_reason"] = why
-        queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
+        queue_review(state, cfg, pos, exit_price, pnl, now)
         return {**_finish(state, row, login), "detected": True}
 
     # --- 有仓：先过程序闸门，再问模型该不该平 --------------------------------
@@ -4474,13 +4489,21 @@ def _tick_body(cfg: Cfg, login, now: int,
             # 仓位还在手上，必须停下来让人去终端处理。
             return _stop(state, f"平仓失败（{res.get('reason')}），已自动停止", now, login)
 
-        pnl = _realized_pnl(cfg, pos, bid, ask)
+        # 盈亏按**回执上的成交价**算，不用发单前的报价。dry_run 没有回执，
+        # 按报价估（纸面本来就没有真实成交）。两者都拿不到才算 0，
+        # 这与 _book_close 的约定一致：这一格出错会污染所有战绩统计。
+        fill_px = float(res.get("price") or 0.0)
+        exit_price = fill_px if fill_px > 0 else _exit_price(pos, bid, ask)
+        pnl = (_pnl_at_price(cfg, pos, fill_px) if fill_px > 0
+               else _realized_pnl(cfg, pos, bid, ask))
         # 计数 / 清仓位 / close 行统一走 _book_close（含 sl_closes / be_closes
         # 分桶）。这里只补这条路径特有的字段。
         row = _book_close(state, pos, pnl, now,
                           source=decision.get("source"),
                           reason=decision.get("reason"),
                           held_sec=held_sec, dry_run=cfg.dry_run)
+        row["exit_price"] = round(float(exit_price), 5)
+        row["pnl_src"] = "fill" if fill_px > 0 else "quote"
         # 这笔是不是"峰值停滞唤醒"之后才平的。统计「靠唤醒救回来的单」时
         # 只能靠这个字段，否则它和"浮盈到门槛后正常平"在流水里长得一模一样。
         if decision.get("via"):
@@ -4501,7 +4524,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 「出场这一端到底有没有模型的决策」——被硬止损砍掉的单，
         # 出场时机不是模型选的，复盘不能再把账算到出场头上（见 ask_review）。
         pos["exit_source"] = decision.get("source") or ""
-        queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
+        queue_review(state, cfg, pos, exit_price, pnl, now)
         return _finish(state, row, login, ts=now)
 
     # --- 空仓：先看闸门，过不了就不花 API 的钱 -------------------------------
@@ -4908,6 +4931,68 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
     return None
 
 
+def _close_fills(pos: dict) -> dict | None:
+    """这笔持仓在券商端的**平仓成交**汇总。还没成交 / 读不到 → None。
+
+    返回 {"pnl": 净盈亏, "price": 成交均价, "reason": DEAL_REASON_*, "time": ts}。
+
+    为什么单独抽出来
+    ----------------
+    「仓在终端消失」这条路要做三件事：算盈亏、判来源（券商 SL 还是人工）、
+    给复盘一个真实的出场价。三件事读的是同一批 deal，各查一次等于三次
+    MT5 往返——而 `_realized_pnl` 在 2 秒一格的止损快查里也会被调用。
+
+    为什么 `pnl == 0.00` 必须照原样返回
+    -----------------------------------
+    保本止损打出来的**就是** 0.00，那是合法结果，不是"没读到"。
+    2026-11-06 那笔 4919144776 正是踩在这里：外层用 `if total:` 判断有没有
+    读到券商成交，0.00 被当成空值，于是退回用 48 秒后的报价估算——券商账本
+    上 profit=0.00 的保本平仓，被这段记成 **-0.96**，还进了胜率和
+    「保本止损到底有没有用」的统计。判据只能是"有没有平仓 deal"。
+    """
+    try:
+        ticket = int(pos.get("ticket") or 0)
+        if ticket <= 0:
+            return None
+        from live.journal import mt5_call, _mt5 as _conn
+
+        deals = mt5_call(_conn().history_deals_get, position=ticket) or []
+    except Exception:  # noqa: BLE001
+        return None
+    closing = [d for d in deals if int(getattr(d, "entry", 1)) == 1]
+    if not closing:
+        return None
+    pnl = sum(
+        float(getattr(d, "profit", 0.0))
+        + float(getattr(d, "commission", 0.0))
+        + float(getattr(d, "swap", 0.0))
+        + float(getattr(d, "fee", 0.0))
+        for d in closing
+    )
+    # 部分平仓会有多条 deal，成交价按成交量加权；只取第一条会把均价记偏。
+    vol = sum(float(getattr(d, "volume", 0.0) or 0.0) for d in closing)
+    if vol > 0:
+        px = sum(float(getattr(d, "price", 0.0) or 0.0)
+                 * float(getattr(d, "volume", 0.0) or 0.0)
+                 for d in closing) / vol
+    else:
+        px = float(getattr(closing[-1], "price", 0.0) or 0.0)
+    return {"pnl": round(pnl, 2), "price": px,
+            "reason": int(getattr(closing[-1], "reason", -1)),
+            "time": int(getattr(closing[-1], "time", 0) or 0)}
+
+
+def _pnl_at_price(cfg: Cfg, pos: dict, price: float) -> float:
+    """按给定出场价算这一笔的净盈亏（账户结算货币）。"""
+    direction = int(pos.get("direction") or 1)
+    entry = float(pos.get("price_open") or 0.0)
+    lots = float(pos.get("lots") or 0.0)
+    if not entry or not lots:
+        return 0.0
+    return round((float(price) - entry) * direction
+                 * _symbol_contract(cfg.symbol) * lots * _acct_factor(), 2)
+
+
 def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
     """这一笔的净盈亏，单位是**账户结算货币**（与 cfg 里的阈值同单位）。
 
@@ -4917,34 +5002,19 @@ def _realized_pnl(cfg: Cfg, pos: dict, bid: float, ask: float) -> float:
     这里**不做币种换算**（2026-11-02 定）：`deal.profit` 本来就是账户货币，
     美分户返回的是「分」。配置里的 sl_usd / max_loss_usd 也按账户货币写，
     两边同单位才能直接比。若在这换算成美元，反而要把每个阈值都改成 1/100。
+
+    判据是"有没有平仓 deal"，**不是"算出来是不是 0"**——保本止损的成交
+    就是 0.00，见 `_close_fills` 里那段账。
     """
-    try:
-        from live.journal import mt5_call, _mt5 as _conn
-
-        deals = mt5_call(_conn().history_deals_get,
-                         position=int(pos.get("ticket") or 0)) or []
-        if deals:
-            total = sum(
-                float(getattr(d, "profit", 0.0))
-                + float(getattr(d, "commission", 0.0))
-                + float(getattr(d, "swap", 0.0))
-                + float(getattr(d, "fee", 0.0))
-                for d in deals
-                if int(getattr(d, "entry", 1)) == 1  # 1 = 平仓成交
-            )
-            if total:
-                return round(total, 2)
-    except Exception:  # noqa: BLE001
-        pass
-
+    fills = _close_fills(pos)
+    if fills is not None:
+        return fills["pnl"]
     direction = int(pos.get("direction") or 1)
     entry = float(pos.get("price_open") or 0.0)
     cur = bid if direction > 0 else ask  # 平仓价：多头看 bid，空头看 ask
-    lots = float(pos.get("lots") or 0.0)
-    if not entry or not lots:
+    if not entry or not float(pos.get("lots") or 0.0):
         return 0.0
-    return round((cur - entry) * direction * _symbol_contract(cfg.symbol)
-                 * lots * _acct_factor(), 2)
+    return _pnl_at_price(cfg, pos, cur)
 
 
 # ------------------------------------------------------------------ 主循环
@@ -5437,19 +5507,8 @@ def _close_deal_reason(pos: dict) -> int | None:
     平的——两者在账本里都是"没有平仓单"，但一个是规则生效、一个是人为干预，
     混在一起算期望会把规则的效果冲淡。
     """
-    try:
-        ticket = int(pos.get("ticket") or 0)
-        if ticket <= 0:
-            return None
-        from live.journal import mt5_call, _mt5 as _conn
-
-        deals = mt5_call(_conn().history_deals_get, position=ticket) or []
-        for d in deals:
-            if int(getattr(d, "entry", 0)) == 1:      # 1 = 平仓成交
-                return int(getattr(d, "reason", -1))
-    except Exception:  # noqa: BLE001
-        return None
-    return None
+    fills = _close_fills(pos)
+    return None if fills is None else fills["reason"]
 
 
 def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
@@ -6109,18 +6168,30 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
         is_paper = bool(pos.get("dry_run"))
         if is_paper or int(pos.get("ticket") or 0) in closed_tickets:
             bid, ask = _quote(cfg.symbol) or (0.0, 0.0)
-            # 拿不到报价时按 0 记，不能编一个价出来
-            pnl = _realized_pnl(cfg, pos, bid, ask) if (bid and ask) else 0.0
+            # 优先照券商成交记账（清仓也是市价单，回执和 deal 都拿得到）；
+            # 纸面没有真实成交，退回按报价估。
+            fills = _close_fills(pos)
+            if fills is not None:
+                pnl = fills["pnl"]
+                exit_price = fills["price"] or _exit_price(pos, bid, ask)
+            elif bid and ask:
+                pnl = _realized_pnl(cfg, pos, bid, ask)
+                exit_price = _exit_price(pos, bid, ask)
+            else:
+                # 拿不到报价时按 0 记，不能编一个价出来
+                pnl, exit_price = 0.0, 0.0
             # 清仓也走同一个记账出口。以前这里少 peak_pnl/peak_ts/plan/atr，
             # 于是"面板清仓的单子"在按打法 / ATR 倍数的统计里整批消失。
             row = _book_close(state, pos, pnl, now, source="panel", reason=why,
                               dry_run=is_paper)
+            row["exit_price"] = round(float(exit_price), 5)
+            row["pnl_src"] = "deal" if fills is not None else "quote"
             append_log(row, login)
 
             # 面板清仓这一笔也要复盘：AI 停掉后不会跑，队列留在 state 里，
             # 下次启动时 if 到期就跑（K 线还在，窗口按 closed_at 切片，不受影响）。
             pos["exit_reason"] = why
-            queue_review(state, cfg, pos, _exit_price(pos, bid, ask), pnl, now)
+            queue_review(state, cfg, pos, exit_price, pnl, now)
             done.append({"ticket": pos.get("ticket"), "paper": is_paper,
                          "pnl": round(pnl, 2)})
 
