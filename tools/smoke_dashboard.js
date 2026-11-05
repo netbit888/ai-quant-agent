@@ -220,6 +220,26 @@ try {
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
+    // 态势带（2026-11-05）：打法由后端按 regime + cfg 现算，空仓也有文案。
+    // 这里故意造一个已过期的状态 + 一笔逆模型成交，钉住大字与描金边。
+    playbook: {
+      regime: 'range', name: '震荡市', action: '低买高卖',
+      detail: 'tp 3.25 / 1h · 等待锚点生效', interval_sec: 60,
+      ts: 1790000000, age_sec: 840, stale: true,
+    },
+    vs_actual: {
+      slots: [
+        { ts: 1790000000, p_up: 0.44, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+        { ts: 1790000060, p_up: 0.45, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+        { ts: 1790000120, p_up: 0.62, model_dir: 1, actual_dir: -1, ticket: 1001, magic: 0, pnl: -7.51, against: true },
+        { ts: 1790000180, p_up: 0.45, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+        { ts: 1790000240, p_up: 0.44, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+        { ts: 1790000300, p_up: 0.62, model_dir: 1, actual_dir: 1, ticket: 1002, magic: 20261022, pnl: 2.2, against: false },
+        { ts: 1790000360, p_up: 0.44, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+        { ts: 1790000420, p_up: 0.42, model_dir: -1, actual_dir: 0, ticket: null, magic: null, pnl: null, against: false },
+      ],
+      against: 1, net: -7.51, trades: 2, interval_sec: 60,
+    },
     recent: [
       { ts: 1790000000, kind: 'open', ticket: 1001, direction: 1, p_up: 0.62,
         reason: '近 5 根连阳', source: 'llm' },
@@ -599,16 +619,28 @@ try {
 
   // ---- 模型切换条 ----
   // 这块最容易出「看着切了、其实没生效」：界面显示新模型，实际还在调老的。
-  // 所以钉三件：显示当前模型、换供应商自动换默认模型名、缺 key 必须拦住不发请求。
+  // 两级下拉：供应商 → 模型；DeepSeek 的「思考/不思考」是同一个模型名的两项。
   llmJson = {
-    ok: true, provider: 'zhipu', provider_name: '智谱 GLM（免费档，国内直连）',
+    ok: true, provider: 'zhipu', provider_name: '智谱 GLM',
     base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+    variant_index: 0,
     key_set: true, key_tail: '716f', key_source: 'LLM_API_KEY',
+    thinking: false, thinking_supported: false, thinking_effective: false,
     providers: [
-      { id: 'zhipu', name: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4',
-        default_model: 'glm-4-flash', models: ['glm-4-flash', 'glm-4-air'], note: '' },
-      { id: 'deepseek', name: 'DeepSeek', base_url: 'https://api.deepseek.com',
-        default_model: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'], note: '' },
+      { id: 'deepseek', name: 'DeepSeek 开放平台', label: 'DeepSeek',
+        base_url: 'https://api.deepseek.com', default_model: 'deepseek-flash',
+        models: ['deepseek-flash'], note: '',
+        variants: [
+          { model: 'deepseek-flash', thinking: false, label: 'deepseek-flash' },
+          { model: 'deepseek-flash', thinking: true, label: 'deepseek-flash（深度思考）' },
+        ] },
+      { id: 'zhipu', name: '智谱 GLM', label: '智谱 GLM',
+        base_url: 'https://open.bigmodel.cn/api/paas/v4', default_model: 'glm-4-flash',
+        models: ['glm-4-flash', 'glm-4-air'], note: '',
+        variants: [
+          { model: 'glm-4-flash', thinking: false, label: 'glm-4-flash' },
+          { model: 'glm-4-air', thinking: false, label: 'glm-4-air' },
+        ] },
     ],
   };
   await api.loadLlm();
@@ -617,16 +649,21 @@ try {
   console.log(`\n模型切换条显示当前模型 ${showsModel ? '✓' : '✗'} (${nowTxt || '空'})`);
   if (!showsModel) failed = true;
 
-  const filled = String(made.atLlmModel.value || '') === 'glm-4-flash';
-  console.log(`  输入框回填当前模型 ${filled ? '✓' : '✗'} (${made.atLlmModel.value || '空'})`);
+  // 模型下拉：选项是「序号 + 可读标签」，回填按 variant_index
+  const filled = String(made.atLlmModel.value || '') === '0'
+    && String(made.atLlmModel.innerHTML || '').includes('glm-4-flash');
+  console.log(`  模型下拉回填当前项 ${filled ? '✓' : '✗'} (value=${made.atLlmModel.value})`);
   if (!filled) failed = true;
 
-  // 换供应商必须换默认模型名，否则会把 glm-4-flash 发给 DeepSeek（400 模型不存在）
+  // 换供应商 → 模型清单跟着换（DeepSeek 两项：不思考 / 深度思考）
   made.atLlmKey.value = '';
   made.atLlmProvider.value = 'deepseek';
   api.onLlmProviderChange();
-  const modelSwitched = String(made.atLlmModel.value || '') === 'deepseek-flash';
-  console.log(`  换供应商自动切默认模型名 ${modelSwitched ? '✓' : '✗'} (${made.atLlmModel.value || '空'})`);
+  const dsOpts = String(made.atLlmModel.innerHTML || '');
+  const modelSwitched = String(made.atLlmModel.value || '') === '0'
+    && dsOpts.includes('deepseek-flash') && dsOpts.includes('（深度思考）')
+    && (dsOpts.match(/<option/g) || []).length === 2;
+  console.log(`  换供应商→DeepSeek 两个模型项 ${modelSwitched ? '✓' : '✗'} (${dsOpts.replace(/<[^>]+>/g, '|')})`);
   if (!modelSwitched) failed = true;
 
   const callsBefore = fetchCalls.length;
@@ -643,6 +680,40 @@ try {
     && typeof api.onLlmProviderChange === 'function';
   console.log(`  模型切换按钮已接 handler ${llmWired ? '✓' : '✗'}`);
   if (!llmWired) failed = true;
+
+  // ---- 做单台态势带（2026-11-05）：大字打法 + 模型/我方向对照 ----
+  api.renderAutoTrade(atSample);
+  const ctxRegime = String(made.ctxRegime.textContent || '');
+  const ctxPlay = String(made.ctxPlay.textContent || '');
+  const ctxBigOk = ctxRegime === '震荡市' && ctxPlay === '低买高卖'
+    && !ctxPlay.includes('–');
+  console.log(`\n态势带·大字打法 ${ctxBigOk ? '✓' : '✗'} (${ctxRegime} 按 ${ctxPlay})`);
+  if (!ctxBigOk) failed = true;
+  const ctxStaleOk = made.ctxState.classList.contains('stale')
+    && String(made.ctxStale.textContent || '').includes('状态已过期');
+  console.log(`  过期状态标记 ${ctxStaleOk ? '✓' : '✗'} (${made.ctxStale.textContent})`);
+  if (!ctxStaleOk) failed = true;
+  const modelCells = (made.cmpModel.innerHTML.match(/class="cmp-cell/g) || []).length;
+  const mineCells = (made.cmpMine.innerHTML.match(/class="cmp-cell/g) || []).length;
+  const againstCells = (made.cmpMine.innerHTML.match(/cmp-cell (up|down) against/g) || []).length;
+  console.log(`  固定 8 格 ${modelCells === 8 && mineCells === 8 ? '✓' : '✗'} (模型 ${modelCells} / 我 ${mineCells})`);
+  if (modelCells !== 8 || mineCells !== 8) failed = true;
+  console.log(`  逆模型描金边 ${againstCells === 1 ? '✓' : '✗'} (${againstCells} 格)`);
+  if (againstCells !== 1) failed = true;
+  const noteHtml = String(made.cmpNote.innerHTML || '');
+  const noteOk = noteHtml.includes('逆模型 1 笔') && noteHtml.includes('-7.51');
+  console.log(`  逆模型计数与净盈亏 ${noteOk ? '✓' : '✗'} (${noteHtml})`);
+  if (!noteOk) failed = true;
+  const tipOk = String(made.cmpMine.innerHTML).includes('ticket ')
+    && String(made.cmpMine.innerHTML).includes('手动');
+  console.log(`  色块 title 可对账 ${tipOk ? '✓' : '✗'}`);
+  if (!tipOk) failed = true;
+  // 后端没下发这两个字段（旧版本 / 读失败）必须降级成占位文案，不能留 –
+  api.renderAutoTrade({ ...atSample, playbook: null, vs_actual: null });
+  const fallbackOk = String(made.ctxPlay.textContent) === '等待首轮判定'
+    && String(made.ctxPlay.textContent).indexOf('–') < 0;
+  console.log(`  无后端字段时降级不抛错 ${fallbackOk ? '✓' : '✗'} (${made.ctxPlay.textContent})`);
+  if (!fallbackOk) failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);

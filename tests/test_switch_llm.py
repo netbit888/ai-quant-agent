@@ -11,7 +11,8 @@ from unittest import mock
 
 from agent import llm
 from tools import switch_llm as switch_mod
-from tools.switch_llm import PROVIDERS, provider_of, upsert_env
+from tools.switch_llm import (PROVIDERS, provider_of, upsert_env,
+                              variant_index_of, variants_of)
 
 
 class TestUpsertEnv(unittest.TestCase):
@@ -65,6 +66,56 @@ class TestProviders(unittest.TestCase):
         for name, spec in PROVIDERS.items():
             self.assertIn(spec["model"], spec["models"], name)
 
+    def test_deepseek_is_first_and_lists_flash_only(self):
+        """供应商只有三家（DeepSeek 在最前），模型清单只列 flash。
+
+        v4-pro 从清单里摘掉是用户明确要求；手输仍然可以（CLI --model）。
+        """
+        self.assertEqual(list(PROVIDERS)[:1], ["deepseek"])
+        self.assertEqual(PROVIDERS["deepseek"]["models"], ["deepseek-flash"])
+
+    def test_deepseek_offers_exactly_two_model_variants(self):
+        """「深度思考」是**模型下拉的一项**，不是第二个供应商。
+
+        两个选项的模型名相同（deepseek-flash），差别只在 thinking——
+        模型名本身分不出模式，所以必须靠 variants 表达。
+        """
+        vs = variants_of("deepseek")
+        self.assertEqual(len(vs), 2)
+        self.assertEqual([v["model"] for v in vs], ["deepseek-flash"] * 2)
+        self.assertEqual([bool(v["thinking"]) for v in vs], [False, True])
+        self.assertTrue(all(v["label"] for v in vs), "每项都要有可读的标签")
+
+    def test_variant_labels_stay_terse(self):
+        """模型下拉只留「deepseek-flash」和「（深度思考）」两串。
+
+        2026-11-05 用户明确：不要「不思考」、不要「（默认）」、不要首字秒数——
+        选项一长，下拉里就被截断，反而看不清选的是哪一档。默认项就是模型名本身。
+        """
+        self.assertEqual([v["label"] for v in variants_of("deepseek")],
+                         ["deepseek-flash", "deepseek-flash（深度思考）"])
+
+    def test_provider_names_carry_no_parenthetical(self):
+        """供应商下拉只留名字，不挂「（免费档）」「（部分开源模型永久免费）」这类注解。
+
+        2026-11-05 用户要求删掉：注解一长就被下拉宽度截断，而「免费/收费」这类
+        说明本来就写在 note 里，不该占下拉的位置。
+        """
+        for pid, spec in PROVIDERS.items():
+            self.assertNotIn("（", spec["name"], pid)
+            self.assertNotIn("(", spec["name"], pid)
+
+    def test_default_variant_is_the_non_thinking_one(self):
+        """默认必须是「不思考」：60 个决策点的 A/B 没量出增益，延迟是确定的。"""
+        self.assertFalse(variants_of("deepseek")[0]["thinking"])
+
+    def test_other_providers_never_ask_for_thinking(self):
+        """智谱/硅基流动不认 extra_body.thinking，给它们挂 True 就是自找 400。"""
+        for pid, spec in PROVIDERS.items():
+            if "deepseek" in spec["base_url"]:
+                continue
+            self.assertTrue(all(not v["thinking"] for v in variants_of(pid)), pid)
+
 
 class TestProviderOf(unittest.TestCase):
     def test_recognizes_known_base_url(self):
@@ -78,6 +129,27 @@ class TestProviderOf(unittest.TestCase):
         """认不出来就老实说不知道，别猜成某一家（猜错会显示错供应商名）。"""
         self.assertEqual(provider_of("https://example.com/v1"), "")
         self.assertEqual(provider_of(None), "")
+
+
+class TestVariantIndex(unittest.TestCase):
+    """回填「模型」下拉靠下标，不靠模型名。
+
+    少这一层，两项模型名相同，面板会永远落在第一项——显示「不思考」而实际
+    在深度思考里跑。
+    """
+
+    def test_indexes_both_deepseek_variants(self):
+        self.assertEqual(variant_index_of("deepseek", "deepseek-flash", False), 0)
+        self.assertEqual(variant_index_of("deepseek", "deepseek-flash", True), 1)
+
+    def test_unknown_model_returns_minus_one(self):
+        """手输的模型名不在清单里：返回 -1，让前端自己决定落哪一项。"""
+        self.assertEqual(variant_index_of("deepseek", "deepseek-v4-pro", False), -1)
+
+    def test_provider_without_variants_falls_back_to_models(self):
+        vs = variants_of("zhipu")
+        self.assertIn("glm-4-flash", [v["model"] for v in vs])
+        self.assertTrue(all(not v["thinking"] for v in vs))
 
 
 class TestSwitchWritesEnv(unittest.TestCase):
@@ -152,6 +224,55 @@ class TestSwitchWritesEnv(unittest.TestCase):
         self.assertEqual(spec["model"], "deepseek-flash")
         self.assertNotIn("deepseek-chat", spec["models"])
 
+    def test_thinking_entry_writes_flag_on(self):
+        """选「深度思考」= 往 .env 写 LLM_THINKING=1，模型名一个字都不变。"""
+        res = switch_mod.switch("deepseek", key=None, thinking=True)
+        text = self.env.read_text(encoding="utf-8")
+        self.assertTrue(res["ok"])
+        self.assertIn("LLM_THINKING=1", text)
+        self.assertIn("LLM_MODEL=deepseek-flash", text)
+        self.assertTrue(res["thinking"])
+
+    def test_plain_entry_turns_flag_back_off(self):
+        """从深度思考切回不思考，必须把 1 改回 0。
+
+        只靠「不写这一行」是不够的：文件里留着 1，下次启动又会是思考模式。
+        """
+        self.env.write_text("LLM_THINKING=1\n", encoding="utf-8")
+        res = switch_mod.switch("deepseek", key=None)
+        self.assertIn("LLM_THINKING=0", self.env.read_text(encoding="utf-8"))
+        self.assertFalse(res["thinking"])
+
+    def test_non_deepseek_never_writes_thinking_on(self):
+        """智谱/硅基流动不认这个字段，thinking 传 True 也得落成 0。"""
+        switch_mod.switch("siliconflow", key=None, thinking=True)
+        self.assertIn("LLM_THINKING=0", self.env.read_text(encoding="utf-8"))
+
+    def test_thinking_that_did_not_take_effect_is_reported(self):
+        """深度思考没生效要报出来，不能只看 HTTP 200。
+
+        服务端拒过 thinking 字段时 chat_ex 会去掉重试，请求照样成功；
+        那时候的 200 只证明「模型答了」，不证明「它想了」。
+        """
+        self.chat.stop()
+        self.chat = mock.patch.object(
+            llm, "chat_ex", lambda *a, **k: ("可用", {"completion_tokens": 3}))
+        self.chat.start()
+        res = switch_mod.switch("deepseek", key=None, thinking=True)
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["thinking_effective"])
+        self.assertIn("reasoning_tokens", res["warning"])
+
+    def test_thinking_that_took_effect_has_no_warning(self):
+        self.chat.stop()
+        self.chat = mock.patch.object(
+            llm, "chat_ex",
+            lambda *a, **k: ("可用", {"completion_tokens": 120, "reasoning_tokens": 98}))
+        self.chat.start()
+        res = switch_mod.switch("deepseek", key=None, thinking=True)
+        self.assertTrue(res["thinking_effective"])
+        self.assertNotIn("warning", res)
+
     def test_failed_verify_restores_file(self):
         """验证失败必须把文件还原，别把人留在坏配置上。"""
         before = self.env.read_text(encoding="utf-8")
@@ -193,7 +314,7 @@ class TestRollbackRestoresProcessEnv(unittest.TestCase):
         # 留着会让「原本没有的字段要删掉」这条断言失去意义。
         self._saved = {
             k: os.environ.pop(k, None)
-            for k in ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY")
+            for k in ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_THINKING")
         }
         os.environ["LLM_MODEL"] = "before-model"
         # 别让 current_config() 顺手把真实 .env 又灌回来：
@@ -218,6 +339,17 @@ class TestRollbackRestoresProcessEnv(unittest.TestCase):
         self.assertEqual(os.environ.get("LLM_MODEL"), "before-model")
         # 原来没有的字段要删掉，不能留着新写进去的 base_url
         self.assertIsNone(os.environ.get("LLM_BASE_URL"))
+
+    def test_thinking_env_restored_after_failure(self):
+        """思考开关也要一起回滚。
+
+        漏掉它，失败的切换会留下「进程里开着思考、文件里是关的」——
+        下一次重启表现突变，而且面板显示的是文件里的值，排查时会被带偏。
+        """
+        with mock.patch.object(llm, "chat_ex", side_effect=RuntimeError("boom")):
+            res = switch_mod.switch("deepseek", key="k", thinking=True)
+        self.assertFalse(res["ok"])
+        self.assertIsNone(os.environ.get("LLM_THINKING"))
 
 
 if __name__ == "__main__":

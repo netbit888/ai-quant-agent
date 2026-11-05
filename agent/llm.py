@@ -106,12 +106,21 @@ def current_config() -> dict:
     """当前生效的配置，给面板显示用。key 只给尾 4 位，绝不整串返回。"""
     _load_dotenv()
     key, source = _active_key()
+    st = thinking_state()
     return {
         "base_url": os.getenv("LLM_BASE_URL") or DEFAULT_BASE_URL,
         "model": os.getenv("LLM_MODEL") or DEFAULT_MODEL,
         "key_set": bool(key),
         "key_tail": key[-4:] if len(key) >= 4 else "",
         "key_source": source,
+        # 三个分开的事实，面板要显示「说的是什么」和「实际会怎样」：
+        #   thinking            配置要求的
+        #   thinking_supported  这条 base_url 认不认这个字段（只有 DeepSeek 认）
+        #   thinking_effective  真正会发生的（还要算上服务端拒过之后的熔断）
+        # 三者不一致时必须在界面上看得出来，否则就是「写着开了、实际没开」。
+        "thinking": st["requested"],
+        "thinking_supported": st["supported"],
+        "thinking_effective": st["effective"],
     }
 
 
@@ -119,6 +128,7 @@ def apply_config(
     model: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
+    thinking: bool | None = None,
 ) -> dict:
     """运行时改配置，**下一次调用立刻生效**。
 
@@ -134,6 +144,10 @@ def apply_config(
         os.environ["LLM_BASE_URL"] = base_url.strip()
     if model:
         os.environ["LLM_MODEL"] = model.strip()
+    if thinking is not None:
+        # 必须显式写进程环境：`_load_dotenv` 用 setdefault，只写文件的话
+        # 进程里还是旧值，面板显示「深度思考」而请求照旧不思考。
+        os.environ["LLM_THINKING"] = "1" if thinking else "0"
     _DOTENV_LOADED = True
     return current_config()
 
@@ -157,6 +171,25 @@ _THINKING_ON_WORDS = ("1", "true", "on", "yes", "enabled")
 
 # 服务端一旦拒过这个字段，本进程内不再传（见 `_rejects_thinking`）。
 _THINKING_UNSUPPORTED = False
+
+
+def thinking_state() -> dict:
+    """思考模式的三种事实，给面板显示用。
+
+    为什么不是一个 bool：配置说的、接口认的、实际发生的，是三个可能不一致的
+    东西。面板把它全塌成一个「深度思考」标签，就会出现「界面写着开了、请求里
+    压根没带，或者被熔断悄悄关掉」——这种静默偏差在拿真钱下单的系统里比报错
+    更危险。所以分开给，让界面能标出来。
+
+    `_thinking_off()` 只回答「这次请求要不要加关闭字段」，这里回答「现在到底
+    是什么状态」，两者不要互相替代。
+    """
+    _load_dotenv()
+    requested = (os.getenv("LLM_THINKING") or "").strip().lower() in _THINKING_ON_WORDS
+    base = (os.getenv("LLM_BASE_URL") or DEFAULT_BASE_URL).lower()
+    supported = "deepseek" in base and not _THINKING_UNSUPPORTED
+    return {"requested": requested, "supported": supported,
+            "effective": requested and supported}
 
 
 def _thinking_off() -> bool:
@@ -282,6 +315,17 @@ def chat_ex(
                 val = extra.get(src)
             if val is not None:
                 usage[dst] = int(val)
+        # 思考 token 数：判断「深度思考到底有没有生效」的唯一硬证据。
+        # 只看 HTTP 200 不够——服务端拒过这个字段之后进程会静默关掉思考
+        # （见 `_disable_thinking_for_process`），请求照样成功。
+        det = extra.get("completion_tokens_details")
+        if det is None:
+            det = getattr(u, "completion_tokens_details", None)
+        if det is not None:
+            rt = det.get("reasoning_tokens") if isinstance(det, dict) \
+                else getattr(det, "reasoning_tokens", None)
+            if rt is not None:
+                usage["reasoning_tokens"] = int(rt)
     return text, usage
 
 

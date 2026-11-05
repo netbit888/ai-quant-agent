@@ -89,6 +89,31 @@ class TestDuplicateIds(unittest.TestCase):
         dup = {i: ids.count(i) for i in set(ids) if ids.count(i) > 1}
         self.assertEqual(dup, {}, f"重复的 DOM id：{dup}")
 
+
+class TestNativeControlDarkTheme(unittest.TestCase):
+    """原生控件的深色语义。
+
+    2026-11-05 用户在实机截了两次「下拉一片白、未选中项看不清」：原因是模板
+    从来没有声明 `color-scheme`，<select> 的弹出层按系统浅色画白底，而 option
+    的文字色继承的是深色主题的浅色字 → 白底白字。这类问题的特点是**代码跑得
+    通、测试全绿、只有人眼看得到**，所以只能靠静态断言钉住。
+    """
+
+    def setUp(self):
+        self.css = TPL.read_text(encoding="utf-8")
+
+    def test_color_scheme_is_declared_dark(self):
+        self.assertIn("color-scheme: dark", self.css,
+                      "缺 color-scheme: dark，原生弹层会按系统浅色渲染")
+
+    def test_select_options_carry_explicit_background(self):
+        """弹层不继承 select 自己的 background，不给就是白底+浅字。"""
+        m = re.search(r"(?<![-\w])select option\s*\{([^}]*)\}", self.css)
+        self.assertIsNotNone(m, "缺全局 select option 规则")
+        body = m.group(1)
+        self.assertIn("background", body)
+        self.assertIn("color", body)
+
     def test_lint_reports_duplicate_id(self):
         """规则本身要能抓到——不然上面的测试只是因为"刚好没错"才绿。"""
         import tempfile

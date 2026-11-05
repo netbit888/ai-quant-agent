@@ -97,6 +97,39 @@ class TestReadOnlyRoutes(LiveServerCase):
         self.assertFalse(payload["ok"])
 
 
+class TestLlmEntries(LiveServerCase):
+    """面板是两级下拉：**供应商 → 模型**。
+
+    DeepSeek 的「思考 / 不思考」是同一个模型名 + 一个请求参数，所以它必须落在
+    「模型」那一级的选项里（variants），而不是把供应商拆成两条——拆了之后
+    「这一家的 key 通不通用」就没有落点了。
+    """
+
+    def test_providers_are_three_with_deepseek_first(self):
+        status, payload = self.get("/api/llm")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        ids = [p["id"] for p in payload["providers"]]
+        self.assertEqual(ids, ["deepseek", "zhipu", "siliconflow"])
+        self.assertEqual(payload["providers"][0]["name"], "DeepSeek 开放平台")
+
+    def test_deepseek_exposes_exactly_two_model_variants(self):
+        _, payload = self.get("/api/llm")
+        d = payload["providers"][0]
+        self.assertEqual(d["models"], ["deepseek-flash"])
+        self.assertEqual([v["model"] for v in d["variants"]], ["deepseek-flash"] * 2)
+        self.assertEqual([bool(v["thinking"]) for v in d["variants"]], [False, True])
+
+    def test_current_variant_index_is_reported(self):
+        """回填「模型」下拉靠下标：两项模型名相同，只给名字没法区分。"""
+        _, payload = self.get("/api/llm")
+        self.assertIn("variant_index", payload)
+        self.assertIsInstance(payload["variant_index"], int)
+        self.assertTrue(payload["provider_name"])
+        for key in ("thinking", "thinking_effective", "model"):
+            self.assertIn(key, payload)
+
+
 class TestOriginGuard(LiveServerCase):
     """POST 的跨站护栏（2026-11-05 安全审查 P0）。
 

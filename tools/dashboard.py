@@ -303,22 +303,32 @@ class Handler(BaseHTTPRequestHandler):
             # 当前模型配置：只读。key 只给尾 4 位，整串永不出服务端。
             try:
                 from agent.llm import current_config
-                from tools.switch_llm import PROVIDERS, provider_of
+                from tools.switch_llm import (PROVIDERS, provider_of,
+                                              variant_index_of, variants_of)
 
                 cfg = current_config()
                 pid = provider_of(cfg["base_url"])
+                # 面板是两级下拉：供应商 → 模型。DeepSeek 的两项模型名相同，
+                # 只能靠 thinking 区分，所以回填要给**下标**而不是模型名。
                 payload = {
                     "ok": True,
                     "provider": pid,
-                    "provider_name": PROVIDERS[pid]["name"] if pid else "自定义 / 未知",
+                    "provider_name": (PROVIDERS[pid].get("label")
+                                      or PROVIDERS[pid]["name"]) if pid else "自定义 / 未知",
+                    "variant_index": (variant_index_of(pid, cfg["model"],
+                                                       bool(cfg.get("thinking")))
+                                      if pid else -1),
                     **cfg,
                     "providers": [
                         {
                             "id": k,
                             "name": v["name"],
+                            "label": v.get("label") or v["name"],
                             "base_url": v["base_url"],
                             "default_model": v["model"],
                             "models": v.get("models") or [v["model"]],
+                            # 模型下拉的选项：{model, thinking, label}
+                            "variants": variants_of(k),
                             "note": v.get("note", ""),
                         }
                         for k, v in PROVIDERS.items()
@@ -746,7 +756,8 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     return
 
-            result = switch(provider, key or None, model or None)
+            result = switch(provider, key or None, model or None,
+                            thinking=bool(body.get("thinking")))
             if result.get("ok"):
                 result["current"] = current_config()
                 result["note"] = ("已生效，下一次决策就用它。"
@@ -862,7 +873,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             existed_before = ENV_FILE.is_file()
-            res = switch(provider, key, model or None, verify=True)
+            res = switch(provider, key, model or None, verify=True,
+                         thinking=bool(body.get("thinking")))
             if res.get("ok"):
                 appdirs.config_dir().mkdir(parents=True, exist_ok=True)
                 appdirs.setup_marker().touch()

@@ -238,6 +238,104 @@ class TestThinkingSwitch(unittest.TestCase):
             self.assertNotIn("extra_body", self._run(), msg=base)
 
 
+class TestThinkingState(unittest.TestCase):
+    """面板显示用：配置要的、接口认的、实际发生的，三件事必须分开。
+
+    塌成一个 bool 就会出现「界面写着深度思考、请求里压根没带」——服务端拒过
+    这个字段之后进程会静默关掉思考，请求照样 200。这种偏差只能靠界面暴露。
+    """
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ("LLM_BASE_URL", "LLM_THINKING")}
+        self._saved_broken = llm._THINKING_UNSUPPORTED
+        llm._THINKING_UNSUPPORTED = False
+        self._no_env = mock.patch.object(llm, "_load_dotenv", lambda: None)
+        self._no_env.start()
+
+    def tearDown(self):
+        self._no_env.stop()
+        llm._THINKING_UNSUPPORTED = self._saved_broken
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_deepseek_with_flag_reports_effective(self):
+        os.environ["LLM_BASE_URL"] = "https://api.deepseek.com"
+        os.environ["LLM_THINKING"] = "1"
+        st = llm.thinking_state()
+        self.assertTrue(st["requested"])
+        self.assertTrue(st["supported"])
+        self.assertTrue(st["effective"])
+
+    def test_default_is_off(self):
+        os.environ["LLM_BASE_URL"] = "https://api.deepseek.com"
+        os.environ.pop("LLM_THINKING", None)
+        st = llm.thinking_state()
+        self.assertFalse(st["requested"])
+        self.assertFalse(st["effective"])
+
+    def test_other_provider_is_requested_but_never_effective(self):
+        """智谱上写 LLM_THINKING=1：配置认了，但接口不认，实际不会开。"""
+        os.environ["LLM_BASE_URL"] = "https://open.bigmodel.cn/api/paas/v4"
+        os.environ["LLM_THINKING"] = "1"
+        st = llm.thinking_state()
+        self.assertTrue(st["requested"])
+        self.assertFalse(st["supported"])
+        self.assertFalse(st["effective"])
+
+    def test_circuit_breaker_shows_as_ineffective(self):
+        """服务端拒过之后，界面必须能看出来「深度思考没在跑」。"""
+        os.environ["LLM_BASE_URL"] = "https://api.deepseek.com"
+        os.environ["LLM_THINKING"] = "1"
+        llm._disable_thinking_for_process()
+        st = llm.thinking_state()
+        self.assertTrue(st["requested"])
+        self.assertFalse(st["effective"])
+
+    def test_current_config_carries_the_three_flags(self):
+        os.environ["LLM_BASE_URL"] = "https://api.deepseek.com"
+        os.environ["LLM_THINKING"] = "1"
+        cfg = llm.current_config()
+        self.assertTrue(cfg["thinking"])
+        self.assertTrue(cfg["thinking_supported"])
+        self.assertTrue(cfg["thinking_effective"])
+
+
+class TestUsageReasoningTokens(unittest.TestCase):
+    """`reasoning_tokens` 是「思考到底生效没」的唯一硬证据。
+
+    只看 HTTP 200 不够：字段被拒后会自动降级重试，请求还是成功，
+    但那时候的 200 只证明「模型答了」，不证明「它想了」。
+    """
+
+    def test_reasoning_tokens_are_extracted(self):
+        class _Completions:
+            def create(self, **_kwargs):
+                msg = types.SimpleNamespace(content="{}")
+                usage = types.SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=20, total_tokens=30,
+                    model_extra={"completion_tokens_details": {"reasoning_tokens": 17}},
+                )
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=msg)], usage=usage)
+
+        client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+        with mock.patch.object(llm, "_load_dotenv", lambda: None), \
+                mock.patch.object(llm, "_client", lambda: client):
+            _, usage = llm.chat_ex("hi")
+        self.assertEqual(usage["reasoning_tokens"], 17)
+        self.assertEqual(usage["completion_tokens"], 20)
+
+    def test_missing_field_is_not_invented(self):
+        """平台没回这个字段就当作没有，别补一个 0 冒充「确认没思考」。"""
+        with mock.patch.object(llm, "_load_dotenv", lambda: None), \
+                mock.patch.object(llm, "_client", lambda: _client_that([], [])):
+            _, usage = llm.chat_ex("hi")
+        self.assertNotIn("reasoning_tokens", usage)
+
+
 class TestThinkingFallback(unittest.TestCase):
     """上游不认这个字段时的降级。
 

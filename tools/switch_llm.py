@@ -37,27 +37,45 @@ ROOT = appdirs.app_root()
 ENV_FILE = appdirs.env_file()
 
 # 都是 OpenAI 兼容接口，所以换供应商只需要这三个值
-# models 只是**常用示例**，不是白名单——免费档的模型名换得很勤，
-# 面板上允许直接手输任何模型名，以各平台控制台为准。
+# models 只是**常用示例**，不是白名单——免费档的模型名换得很勤。
+#
+# 面板的下拉是两级的：**供应商**（这里的 key）→ **模型**（`variants`）。
+# DeepSeek 的「思考 / 不思考」是**同一个模型名 + 一个请求参数**，模型名本身
+# 分不出来，所以它必须体现在「模型」这一级的选项上，而不是把供应商拆成
+# 两条——那会让「这一家的 key」这种判断失去落点（2026-11-05 改回来）。
 PROVIDERS: dict[str, dict] = {
+    "deepseek": {
+        "name": "DeepSeek 开放平台",
+        "label": "DeepSeek",
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        "models": ["deepseek-flash"],
+        "variants": [
+            {"model": "deepseek-flash", "thinking": False,
+             "label": "deepseek-flash"},
+            {"model": "deepseek-flash", "thinking": True,
+             "label": "deepseek-flash（深度思考）"},
+        ],
+        "note": "deepseek-chat 已不在官方模型表里（旧别名，随时可能失效）。"
+                "深度思考是同一个 flash 打开 thinking：60 个真实决策点的 A/B 结论"
+                "是无可测增益（Brier 0.2380 vs 0.2286），而首字 6.11s vs 0.95s、"
+                "输出 token 约 14 倍——想「想清楚再答」可以选，别指望更准",
+    },
     "zhipu": {
-        "name": "智谱 GLM（免费档，国内直连）",
+        "name": "智谱 GLM",
+        "label": "智谱 GLM",
+        "provider": "zhipu",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "model": "glm-4-flash",
         "models": ["glm-4-flash", "glm-4-air", "glm-4-plus", "glm-4-long"],
         "note": "免费 Flash 的模型名会更新（glm-4.7-flash / glm-5.x-flash 等），"
                 "以 open.bigmodel.cn 控制台为准，可用 --model 覆盖",
     },
-    "deepseek": {
-        "name": "DeepSeek（按量付费，判断质量更好）",
-        "base_url": "https://api.deepseek.com",
-        "model": "deepseek-flash",
-        "models": ["deepseek-flash", "deepseek-v4-pro"],
-        "note": "deepseek-chat 已不在官方模型表里（旧别名，随时可能失效）；"
-                "v4-pro 判断更强但更贵，两者都支持 JSON 输出",
-    },
     "siliconflow": {
-        "name": "硅基流动（部分开源模型永久免费）",
+        "name": "硅基流动",
+        "label": "硅基流动",
+        "provider": "siliconflow",
         "base_url": "https://api.siliconflow.cn/v1",
         "model": "Qwen/Qwen3-8B",
         "models": ["Qwen/Qwen3-8B", "Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3"],
@@ -75,6 +93,32 @@ def provider_of(base_url: str | None) -> str:
         if spec["base_url"].rstrip("/").lower() == target:
             return pid
     return ""
+
+
+def variants_of(pid: str) -> list[dict]:
+    """面板「模型」下拉的选项（`{model, thinking, label}`）。
+
+    有 `variants` 就用它；没有就按 `models` 摊平，thinking 一律 False。
+    这样别家不用重复维护两份清单，而 DeepSeek 那条能表达「同名模型、两种模式」。
+    """
+    spec = PROVIDERS.get(pid)
+    if not spec:
+        return []
+    if spec.get("variants"):
+        return [dict(v) for v in spec["variants"]]
+    return [{"model": m, "thinking": False, "label": m} for m in spec["models"]]
+
+
+def variant_index_of(pid: str, model: str | None, thinking: bool) -> int:
+    """当前生效的是「模型」下拉里的第几项；匹配不到返回 -1。
+
+    面板要靠它把下拉回填到正确那一条——DeepSeek 的两项模型名完全相同，
+    只比模型名会永远落在第一项，显示成「不思考」而实际在思考。
+    """
+    for i, v in enumerate(variants_of(pid)):
+        if v["model"] == model and bool(v["thinking"]) == bool(thinking):
+            return i
+    return -1
 
 
 
@@ -111,15 +155,24 @@ def switch(
     key: str | None = None,
     model: str | None = None,
     verify: bool = True,
+    thinking: bool | None = None,
 ) -> dict:
     """写 .env 并验证。失败自动回滚到原文件**和原进程环境**。
 
     key 传 None / 空串 = 沿用当前 key（只换模型时不逼人重填一遍 key）。
     verify=False 只写不验证，给自动化用；面板一律走 True。
+
+    `thinking` 是「要不要先想再答」，只有 DeepSeek 接口认这个字段。面板里它是
+    「模型」下拉的一项（同一个 flash 的两种模式），所以由调用方显式传；传 None
+    按关处理。别家一律写成 0：留个 1 在那儿虽然代码会按 base_url 忽略，但面板
+    会显示一个不存在的状态。
     """
     spec = PROVIDERS[provider]
     model = (model or "").strip() or spec["model"]
     key = (key or "").strip()
+    if thinking is None:
+        thinking = False
+    thinking = bool(thinking) and "deepseek" in spec["base_url"].lower()
 
     # .env 注入防线（2026-11-05 安全审查 P1）：model/key 来自 HTTP body，
     # 含换行就能往 .env 里塞新行注入 LLM_BASE_URL，把后续请求导去恶意服务器
@@ -140,9 +193,11 @@ def switch(
     from agent.llm import current_config
 
     before = current_config()
-    old_env = {k: os.environ.get(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+    old_env = {k: os.environ.get(k) for k in
+               ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_THINKING")}
 
-    values = {"LLM_BASE_URL": spec["base_url"], "LLM_MODEL": model}
+    values = {"LLM_BASE_URL": spec["base_url"], "LLM_MODEL": model,
+              "LLM_THINKING": "1" if thinking else "0"}
     if key:
         values["LLM_API_KEY"] = key
     new = upsert_env(old_text, values)
@@ -154,7 +209,8 @@ def switch(
     # 让当前进程立刻用上新值（_load_dotenv 用 setdefault，必须显式覆盖）
     from agent.llm import apply_config
 
-    apply_config(model=model, base_url=spec["base_url"], api_key=key or None)
+    apply_config(model=model, base_url=spec["base_url"], api_key=key or None,
+                 thinking=thinking)
 
     def _rollback() -> None:
         """文件回滚 + 进程环境回滚。"""
@@ -169,7 +225,7 @@ def switch(
 
     base = {"model": model, "base_url": spec["base_url"],
             "provider": provider, "key_changed": bool(key),
-            "previous": before}
+            "thinking": thinking, "previous": before}
 
     if not verify:
         return {"ok": True, **base, "verified": False,
@@ -177,6 +233,9 @@ def switch(
 
     from agent.llm import chat_ex
 
+    # 验证会真花一次调用。注意：`thinking=True` 时这条也一样要先想再答，
+    # 实测约 6 秒、输出几百 token（不思考只要十几个）——不是 bug，是所选模式
+    # 本身的价格，面板的确认弹窗里已经写明。
     started = time.time()
     try:
         text, usage = chat_ex("只回两个字：可用")
@@ -186,9 +245,21 @@ def switch(
                 "rollback": backup is not None or bool(old_env)}
 
     elapsed = time.time() - started
-    return {"ok": True, **base, "verified": True,
-            "reply": (text or "").strip()[:40], "elapsed": elapsed,
-            "usage": usage, "backup": str(backup) if backup else None}
+    res = {"ok": True, **base, "verified": True,
+           "reply": (text or "").strip()[:40], "elapsed": elapsed,
+           "usage": usage, "backup": str(backup) if backup else None}
+
+    # 「切到深度思考」到底成不成，只有 reasoning_tokens 说了算。
+    # 只看 HTTP 200 不够：服务端拒过这个字段时 chat_ex 会去掉它重试，
+    # 请求照样成功，但那时候的 200 只证明「模型答了」，不证明「它想了」。
+    # 这里不判失败（配置本身是好的），只把不一致交回给面板显示。
+    if thinking:
+        got = int((usage or {}).get("reasoning_tokens") or 0)
+        res["thinking_effective"] = bool(got)
+        if not got:
+            res["warning"] = ("服务端没回 reasoning_tokens，深度思考看起来没生效——"
+                              "多半是上游不认 thinking 字段，已自动降级成不思考。")
+    return res
 
 
 def main() -> None:
@@ -196,6 +267,8 @@ def main() -> None:
     parser.add_argument("provider", nargs="?", choices=sorted(PROVIDERS), help="供应商")
     parser.add_argument("--key", help="API key")
     parser.add_argument("--model", help="覆盖默认模型名")
+    parser.add_argument("--think", action="store_true",
+                        help="打开深度思考（只对 DeepSeek 生效；面板里是模型下拉的一项）")
     parser.add_argument("--show", action="store_true", help="只看当前配置，不改")
     args = parser.parse_args()
 
@@ -204,9 +277,22 @@ def main() -> None:
 
         cfg = current_config()
         pid = provider_of(cfg["base_url"])
-        print(f"供应商   = {PROVIDERS[pid]['name'] if pid else '自定义 / 未知'}")
+        who = (PROVIDERS[pid].get("label") or PROVIDERS[pid]["name"]) if pid else "自定义 / 未知"
+        print(f"供应商   = {who}")
         print(f"base_url = {cfg['base_url']}")
         print(f"model    = {cfg['model']}")
+        think = bool(cfg.get("thinking"))
+        on = "开" if think else "关"
+        if think and not cfg.get("thinking_effective"):
+            on += "（未生效：该接口不认，或被服务端拒过）"
+        print(f"深度思考 = {on}")
+        if pid:
+            idx = variant_index_of(pid, cfg["model"], think)
+            vs = variants_of(pid)
+            if idx >= 0:
+                print(f"模型项   = 第 {idx + 1}/{len(vs)} 项 · {vs[idx]['label']}")
+            else:
+                print("模型项   = 不在下拉清单里（手输的模型名）")
         tail = f"（尾号 {cfg['key_tail']}，来自 {cfg['key_source']}）" if cfg["key_set"] else ""
         print(f"key      = {'已配置' if cfg['key_set'] else '缺失'}{tail}")
         return
@@ -218,10 +304,11 @@ def main() -> None:
     print(f"→ {spec['name']}")
     print(f"  base_url = {spec['base_url']}")
     print(f"  model    = {args.model or spec['model']}")
+    print(f"  深度思考 = {'开' if args.think else '关'}")
     if spec["note"]:
         print(f"  注意：{spec['note']}")
 
-    res = switch(args.provider, args.key, args.model)
+    res = switch(args.provider, args.key, args.model, thinking=args.think)
     if not res["ok"]:
         print(f"\n✗ 验证失败：{res['error']}")
         if res.get("rollback"):
