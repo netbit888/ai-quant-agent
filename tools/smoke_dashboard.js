@@ -714,6 +714,26 @@ try {
     && String(made.ctxPlay.textContent).indexOf('–') < 0;
   console.log(`  无后端字段时降级不抛错 ${fallbackOk ? '✓' : '✗'} (${made.ctxPlay.textContent})`);
   if (!fallbackOk) failed = true;
+
+  // ---- 左图右字（2026-11-05）：结构顺序 + 宽度策略 + 过期章不占位 ----
+  // 假 DOM 没有布局，量不到 786/268 这样的像素；几何留给 headless 截图量，
+  // 这里只卡「会静默退化」的三件事：图列必须在字列之前（读屏与 Tab 顺序）、
+  // 字列宽度必须带 clamp（写死 px 在 1600 宽会塌成一根窄条）、
+  // 过期章必须绝对定位（参与流式布局会把三个大字顶下去 14px）。
+  const visIdx = src.indexOf('<div class="ring-vis">');
+  const sideIdx = src.indexOf('<div class="ring-side"');
+  const orderOk = visIdx > 0 && sideIdx > visIdx;
+  console.log(`  左图在左、字在右 ${orderOk ? '✓' : '✗'} (${visIdx} < ${sideIdx})`);
+  if (!orderOk) failed = true;
+  const sideWidthOk = /\.ring-side\s*\{[^}]*flex:\s*0 0 clamp\(268px, 25%, 320px\)/.test(src);
+  console.log(`  字列宽度用 clamp 而非写死 ${sideWidthOk ? '✓' : '✗'}`);
+  if (!sideWidthOk) failed = true;
+  const stalePosOk = /\.ctx-stale\s*\{[^}]*position:\s*absolute/.test(src);
+  console.log(`  过期章绝对定位（切换不顶动大字） ${stalePosOk ? '✓' : '✗'}`);
+  if (!stalePosOk) failed = true;
+  const noDupAct = src.indexOf('id="fAct"') < 0;
+  console.log(`  环头不再重复 act ${noDupAct ? '✓' : '✗'}`);
+  if (!noDupAct) failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);

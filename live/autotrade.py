@@ -6149,6 +6149,163 @@ def _prefs_snapshot(saved_cfg: dict | None = None) -> dict:
         return {}
 
 
+def playbook_of(state: dict, rows: list[dict],
+                now: float | None = None) -> dict:
+    """当前 regime 下生效的打法：与持仓无关，空仓也必须有具体文案。
+
+    面板原来把「打法」显示成 `position.plan`，空仓时必然是「–」——而人最
+    需要知道打法的时刻恰恰是空仓、准备手动下单的时候。这里改成「先判行情、
+    再选打法」的分流结果，与 tick 里真正决定提示词 / 程序建议 / 锚点开关 /
+    开仓 plan 的那个 regime 同源（见 tick 里的 `regime_of(bars)`）。
+
+    出场参数走 `exit_params()`，和真正下单用的是同一套口径；文案在后端算好，
+    前端不拼字符串——参数改一次，前后端各写一份必然对不上。
+    """
+    raw = state.get("cfg") or {}
+    cfg = Cfg(**{k: v for k, v in raw.items()
+                 if k in Cfg.__dataclass_fields__})
+    ld = state.get("last_decision") or {}
+    regime = str(ld.get("regime") or "")
+    ts = int(ld.get("ts") or 0)
+    iv = int(cfg.interval_sec or 60)
+    age = max(0, int((now or time.time()) - ts)) if ts else None
+    # 大字承载的是「现在」的状态：超过两个决策间隔就已经不是现在了。
+    # 放大一个 14 分钟前的判定，比把它写成小字更危险。
+    stale = bool(ts and age is not None and age > 2 * iv)
+
+    # plan 在开仓时锁定；这里用当前 regime 预览「若此刻开仓会按哪套参数走」。
+    # mid / 空值按震荡处理，与 exit_params 的历史行为一致。
+    ep = exit_params(cfg, regime if regime in ("trend", "range") else "range")
+    tp = float(ep["tp_min_usd"])
+    hold = int(ep["max_hold_sec"])
+    hold_txt = (f"{hold / 3600:g}h" if hold >= 3600 and hold % 3600 == 0
+                else f"{hold // 60}min")
+
+    # 趋势市的上/下行取最近一次特征快照的 drift，与 _structure_text 同源。
+    drift = 0.0
+    for r in reversed(rows):
+        f = r.get("feat") or {}
+        if "drift" in f:
+            try:
+                drift = float(f["drift"])
+            except (TypeError, ValueError):
+                pass
+            break
+
+    if not regime:
+        name, action = "待判定", "等待首轮判定"
+        detail = f"间隔 {iv}s · 还没跑过"
+    elif regime == "range":
+        name, action = "震荡市", "低买高卖"
+        detail = f"tp {tp:g} / {hold_txt} · 等待锚点生效"
+    elif regime == "mid":
+        name, action = "方向不明", "只做位置明显的单"
+        detail = f"tp {tp:g} / {hold_txt} · 只在上下沿动手"
+    elif not cfg.trend_follow:
+        name, action = "趋势市", "不交易"
+        detail = "trend_follow 已关闭 · 本程序不建议开仓"
+    else:
+        name = "趋势市"
+        action = "顺势做多" if drift >= 0 else "顺势做空"
+        detail = f"tp {tp:g} / {hold_txt} · 锚点停用，不等回踩"
+
+    return {
+        "regime": regime, "name": name, "action": action, "detail": detail,
+        "tp": tp, "max_hold_sec": hold, "interval_sec": iv,
+        "ts": ts, "age_sec": age, "stale": stale,
+        "trend_follow": bool(cfg.trend_follow), "anchor": regime != "trend",
+    }
+
+
+def model_vs_actual(rows: list[dict], deals: dict[int, dict],
+                    interval_sec: int = 60, symbol: str = "",
+                    limit: int = 8) -> dict:
+    """最近 N 轮：模型方向 vs 账户实际成交方向。
+
+    面板是个人复盘工具（手动做单、magic=0 常态），所以「我」这一行取账本里
+    **真实发生的开仓**，不是模型写了什么。轮次只认 skip / signal 决策行：
+    同一笔单实测会留下 4 条 p_up 相同的流水（signal/open/signal/close），
+    不合并就会把一次决策画成四格，历史序列直接失真。
+    """
+    iv = max(1, int(interval_sec or 60))
+    dec = [r for r in rows
+           if r.get("kind") in ("skip", "signal")
+           and r.get("p_up") is not None and r.get("ts")]
+    dec.sort(key=lambda r: int(r["ts"]))
+    kept: list[dict] = []
+    for r in dec:
+        ts = int(r["ts"])
+        # 半个间隔内的重复行算同一轮；signal 优先（它带 act/advice）。
+        if kept and ts - int(kept[-1]["ts"]) < iv * 0.5:
+            if r.get("kind") == "signal":
+                kept[-1] = r
+            continue
+        kept.append(r)
+    kept = kept[-limit:]
+
+    # 已实现盈亏按 position_id 归集：开仓那笔 profit=0，钱在平仓那笔上。
+    pnl_by_pos: dict = {}
+    for d in deals.values():
+        if int(d.get("entry", -1)) != 1:
+            continue
+        try:
+            val = (float(d.get("profit") or 0) + float(d.get("commission") or 0)
+                   + float(d.get("swap") or 0) + float(d.get("fee") or 0))
+        except (TypeError, ValueError):
+            continue
+        pid = d.get("position_id")
+        pnl_by_pos[pid] = pnl_by_pos.get(pid, 0.0) + val
+
+    # 一笔成交只归到「时间上最近的那一轮」，避免落在相邻两轮之间被画两次。
+    assign: dict[int, dict] = {}
+    for d in deals.values():
+        if int(d.get("entry", -1)) != 0 or float(d.get("volume") or 0) <= 0:
+            continue
+        if symbol and str(d.get("symbol") or "") != symbol:
+            continue
+        t = int(d.get("time") or 0)
+        best = None
+        for k in kept:
+            kt = int(k["ts"])
+            gap = abs(t - kt)
+            if gap <= iv and (best is None
+                              or gap < abs(t - int(best["ts"]))):
+                best = k
+        if best is not None:
+            assign[int(best["ts"])] = d
+
+    slots = []
+    for k in kept:
+        kt = int(k["ts"])
+        pu = float(k.get("p_up") or 0.5)
+        mdir = 1 if pu > 0.5 else (-1 if pu < 0.5 else 0)
+        hit = assign.get(kt)
+        adir, ticket, magic, pnl = 0, None, None, None
+        if hit is not None:
+            typ = int(hit.get("type", -1))
+            adir = 1 if typ == 0 else (-1 if typ == 1 else 0)
+            ticket = hit.get("ticket")
+            magic = int(hit.get("magic") or 0)
+            pid = hit.get("position_id")
+            if pid in pnl_by_pos:
+                pnl = round(pnl_by_pos[pid], 2)
+        slots.append({
+            "ts": kt, "p_up": pu, "model_dir": mdir, "actual_dir": adir,
+            "ticket": ticket, "magic": magic, "pnl": pnl,
+            "against": bool(adir and mdir and adir != mdir),
+        })
+
+    against = [s for s in slots if s["against"]]
+    return {
+        "slots": slots,
+        "against": len(against),
+        "net": round(sum(s["pnl"] for s in against
+                         if s["pnl"] is not None), 2),
+        "trades": sum(1 for s in slots if s["actual_dir"]),
+        "interval_sec": iv,
+    }
+
+
 def summary(login: int | str | None = None, recent: int = 30) -> dict:
     """给面板用。全部从 state + 日志现算，不做任何缓存，避免和实际不一致。"""
     state = load_state(login)
@@ -6261,6 +6418,19 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         model_name = os.getenv("LLM_MODEL") or DEFAULT_MODEL
     except Exception:  # noqa: BLE001
         model_name = "未知"
+
+    # 做单台态势带：当前打法 + 人/模型对照。账本读失败不能拖垮整个 summary
+    # ——面板每秒轮询，/api/live 挂掉比少一块信息严重得多。
+    try:
+        from live import journal
+        ledger = journal.load_ledger(login)
+    except Exception:  # noqa: BLE001
+        ledger = {}
+    playbook = playbook_of(state, rows)
+    vs = model_vs_actual(
+        rows, ledger,
+        interval_sec=int(saved_cfg.get("interval_sec") or 60),
+        symbol=str(saved_cfg.get("symbol") or ""))
 
     return {
         "ok": True,
@@ -6390,6 +6560,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
                                            _defaults.assist_deny_cooldown),
         },
         "assist_deny_until": state.get("assist_deny_until") or {},
+        # 态势带（2026-11-05）：打法与「我 vs 模型」都在后端算好，前端只显示。
+        "playbook": playbook,
+        "vs_actual": vs,
         "recent": rows[-recent:],
     }
 

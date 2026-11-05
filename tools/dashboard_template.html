@@ -234,10 +234,23 @@
   }
   .ring-tag.bad { color: var(--bad-lit); border-color: rgba(255,77,79,.5);
                   background: rgba(255,77,79,.1); }
-  .ring-body { display: flex; align-items: flex-start; gap: var(--sp4); }
+  /* 左图右字（2026-11-05）：左栏吃掉全部剩余宽度，右栏按内容定宽。
+     纯 flex 3:1 在 1600 窗口下会把字列拉到 380px 而右半边空一半；268 是
+     「只做位置明显的单」撑出来的下限（8 字×24 + 标签 44 + 间距 8 = 244，
+     可用 252，余 8px）。1120 窗口实测：内容 1070 = 786 + 16 + 268。 */
+  .ring-body {
+    display: flex; align-items: stretch; gap: var(--sp4);
+    flex: 1 1 auto; min-height: 0;
+  }
+  .ring-vis { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .ring-side {
+    flex: 0 0 clamp(268px, 25%, 320px); min-width: 0; position: relative;
+    display: flex; flex-direction: column;
+    padding-left: var(--sp4); border-left: 1px solid var(--border);
+  }
   .ring-act {
     font-size: var(--fs-9); line-height: 1.15; font-weight: 700;
-    min-width: 96px; letter-spacing: -.3px;
+    letter-spacing: -.3px;
   }
   .ring-act.long { color: var(--up); }
   .ring-act.short { color: var(--down); }
@@ -246,8 +259,6 @@
     display: block; font-size: var(--fs-1); font-weight: 500; color: var(--dim);
     margin-top: var(--sp1); letter-spacing: .2px;
   }
-  .ring-mid { flex: 1; min-width: 0; }
-
   /* p_up 双向条：中轴 0.50 + 两条开仓阈值刻线。
      开仓条件是 |p_up−0.50| ≥ min_edge，读 0.62 要心算减 0.5 再判线；
      画成条之后阈值直接可见。p_up=0.00 那种被照抄的异常会贴死中轴。 */
@@ -316,32 +327,74 @@
     border: 1px solid rgba(240,180,41,.4); border-radius: var(--r-xs); padding: 0 6px;
   }
 
-  /* 本轮上下文：最近 8 轮 p_up 直方图 + 四个真实特征。
-     这里不放"装饰性"内容——留白会被读成"漏了一块"。 */
-  .rspacer { flex: 1 1 auto; min-height: 4px; }
-  .ring-ctx { display: flex; gap: var(--sp4); align-items: flex-end; }
-  .ctx-hist { flex: 1; min-width: 0; }
-  .ctx-lb { font-size: var(--fs-1); color: var(--dim); margin-bottom: 4px; }
-  .hist {
-    display: flex; align-items: center; justify-content: space-between;
-    height: 30px; position: relative; padding: 0 2px;
-    border-bottom: 1px solid var(--border);
+  /* 本轮上下文（2026-11-05 重做）：删掉「最近 8 轮 p_up 直方图」。
+     决策环已有本轮 p_up 与阈值，决策流页已有逐行 p_up 微条，第三份重复
+     不改变任何决定；柱高还被 min_edge 截断，八成信号画成同一高度。
+     2026-11-05 二次改版：由「整幅上下三层」改成「左图右字」——
+     左栏 = 信号条 + 模型原话 + 「模型 / 我」对照，右栏 = 纵向结论列。 */
+  /* 右栏：三个 --fs-9 与环里的「不做」同规格，靠 11px 标签分层。
+     标签与值同基线，读作「市场状态：震荡市」。 */
+  .ctx-state { display: flex; flex-direction: column; min-width: 0; }
+  .side-kv {
+    display: flex; align-items: baseline; gap: var(--sp2); flex-wrap: wrap;
+    margin-top: var(--sp2); min-width: 0;
   }
-  .hist::before {
-    content: ""; position: absolute; left: 0; right: 0; top: 50%;
-    height: 1px; background: var(--border-hi);
+  .side-kv .k { font-size: var(--fs-1); color: var(--dim); white-space: nowrap; }
+  .side-kv .v {
+    font-size: var(--fs-9); line-height: 1.15; font-weight: 700;
+    letter-spacing: -.3px; color: var(--text);
   }
-  .hbar { flex: 0 0 10px; position: relative; height: 100%; }
-  .hbar i {
-    position: absolute; left: 0; right: 0; border-radius: var(--r-xs);
-    display: block; min-height: 2px;
+  /* 修饰类不能叫 act：全局有个 .act（蓝底卡片，padding 12/14 + 边框），
+     命中之后「低买高卖」会多出一圈内边距和背景，看着像个按钮。
+     旧版 .big.act 一直带着这个 bug。 */
+  .side-kv .v.play { color: var(--gold-lit); }
+  /* 降饱和只压到 0.7：过期提示主要由琥珀章承担，大字本身不能弱到读不出。
+     「不做」不参与——它是结论，不该跟着一起灰。 */
+  .ctx-state.stale .v { opacity: .7; }
+  /* 绝对定位：JS 每轮用 className= 整体覆写这个节点，若它参与流式布局，
+     「新鲜 ↔ 过期」切换会把三个大字顶下去 14px。新鲜时直接隐藏（环头
+     的「N 分前 / 时:分:秒」时间戳仍在，不丢信息），所以不需要预留高度。 */
+  .ctx-stale {
+    position: absolute; top: 2px; right: 0;
+    font-size: var(--fs-1); color: var(--warn);
+    border: 1px solid rgba(240,180,41,.4); border-radius: var(--r-xs);
+    padding: 1px 6px; white-space: nowrap;
   }
-  .hbar i.up { background: rgba(46,204,113,.7); bottom: 50%; }
-  .hbar i.down { background: rgba(255,77,79,.7); top: 50%; }
-  .ctx-feats { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp3); flex: none; }
-  .ctx-feats div { display: flex; gap: 5px; align-items: baseline; font-size: var(--fs-1); }
-  .ctx-feats .k { color: var(--dim); }
-  .ctx-feats b { font-family: var(--mono); color: var(--muted); font-weight: 600; }
+  .ctx-stale.fresh { display: none; }
+  /* 参数行：紧贴「当前打法」，不用 margin-top:auto 顶到栏底。
+     1600×900 下环会被拉到 ~230px，顶到底会让 tp 与打法之间空出 140px，
+     参数看着像另一块东西；宁可右栏下面留白，也不要让参数离开它解释的那一行。 */
+  .ctx-ev {
+    padding-top: var(--sp2);
+    font-size: var(--fs-1); color: var(--dim); font-family: var(--mono);
+    word-break: break-word; font-variant-numeric: tabular-nums;
+  }
+  /* 左栏底部：8 个固定格位。格位固定 = 缺一轮留空格，不再 space-between 自动铺开。 */
+  .ctx-cmp {
+    display: flex; flex-direction: column; gap: 3px;
+    margin-top: auto; padding-top: var(--sp2);
+  }
+  .cmp-row { display: flex; align-items: center; gap: var(--sp2); }
+  .cmp-row .k { flex: 0 0 26px; font-size: var(--fs-1); color: var(--dim); }
+  /* 格位不铺满整幅宽度：1120 窗口下 8 格拉成 130px 的长条会读成进度条，
+     而不是 8 个离散轮次。520 而不是 560：左栏 786 里
+     26 + 8 + 560 + 8 + 176(结论文字) = 778，只剩 4px——窗口再窄一档就溢出。 */
+  .cmp-grid { display: flex; gap: 3px; flex: 1 1 auto; min-width: 0; max-width: 520px; }
+  .cmp-cell {
+    flex: 1 1 0; min-width: 0; height: 13px; border-radius: var(--r-xs);
+    background: var(--bg2); border: 1px solid var(--border);
+  }
+  .cmp-cell.up { background: rgba(46,204,113,.75); border-color: transparent; }
+  .cmp-cell.down { background: rgba(255,77,79,.75); border-color: transparent; }
+  .cmp-cell.none { background: rgba(139,156,176,.32); border-color: transparent; }
+  .cmp-cell.miss { background: transparent; border-style: dashed; }
+  .cmp-cell.against { outline: 2px solid var(--gold-lit); outline-offset: 1px; }
+  .cmp-note {
+    margin-left: var(--sp2); white-space: nowrap;
+    font-size: var(--fs-1); color: var(--dim); font-variant-numeric: tabular-nums;
+  }
+  .cmp-note b { color: var(--gold-lit); font-family: var(--mono); font-weight: 600; }
+  .cmp-note.zero b { color: var(--muted); }
 
   /* ---- 持仓面板 ---- */
   .pos-panel {
@@ -454,11 +507,12 @@
      现在有没有哪条在逼近。 */
   /* 6 盏灯一行铺满（上下分栏之后宽度够了，原来 3×2 要占两行约 40px）；
      窄窗口退回 3×2，否则每格放不下「止盈门槛」四个字。 */
+  /* 六灯恒为一行：原来 <1200px 折成 3×2，但窗口最小就是 1120（desktop.py 的
+     min_size），这一档下多出来的一行 22px 正好把第二排三个灯顶出卡片底部——
+     1120×720 实测「止盈门槛 / 停滞唤醒 / 持仓上限」三个灯看不见（改动前后
+     都存在，2026-11-05 顺手修）。1070 宽摊 6 个每格 178px，标签 + 数值放得下。 */
   .gate-leds { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
                gap: var(--sp1) var(--sp2); }
-  @media (max-width: 1199px) {
-    .gate-leds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  }
   .gate-led {
     display: flex; align-items: center; gap: 6px; font-size: var(--fs-1);
     color: var(--muted); padding: 3px 7px; border-radius: var(--r-xs);
@@ -533,7 +587,7 @@
      22px 的判断条拉成 1000px 就像一条细装饰线，直方图 30px 也压不住底部。
      加高它们同时把「理由 → 直方图」之间那段空档吃掉。 */
   #live-desk .put-track { height: 36px; }
-  #live-desk .hist { height: 44px; }
+  #live-desk .cmp-cell { height: 14px; }
   #live-desk .r-track { height: 30px; }
   /* 面板内部只有 5 个区块，撑高后不能让空白全堆在闸门灯下面：
      按原有区块均匀铺开。**只调间距，不动内容**——加东西属于另一件事。 */
@@ -543,16 +597,19 @@
      1120×720 是窗口允许的最小尺寸（desktop.py 的 min_size），在这一档下
      宽松版自然高度 638px，而可用只有 550px——差 88px 全靠空档：
      `grid-template-rows: 1.05fr / 1fr` 在「容器高度不定」时会把两行一起
-     往上抬，环里那两个 .rspacer 各被撑到 42px（设计意图是 4px），
+     往上抬，环里原来的 .rspacer 各被撑到 42px（设计意图是 4px），
      持仓面板的 space-between 同理。改 auto 之后这两处空白立刻归零，
-     内容一个字没动。
+     内容一个字没动。（.rspacer 已随左图右字改版删除，空档改由
+     .ctx-cmp / .ctx-ev 的 margin-top:auto 承担，同样会归零。）
      只在装不下时才挂 .tight：宽屏上那些留白是刻意铺开的呼吸位，不能删。 */
   #live-desk.tight .at-grid { grid-template-rows: auto minmax(0, 1fr); }
   #live-desk.tight > .card.l1 { padding-top: var(--sp2); padding-bottom: var(--sp2); }
   #live-desk.tight #ring { padding: 10px 14px; }
   #live-desk.tight .pos-panel { padding: 10px 14px; }
   #live-desk.tight .put-track { height: 28px; }
-  #live-desk.tight .hist { height: 34px; }
+  /* 矮窗口：左图右字保住三个大字和参数行（打法参数不能被省掉），只压色块高度。
+     .ctx-ev 的 margin-top:auto 在装不下时本来就会归零，不需要另写覆盖。 */
+  #live-desk.tight .cmp-cell { height: 10px; }
   /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
      （表头 22px + 过滤条），决策流因此少显示整整一行。 */
   .stream-foot {
@@ -2046,18 +2103,19 @@
         <div class="ring-head">
           <span class="t">本轮判断</span>
           <span class="ring-tag hidden" id="ringTag">—</span>
-          <!-- act / 闸门 / 待复盘：原来是环底单独一行（27px + 8px 内边距）。
-               三小段文字占掉一整行，而环头右侧本来就有空白——并进来。 -->
-          <span class="ring-meta" title="act = 这轮模型给的动作；闸门 = 程序闸门是否放行；待复盘 = 平仓后还没复盘的笔数">
-            <span>act <b id="fAct">—</b></span>
+          <!-- 闸门 / 待复盘：原来是环底单独一行（27px + 8px 内边距），并到环头。
+               act 2026-11-05 从环头删掉：右栏已经有 24px 的「不做」加一行
+               「模型主动放弃」副标题，环头再来一个 act false 就是同一信息第三份。 -->
+          <span class="ring-meta" title="闸门 = 程序闸门是否放行；待复盘 = 平仓后还没复盘的笔数">
             <span>闸门 <b id="fGate">—</b></span>
             <span>待复盘 <b id="fPend">—</b></span>
           </span>
           <span class="ts" id="ringTs">—</span>
         </div>
         <div class="ring-body">
-          <div class="ring-act hold" id="ringAct"><span id="ringWord">—</span><small id="ringActSub">还没跑过</small></div>
-          <div class="ring-mid">
+          <!-- 左栏 = 图：信号条 / 模型原话 / 「模型 / 我」方向对照。
+               0.00–1.00 的刻度本来就该越宽越好，786px 不是浪费。 -->
+          <div class="ring-vis">
             <div class="put-top">
               <span class="lb">信号强度 |p_up − 0.50|</span>
               <span class="vv" id="putV">—</span>
@@ -2084,23 +2142,37 @@
               <span class="ago" id="anchorAgo"></span>
               <span class="drift hidden" id="anchorDrift">已漂移，重新观察</span>
             </div>
+            <!-- 本轮上下文里的对照：8 个固定格位，全部由后端 summary() 现算下发。 -->
+            <div class="ctx-cmp">
+              <div class="cmp-row">
+                <span class="k">模型</span>
+                <div class="cmp-grid" id="cmpModel"></div>
+              </div>
+              <div class="cmp-row">
+                <span class="k">我</span>
+                <div class="cmp-grid" id="cmpMine"></div>
+                <span class="cmp-note" id="cmpNote">—</span>
+              </div>
+            </div>
+          </div>
+          <!-- 右栏 = 字：纵向结论列。顺序是「先看结论、再看依据」：
+               不做 → 市场状态 → 当前打法 → 参数。三个值都是 --fs-9，
+               靠 11px 标签分层，读作「市场状态：震荡市」。
+               打法由后端按 regime + cfg 现算，空仓也有具体文案，前端不拼口径。 -->
+          <div class="ring-side" id="ringSide">
+            <div class="ring-act hold" id="ringAct"><span id="ringWord">—</span><small id="ringActSub">还没跑过</small></div>
+            <div class="ctx-state" id="ctxState">
+              <div class="side-kv">
+                <span class="k">市场状态</span><span class="v" id="ctxRegime">—</span>
+              </div>
+              <div class="side-kv">
+                <span class="k">当前打法</span><span class="v play" id="ctxPlay">—</span>
+              </div>
+              <span class="ctx-stale fresh hidden" id="ctxStale">—</span>
+            </div>
+            <div class="ctx-ev" id="ctxEv">—</div>
           </div>
         </div>
-        <div class="rspacer"></div>
-        <!-- 本轮上下文：全部是真实数据，不放装饰性内容——留白会被读成「漏了一块」。 -->
-        <div class="ring-ctx">
-          <div class="ctx-hist">
-            <div class="ctx-lb">最近 8 轮 p_up · 中轴 0.50（柱越高信号越强）</div>
-            <div class="hist" id="histBars"></div>
-          </div>
-          <div class="ctx-feats">
-            <div><span class="k">regime</span><b id="featRegime">—</b></div>
-            <div><span class="k">打法</span><b id="featPlan">—</b></div>
-            <div><span class="k">本轮</span><b id="featAge">—</b></div>
-            <div><span class="k">间隔</span><b id="featIv">—</b></div>
-          </div>
-        </div>
-        <div class="rspacer"></div>
       </div>
 
       <!-- ============ 持仓面板 ============ -->
@@ -3290,7 +3362,6 @@ function fillFeedback(a) {
    KPI 把「这一轮想了什么」压成一行 16px 副标题；胶囊把整个交易日都不会变的
    阈值当常驻信息占掉一整行——两者都不是做单时真要看的东西。 */
 const PLAN_TXT = { trend: '趋势单', range: '震荡单', mid: '方向不明' };
-const REGIME_TXT = { trend: '趋势市', range: '震荡市', mid: '方向不明' };
 const WAIT_FLAG_TXT = {
   set: '刚定', keep: '继续等', move: '下调', drift: '想上移·已拦',
   expired: '已作废', consumed: '到点未进·作废', cleared_open: '已进场',
@@ -3468,33 +3539,93 @@ function renderRing(a, p) {
     }
   }
 
-  // ---- 本轮上下文：最近 8 轮 p_up 直方图 ----
-  // 量程取 max(0.1, minEdge*2)：p_up 偏离通常只有 0.02–0.12，
-  // 按 0.5 满量程画出来几乎看不见（原型阶段踩过）。
-  const hist = $('histBars');
-  if (hist) {
-    // 量程 = 开仓阈值本身：柱高到顶就代表"这一轮的信号刚好够开仓"。
-    // 按 0.5 满量程画时典型偏离 0.02–0.05 只剩 2–4px，看上去像没画出来。
-    const RANGE = Math.max(0.02, minEdge);
-    // 柱高上限 = 直方图容器高度的一半（.hist 44px，见 #live-desk .hist）。
-    // 写死 17 是在 30px 容器时代的数，容器长高后柱子还是那么矮，等于没长。
-    const HALF = 21;
-    const list = (a.recent || []).filter(r => r.p_up != null).slice(-8);
-    hist.innerHTML = list.length ? list.map(r => {
-      const d = Number(r.p_up) - 0.5;
-      const h = Math.max(2, Math.min(HALF, (Math.abs(d) / RANGE) * HALF));
-      return '<div class="hbar"><i class="' + (d >= 0 ? 'up' : 'down')
-        + '" style="height:' + h.toFixed(1) + 'px"></i></div>';
-    }).join('') : '<span class="mini" style="opacity:.6">还没有记录</span>';
+  // ---- 本轮上下文：当前态势大字 + 模型/我方向对照（2026-11-05）----
+  // 旧直方图删了：柱高被 min_edge 截断后八成信号同高，且决策环已有本轮
+  // p_up、决策流页已有逐行微条，第三份重复不改变任何决定。
+  // 打法由后端按 regime + cfg 现算（空仓也有具体文案），前端不拼口径。
+  const pb = a.playbook || null;
+  const stateEl = $('ctxState');
+  if (stateEl) {
+    const regEl = $('ctxRegime'), playEl = $('ctxPlay');
+    const staleEl = $('ctxStale'), evEl = $('ctxEv');
+    if (pb) {
+      if (regEl) regEl.textContent = pb.name || '待判定';
+      if (playEl) playEl.textContent = pb.action || '等待首轮判定';
+      if (evEl) evEl.textContent = (pb.detail || '')
+        + ' · 间隔 ' + (Number(pb.interval_sec) || 60) + 's';
+      stateEl.classList.toggle('stale', !!pb.stale);
+      if (staleEl) {
+        const age = (ld && ld.ts) ? relAge(nowS - Number(ld.ts)) : '—';
+        staleEl.textContent = (pb.stale ? '状态已过期 · ' : '本轮 ') + age;
+        staleEl.className = 'ctx-stale' + (pb.stale ? '' : ' fresh');
+      }
+    } else {
+      if (regEl) regEl.textContent = '待判定';
+      if (playEl) playEl.textContent = '等待首轮判定';
+      if (evEl) evEl.textContent = '还没跑过 · 点「开始做单」后这里显示当前打法';
+      stateEl.classList.remove('stale');
+      if (staleEl) staleEl.className = 'ctx-stale fresh hidden';
+    }
   }
 
-  // ---- 四个真实特征 ----
+  // 「模型 / 我」8 个固定格位：格位不随数据量伸缩，缺轮留空（右对齐）。
+  // 色块只编码方向（多/空/无），不做长度比较；逆模型格描金边。
+  // title 带时刻 / p_up / ticket / 手动或程序 / 盈亏，每个数字都能对账。
+  const vs = a.vs_actual || null;
+  const modelGrid = $('cmpModel'), mineGrid = $('cmpMine'), cmpNote = $('cmpNote');
+  const CMP_N = 8;
+  if (modelGrid && mineGrid) {
+    const slots = (vs && vs.slots) ? vs.slots.slice(-CMP_N) : [];
+    const pad = CMP_N - slots.length;
+    const build = (mine) => {
+      let out = '';
+      for (let i = 0; i < CMP_N; i++) {
+        const s = i >= pad ? slots[i - pad] : null;
+        if (!s) {
+          out += '<div class="cmp-cell miss" title="这一轮没有决策记录"></div>';
+          continue;
+        }
+        const dir = Number(mine ? s.actual_dir : s.model_dir) || 0;
+        const kind = dir > 0 ? 'up' : (dir < 0 ? 'down' : 'none');
+        const against = (mine && s.against) ? ' against' : '';
+        let tip = fmtTsMin(Number(s.ts)) + ' · p_up ' + fmt(s.p_up, 2);
+        if (mine) {
+          tip += dir
+            ? ' · 成交' + (dir > 0 ? '多' : '空')
+              + ' · ticket ' + (s.ticket || '—')
+              + ' · ' + (Number(s.magic || 0) === 0 ? '手动' : '程序')
+              + (s.pnl == null ? ' · 未平仓' : ' · 盈亏 ' + s.pnl)
+            : ' · 未成交';
+        } else {
+          tip += ' · 模型' + (dir > 0 ? '看多' : (dir < 0 ? '看空' : '中性'));
+        }
+        out += '<div class="cmp-cell ' + kind + against
+          + '" title="' + esc(tip) + '"></div>';
+      }
+      return out;
+    };
+    modelGrid.innerHTML = build(false);
+    mineGrid.innerHTML = build(true);
+  }
+  if (cmpNote) {
+    if (vs && vs.slots && vs.slots.length) {
+      const n = Number(vs.against || 0);
+      cmpNote.className = 'cmp-note' + (n ? '' : ' zero');
+      cmpNote.innerHTML = n
+        ? '<b>逆模型 ' + n + ' 笔</b> · 净 <b>' + fmt(vs.net, 2)
+          + '</b> · 最近 ' + vs.slots.length + ' 轮成交 '
+          + Number(vs.trades || 0) + ' 笔'
+        : '最近 ' + vs.slots.length + ' 轮 · 成交 '
+          + Number(vs.trades || 0) + ' 笔 · <b>无逆模型</b>';
+    } else {
+      cmpNote.className = 'cmp-note zero';
+      cmpNote.textContent = '还没有决策记录';
+    }
+  }
+
+  // ---- 环头两个计数 ----
+  // act 2026-11-05 不再上环头：右栏的 24px「不做」+ 副标题已经表达，三份同一信息。
   const setTxt = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-  setTxt('featRegime', (ld && REGIME_TXT[ld.regime]) || '—');
-  setTxt('featPlan', (p && PLAN_TXT[p.plan]) || '—');
-  setTxt('featAge', ld && ld.ts ? relAge(nowS - Number(ld.ts)) : '—');
-  setTxt('featIv', (Number((a.cfg && a.cfg.interval_sec) || 0) || 60) + 's');
-  setTxt('fAct', ld ? (ld.act === true ? 'true' : (ld.act === false ? 'false' : '—')) : '—');
   const pend = Number(a.pending_reviews || 0);
   setTxt('fPend', pend ? pend + ' 笔' : '—');
 }
@@ -4879,7 +5010,7 @@ function openSetup(payload) {
   if (sel && !sel.options.length) {
     sel.innerHTML = (llmCfg.providers || []).map(p =>
       `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
-    if (llmCfg.provider) sel.value = llmCfg.provider;
+    if (llmCfg.entry || llmCfg.provider) sel.value = llmCfg.entry || llmCfg.provider;
   }
   $('setupModel').value = (payload && payload.config && payload.config.model)
     || (sel && sel.value && autoModel(sel.value)) || '';
@@ -4930,7 +5061,12 @@ async function saveSetup() {
   try {
     const r = await fetch('/api/setup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirm: true, provider: pid, key, model }),
+      // 向导里没有「思考」这一项：同一家就沿用当前模式，别因为补填 key
+      // 把深度思考悄悄关掉；换家则回默认（关）。
+      body: JSON.stringify({
+        confirm: true, provider: pid, key, model,
+        thinking: !!(llmCfg && llmCfg.thinking && pid === llmCfg.provider),
+      }),
     });
     const j = await r.json();
     if (j.ok) {
