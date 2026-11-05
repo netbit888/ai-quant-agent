@@ -372,6 +372,62 @@ class TestSystemFollowsCfg(unittest.TestCase):
         self.assertNotIn("{TP_MIN_USD}", text)
         self.assertNotIn("{MAX_HOLD_MIN}", text)
 
+    def test_entry_rhythm_and_gate_follow_cfg(self):
+        """节奏与闸门阈值也是面板/代码项，不能写死在 system 里。
+
+        `interval_sec` 是面板能改的：提示词原来写「60 秒后你会拿到新的 K 线」，
+        用户调成 30 秒就变成假话——模型会按 60 秒估下一次机会，多等一轮。
+        `min_edge` 写死 0.06 是同一类错位：默认值一改，提示词就在骗模型。
+        """
+        cfg = autotrade.Cfg(interval_sec=30, min_edge=0.1)
+        text = autotrade.system_for(autotrade.ENTRY_SYSTEM, cfg)
+        self.assertIn("30 秒后你会拿到新的 K 线", text)
+        self.assertIn("距离够 0.1（系统闸门）", text)
+        self.assertIn("不到 0.1 时系统仍会跳过", text)
+        self.assertNotIn("0.06", text)
+        self.assertNotIn("{INTERVAL_SEC}", text)
+        self.assertNotIn("{MIN_EDGE}", text)
+
+    def test_no_unrendered_placeholder_left(self):
+        """模板加占位符忘了在 system_for 里替换 → 模型看到的是 `{FOO}`。
+
+        这类错不报错、也不影响解析，只是让模型读到一句空白指令，最难发现。
+        """
+        cfg = autotrade.Cfg()
+        for name in ("ENTRY_SYSTEM", "EXIT_SYSTEM", "REVIEW_SYSTEM"):
+            text = autotrade.system_for(getattr(autotrade, name), cfg)
+            left = sorted(set(re.findall(r"\{[A-Z_]+\}", text)))
+            self.assertEqual(left, [], f"{name} 渲染后仍有占位符 {left}")
+
+    def test_entry_system_does_not_promise_cost_number(self):
+        """ignore_spread=True 时输入里没有成本金额，system 就不能说会给。
+
+        原来「输入格式」里写着「当前报价与来回成本」，而 prompt 里只有点差
+        点数——模型被承诺了一个不存在的字段。
+        """
+        self.assertNotIn("来回成本", autotrade.ENTRY_SYSTEM)
+        self.assertIn("不给成本金额", autotrade.ENTRY_SYSTEM)
+
+    def test_exit_system_tells_model_about_breakeven_sl(self):
+        """保本止损是模型看不见的第二条退出线，必须写进「自动规则」。
+
+        峰值到过 3.25 之后券商端 SL 被抬到开仓价，回落到开仓价就成交了、不问模型。
+        不告诉它，模型会把这个平仓读成"结构走完了"，而实际是"回到起点"——
+        复盘时给出的教训就是错的。
+
+        只给趋势单：震荡单的门槛本来就是 3.25，没有这条线。
+        """
+        cfg = autotrade.Cfg()
+        trend = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg, plan="trend")
+        self.assertIn("止损抬到开仓价", trend)
+        self.assertIn(f"{cfg.be_arm_usd:g}", trend)
+        range_ = autotrade.system_for(autotrade.EXIT_SYSTEM, cfg, plan="range")
+        self.assertNotIn("止损抬到开仓价", range_)
+        # 关掉开关时不能还留着这句话
+        off = autotrade.system_for(autotrade.EXIT_SYSTEM,
+                                   autotrade.Cfg(be_at_entry=False), plan="trend")
+        self.assertNotIn("止损抬到开仓价", off)
+
     def test_unknown_symbol_falls_back_to_code(self):
         text = autotrade.system_for(autotrade.ENTRY_SYSTEM,
                                     autotrade.Cfg(symbol="WHATEVER"))
