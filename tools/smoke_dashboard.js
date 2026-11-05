@@ -734,6 +734,15 @@ try {
   const noDupAct = src.indexOf('id="fAct"') < 0;
   console.log(`  环头不再重复 act ${noDupAct ? '✓' : '✗'}`);
   if (!noDupAct) failed = true;
+  // 「本轮判断」是「不做」的标签，必须紧贴在它前面。回到环头（卡片左上角）
+  // 就又变成标签离值 740px；两处都出现则是同一标题重复。
+  const sideBlock = src.slice(sideIdx, sideIdx + 900);
+  const labelIdx = sideBlock.indexOf('<span class="k">本轮判断</span>');
+  const wordIdx = sideBlock.indexOf('id="ringWord"');
+  const labelOk = labelIdx > 0 && wordIdx > labelIdx
+    && src.indexOf('class="t">本轮判断') < 0;
+  console.log(`  「本轮判断」紧跟「不做」且不再出现在环头 ${labelOk ? '✓' : '✗'}`);
+  if (!labelOk) failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);

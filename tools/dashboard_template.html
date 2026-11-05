@@ -214,16 +214,18 @@
   .ring.veto::before { background: var(--veto); }
   .ring-head { display: flex; align-items: center; gap: var(--sp2);
                margin-bottom: var(--sp2); min-width: 0; }
-  .ring-head .t { font-size: var(--fs-2); color: var(--muted); font-weight: 600;
-                  white-space: nowrap; }
+  /* 环头不再放标题：「本轮判断」是「不做」的标签，不是卡片标题。原来它在
+     左上角、结论在右栏，横着隔 740px、竖着差 26px，中间还夹着信号条，
+     标签和值分家。现在标题下移到右栏，正好排在「不做」前面；环头只剩
+     闸门/待复盘/时刻，meta 靠左补位，时刻仍靠右。 */
   .ring-head .ts {
-    margin-left: var(--sp3); font-size: var(--fs-1); color: var(--dim);
+    margin-left: auto; font-size: var(--fs-1); color: var(--dim);
     font-family: var(--mono); white-space: nowrap;
   }
-  /* act / 闸门 / 待复盘：从环底那一行并到这里。三小段都不换行，
+  /* 闸门 / 待复盘：从环底那一行并到这里。两小段都不换行，
      窄一点就整体收窄（不折行，折行会顶高环头）。 */
   .ring-meta {
-    display: flex; gap: var(--sp3); margin-left: auto; min-width: 0;
+    display: flex; gap: var(--sp3); min-width: 0;
     font-size: var(--fs-1); color: var(--dim); white-space: nowrap; overflow: hidden;
   }
   .ring-meta b { color: var(--muted); font-weight: 500; font-family: var(--mono); }
@@ -340,6 +342,10 @@
     margin-top: var(--sp2); min-width: 0;
   }
   .side-kv .k { font-size: var(--fs-1); color: var(--dim); white-space: nowrap; }
+  /* 「本轮判断 不做」是第一行，标签和值同一基线；后续两行才有上间距。
+     必须限定 .ring-side 的直接子元素，否则 .ctx-state 里的「市场状态」
+     也会命中 :first-child 而丢掉上间距。 */
+  .ring-side > .side-kv:first-child { margin-top: 0; }
   .side-kv .v {
     font-size: var(--fs-9); line-height: 1.15; font-weight: 700;
     letter-spacing: -.3px; color: var(--text);
@@ -2101,11 +2107,10 @@
            原话理由 + 建议胶囊 + 等待锚点。 -->
       <div class="ring" id="ring">
         <div class="ring-head">
-          <span class="t">本轮判断</span>
           <span class="ring-tag hidden" id="ringTag">—</span>
           <!-- 闸门 / 待复盘：原来是环底单独一行（27px + 8px 内边距），并到环头。
-               act 2026-11-05 从环头删掉：右栏已经有 24px 的「不做」加一行
-               「模型主动放弃」副标题，环头再来一个 act false 就是同一信息第三份。 -->
+               标题「本轮判断」2026-11-05 下移到右栏、紧贴结论「不做」；
+               act 也不在环头：右栏 24px 的「不做」加副标题已经是两份。 -->
           <span class="ring-meta" title="闸门 = 程序闸门是否放行；待复盘 = 平仓后还没复盘的笔数">
             <span>闸门 <b id="fGate">—</b></span>
             <span>待复盘 <b id="fPend">—</b></span>
@@ -2155,12 +2160,16 @@
               </div>
             </div>
           </div>
-          <!-- 右栏 = 字：纵向结论列。顺序是「先看结论、再看依据」：
-               不做 → 市场状态 → 当前打法 → 参数。三个值都是 --fs-9，
-               靠 11px 标签分层，读作「市场状态：震荡市」。
+          <!-- 右栏 = 字：纵向结论列。三行同一节奏，都是「11px 标签 + 24px 值」：
+               本轮判断：不做 → 市场状态：震荡市 → 当前打法：低买高卖 → 参数。
+               标题跟着值走：原来「本轮判断」在卡片左上角，离结论 740px，
+               读的时候标签和值接不上。
                打法由后端按 regime + cfg 现算，空仓也有具体文案，前端不拼口径。 -->
           <div class="ring-side" id="ringSide">
-            <div class="ring-act hold" id="ringAct"><span id="ringWord">—</span><small id="ringActSub">还没跑过</small></div>
+            <div class="side-kv">
+              <span class="k">本轮判断</span>
+              <div class="ring-act hold" id="ringAct"><span id="ringWord">—</span><small id="ringActSub">还没跑过</small></div>
+            </div>
             <div class="ctx-state" id="ctxState">
               <div class="side-kv">
                 <span class="k">市场状态</span><span class="v" id="ctxRegime">—</span>
