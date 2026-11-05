@@ -2,7 +2,12 @@
 # DeepSeek / 智谱都走 OpenAI 兼容接口；MetaTrader5 和 pywebview 仅 Windows 需要
 openai==3.35.1
 MetaTrader5==5.0.6231 ; sys_platform == "win32"
-numpy==2.5.4
+# numpy 已删（2026-11-05）：全项目 0 处 import，指标是纯 Python 实现的
+# （backtest/indicators.py 开头就写着"无 numpy 依赖也可用"）。它当初大概是
+# 从别的项目抄过来的，代价是 venv 里 34MB + 每个新环境多装一次。
+# 要加回来请先有代码真的用它——依赖清单里不该有"以防万一"。
+# Pillow **只被** tools/make_icon.py（做图标的构建脚本）用，不进运行依赖：
+# 缺它就重做不了图标，但不影响程序跑起来。
 # 原生窗口（Edge WebView2 后端）。打包才需要，源码态 `--web` 模式可以不装，
 # 但 `tools/desktop.py` 是延迟 import，装了才能用 --native 调试窗口。
 pywebview==6.2.1 ; sys_platform == "win32"

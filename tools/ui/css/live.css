@@ -1,0 +1,211 @@
+  /* ---------------- 实盘视图 ---------------- */
+  /* 账户条：**不再做成 hero**。原来它有渐变 + 强阴影 + 19px 数字，
+     和 AI 交易员卡片抢同一屏的头把交椅——可它是静态的，几分钟才变一次。
+     现在它和普通卡片同一层级，让 l1 的实时区成为首屏唯一"抬起来"的面。 */
+  .acct {
+    display: flex; align-items: center; gap: var(--sp4); flex-wrap: wrap;
+    padding: var(--sp3) var(--sp4); margin-bottom: var(--sp4);
+    background: var(--surf2);
+    border: 1px solid var(--border); border-radius: var(--r2);
+  }
+  .acct .who { display: flex; flex-direction: column; gap: 2px; }
+  .acct .who b { font-size: var(--fs-6); letter-spacing: .3px; }
+  .acct .who span { font-size: var(--fs-1); color: var(--muted); }
+  .acct .figs { display: flex; gap: var(--sp4) var(--sp5); flex-wrap: wrap; margin-left: auto; }
+  /* 数字格**绝不允许被压缩**（flex: 0 0 auto + nowrap）。
+     账户数字是这一条里唯一有意义的内容，`min-width: 68px` 只是下限、不是
+     最小内容宽：金额变长（"1453.00 USC"）以后，flex 会把每格压到 68px 以内，
+     文字溢出格子，于是标签被挤成竖排（"余 额"）、相邻数字叠在一起——看着像
+     渲染坏了，其实是宽度预算没有留出来。空间不够就让左边的账户名/切换框
+     去省略号，数字一位都不许省。 */
+  .acct .fig { text-align: right; min-width: 68px; flex: 0 0 auto; }
+  .acct .fig i { display: block; font-style: normal; font-size: var(--fs-label); color: var(--dim);
+                 letter-spacing: .4px; white-space: nowrap; }
+  .acct .fig b { font-size: var(--fs-7); font-family: var(--mono); font-weight: 700;
+                 white-space: nowrap; }
+
+  .badge-mode {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 9px; border-radius: var(--r-pill); font-size: var(--fs-1); font-weight: 700; letter-spacing: .6px;
+  }
+  .badge-real { background: rgba(255,77,79,.15); color: #ff7b7d; border: 1px solid rgba(255,77,79,.35); }
+  .badge-demo { background: rgba(74,158,255,.15); color: var(--info-lit); border: 1px solid rgba(74,158,255,.35); }
+
+  /* 账户切换：在 MT5 终端里切，这里只负责选择看哪个账户的归档数据 */
+  .acct-pick { display: flex; align-items: center; gap: 7px; }
+  .acct-pick select {
+    font-family: var(--mono); font-size: var(--fs-2); color: var(--text);
+    background: rgba(255,255,255,.045); border: 1px solid var(--border-hi);
+    border-radius: var(--r-md); padding: 6px 10px; cursor: pointer; outline: none;
+    max-width: 230px;
+  }
+  .acct-pick select:hover { border-color: var(--info); background: rgba(74,158,255,.08); }
+  /* 弹出项配色已收敛到全局 select option（2026-11-05），这里不再重复。 */
+  .badge-off {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: var(--r-pill);
+    font-size: var(--fs-1); font-weight: 700; letter-spacing: .5px;
+    background: rgba(240,180,41,.14); color: var(--warn); border: 1px solid rgba(240,180,41,.34);
+  }
+  .badge-live {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: var(--r-pill);
+    font-size: var(--fs-1); font-weight: 700; letter-spacing: .5px;
+    background: rgba(46,204,113,.13); color: #47d68a; border: 1px solid rgba(46,204,113,.32);
+  }
+  .acct-note { font-size: var(--fs-1); color: var(--dim); margin: -6px 0 12px; padding: 0 2px; }
+  /* 空备注不占位。这一行 17px + 上下边距 23px，只有极少数时候有内容，
+     却常年吃掉 40px 高度——做单台就是这么被一口一口吃没的。 */
+  .acct-note:empty { display: none; }
+
+  /* ---- 做单台 = 一屏装完的驾驶舱 ----
+     账户条在别的页是"看一眼就走"，在做单台是常驻，必须让位给决策环与持仓面板。
+     压成一行（标签和数字并排）、去掉换行。切回复盘台/设置舱立刻恢复舒展版，
+     所以这些规则全部挂在 body[data-sub="desk"] 下，不改动别处。
+
+     1200 是这条规则的生死线：窗口再窄，五个数字 + 账户名 + 切换框一行放不下，
+     硬压的结果是每个标签被挤成竖排（"余 额""可 用 保 证 金"）。窄窗口本来
+     就装不下一页，这时候宁可用原来的两行版，也不要把数字挤成一条麻花。 */
+  /* 这一行是"切换账户去 MT5 终端"的常驻提示，做单台不需要看第二遍 */
+  body[data-sub="desk"] .acct-note { display: none; }
+  /* 做单台把上下留白收到最小（左右不动：横向留白一改，切回来整页会横跳）。 */
+  body[data-sub="desk"] { padding: 10px 26px 12px; }
+
+  @media (min-width: 1200px) {
+    body[data-sub="desk"] .acct {
+      padding: 4px var(--sp3); margin-bottom: var(--sp2);
+      gap: var(--sp2) var(--sp3); flex-wrap: nowrap;
+    }
+    body[data-sub="desk"] .acct .who {
+      flex-direction: row; align-items: baseline; gap: var(--sp2);
+      flex: 0 0 auto; white-space: nowrap;
+    }
+    body[data-sub="desk"] .acct .who b { font-size: var(--fs-5); }
+    body[data-sub="desk"] .acct .figs {
+      flex-wrap: nowrap; gap: var(--sp2) var(--sp3); min-width: 0; flex: 0 1 auto;
+    }
+    body[data-sub="desk"] .acct .fig {
+      display: flex; align-items: baseline; gap: 5px;
+      min-width: 0; text-align: left;
+    }
+    body[data-sub="desk"] .acct .fig i { display: block; }
+    body[data-sub="desk"] .acct .fig b { font-size: var(--fs-5); white-space: nowrap; }
+    body[data-sub="desk"] .acct .badge-mode,
+    body[data-sub="desk"] .acct .badge-live { flex: 0 0 auto; white-space: nowrap; }
+    /* 切换框是这一行里唯一可以牺牲的东西（内容重复：登录号 + 服务器在左边
+       已经写过一遍）。数字格占满后剩下的空间归它，不够就省略号，绝不反过来
+       压数字——2026-11-02 就是反过来压，4 个数字全叠在一起。 */
+    body[data-sub="desk"] .acct .acct-pick { flex: 0 1 auto; min-width: 0; }
+    body[data-sub="desk"] .acct-pick select { padding: 3px 8px; font-size: var(--fs-1);
+                                              max-width: 170px; min-width: 0;
+                                              text-overflow: ellipsis; }
+  }
+  /* 净入金和杠杆在做单时一分钟也不会变一次（净值/可用才是盯的），窄窗口先让
+     它们退场——这是**让位，不是被裁掉**：切到复盘台/设置舱照样显示五格。
+     阈值为什么是 1400（2026-11-05 实测复核过，别再往下调）：
+     余额 1456.20 USC 这组数下五格占 493px，左边账户名/徽章/切换框共 640px。
+     1200 差 1 格、1340 仍差 1 格、1350 才刚好、1400 余 60px。
+     1350~1399 那段看着能放下，但金额每多一位就吃 8px 左右——余额变五位数
+     就会静默裁掉最后一格。**裁掉比藏起来更糟**：藏是明示的（切个 tab 就有），
+     裁是无声的，2026-11-02 就是在这里压出过「4 个数字叠在一起」。 */
+  @media (min-width: 1200px) and (max-width: 1399px) {
+    body[data-sub="desk"] #acctDep, body[data-sub="desk"] #acctLev { display: none; }
+    body[data-sub="desk"] .acct .fig:has(#acctDep),
+    body[data-sub="desk"] .acct .fig:has(#acctLev) { display: none; }
+  }
+
+  .flag { display: flex; gap: 10px; padding: 11px 13px; border-radius: var(--r-md); margin-bottom: 8px;
+          border-left: 3px solid var(--border-hi); background: rgba(255,255,255,.017); }
+  .flag.high { border-left-color: var(--bad); background: rgba(255,77,79,.06); }
+  .flag.mid  { border-left-color: var(--warn); background: rgba(240,180,41,.055); }
+  .flag.ok   { border-left-color: var(--good); background: rgba(46,204,113,.05); }
+  .flag .t { font-weight: 600; font-size: var(--fs-4); }
+  .flag .d { font-size: var(--fs-2); color: var(--muted); margin-top: 3px; }
+
+  .advice-head {
+    display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+    padding: 14px 16px; border-radius: var(--r-md); margin-bottom: 14px;
+    background: linear-gradient(135deg, rgba(74,158,255,.11), rgba(181,140,255,.07));
+    border: 1px solid rgba(74,158,255,.22);
+  }
+  .advice-head .hl { font-size: var(--fs-6); font-weight: 700; line-height: 1.45; flex: 1 1 340px; }
+  .verdict { padding: 4px 12px; border-radius: var(--r-pill); font-size: var(--fs-2); font-weight: 700; white-space: nowrap; }
+  .verdict.bad  { background: rgba(255,77,79,.18); color: var(--bad-lit); border: 1px solid rgba(255,77,79,.4); }
+  .verdict.warn { background: rgba(240,180,41,.16); color: #f6c659; border: 1px solid rgba(240,180,41,.38); }
+  .verdict.good { background: rgba(46,204,113,.16); color: var(--good-lit); border: 1px solid rgba(46,204,113,.38); }
+
+  .prob { padding: 12px 14px; border-radius: var(--r-md); margin-bottom: 9px;
+          background: rgba(255,255,255,.02); border: 1px solid var(--border); }
+  .prob .ph { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .prob .sev { font-size: var(--fs-1); font-weight: 700; padding: 2px 7px; border-radius: var(--r-xs); }
+  .sev.高 { background: rgba(255,77,79,.2); color: var(--bad-lit); }
+  .sev.中 { background: rgba(240,180,41,.2); color: #f6c659; }
+  .sev.低 { background: rgba(125,143,163,.2); color: var(--muted); }
+  .prob .pt { font-weight: 600; font-size: var(--fs-4); }
+  .prob dl { margin: 0; display: grid; grid-template-columns: 52px 1fr; gap: 5px 10px; font-size: var(--fs-2); }
+  .prob dt { color: var(--dim); }
+  .prob dd { margin: 0; color: var(--muted); line-height: 1.5; }
+
+  .act { display: flex; gap: 12px; padding: 12px 14px; border-radius: var(--r-md); margin-bottom: 9px;
+         background: rgba(74,158,255,.045); border: 1px solid rgba(74,158,255,.16); }
+  .act .n { flex: 0 0 24px; height: 24px; border-radius: var(--r-round); display: grid; place-items: center;
+            background: linear-gradient(135deg, var(--info), #b58cff); color: #05080d;
+            font-weight: 800; font-size: var(--fs-2); font-family: var(--mono); }
+  .act .body { flex: 1; }
+  .act .a { font-weight: 600; font-size: var(--fs-4); line-height: 1.5; }
+  .act .w { font-size: var(--fs-2); color: var(--muted); margin-top: 5px; }
+  .act .v { font-size: var(--fs-2); color: var(--dim); margin-top: 4px; }
+  .act .v b { color: var(--info-lit); font-weight: 600; }
+
+  .note-box { font-size: var(--fs-2); color: var(--muted); line-height: 1.6; padding: 11px 13px;
+              border-radius: var(--r-md); background: rgba(255,255,255,.02); border: 1px dashed var(--border-hi); }
+
+  .mini { font-size: var(--fs-2); color: var(--dim); }
+  .btn-ghost {
+    background: rgba(74,158,255,.1); color: var(--info-lit); border: 1px solid rgba(74,158,255,.3);
+    padding: 5px 12px; border-radius: var(--r-md); font-size: var(--fs-2); cursor: pointer; font-family: inherit;
+    transition: .15s;
+  }
+  .btn-ghost:hover { background: rgba(74,158,255,.2); border-color: var(--info); }
+  .btn-ghost:disabled { opacity: .45; cursor: default; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+               flex-wrap: wrap; margin-bottom: 12px; }
+  .card-head h2 { margin: 0; }
+  .pos-long { color: var(--up); }
+  .pos-short { color: var(--down); }
+
+  /* ---------------- 近期质量 ---------------- */
+  .win-tabs { display: inline-flex; gap: 3px; padding: 3px; border-radius: var(--r-md);
+              background: rgba(255,255,255,.035); border: 1px solid var(--border); }
+  .win-tab {
+    background: none; border: 0; color: var(--muted); font: inherit; font-size: var(--fs-2);
+    padding: 4px 11px; border-radius: var(--r-sm); cursor: pointer; transition: .15s; white-space: nowrap;
+  }
+  .win-tab:hover { color: var(--text); }
+  .win-tab.active {
+    color: #dceaff; background: linear-gradient(135deg, rgba(74,158,255,.28), rgba(181,140,255,.18));
+    box-shadow: 0 0 0 1px rgba(74,158,255,.35) inset, 0 2px 10px -4px rgba(74,158,255,.7);
+  }
+  .win-tab .cnt { font-size: var(--fs-1); opacity: .6; margin-left: 4px; font-family: var(--mono); }
+
+  .warn-strip {
+    display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px;
+    padding: 10px 13px; border-radius: var(--r-md); font-size: var(--fs-2); line-height: 1.5;
+    background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.28); color: var(--gold-lit);
+  }
+  .warn-strip b { color: #f6d78a; }
+
+  .verdict-chip { font-size: var(--fs-1); font-weight: 700; padding: 3px 9px; border-radius: var(--r-pill); }
+  .vc-better { background: rgba(46,204,113,.18); color: var(--good-lit); }
+  .vc-worse  { background: rgba(255,77,79,.18); color: var(--bad-lit); }
+  .vc-flat   { background: rgba(125,143,163,.18); color: #9fb0c2; }
+  .vc-low_sample, .vc-no_baseline, .vc-no_data { background: rgba(240,180,41,.15); color: var(--gold-lit); }
+
+  .qgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .qcell { padding: 12px 14px; border-radius: var(--r-md); background: rgba(255,255,255,.022);
+           border: 1px solid var(--border); }
+  .qcell i { display: block; font-style: normal; font-size: var(--fs-1); color: var(--dim); letter-spacing: .5px; }
+  .qcell b { display: block; font-size: var(--fs-8); font-family: var(--mono); font-weight: 700; margin-top: 3px; }
+  .qcell s { display: block; text-decoration: none; font-size: var(--fs-1); color: var(--muted); margin-top: 3px; }
+  .delta-up { color: var(--good-lit); }
+  .delta-down { color: var(--bad-lit); }
+  h3.sub { font-size: var(--fs-2); color: var(--muted); margin: 0 0 9px; font-weight: 600; letter-spacing: .5px; }
+

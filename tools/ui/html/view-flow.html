@@ -1,0 +1,36 @@
+  <div id="live-flow" class="live-pane hidden">
+    <div class="card l1" id="flowCard">
+    <!-- ============ 决策流 ============
+         11 列压成 6 列。原来「来源 / 开仓理由 / 平仓理由 / 详情」占 4 列，
+         1280 宽下必须横向滚才看得到盈亏。现在一条理由列（最多两行，
+         各自带 title 全文），来源并进动作徽章的 title。
+         跳过行默认折叠成底部一条带子——60 秒一轮意味着一小时 60 条记录，
+         其中绝大多数是「跳过/继续持有」，它们会把真正的平仓行冲掉。 -->
+    <div class="stream">
+      <div class="stream-body">
+        <table>
+          <thead><tr>
+            <th class="tl">时刻</th><th class="tl">动作</th><th class="tl">方向</th>
+            <th>p_up</th><th>盈亏</th><th class="tl">理由</th>
+          </tr></thead>
+          <tbody id="rowsAuto"></tbody>
+        </table>
+      </div>
+      <!-- 页脚一条带子兼三件事：标题、条数、跳过行的开关。
+           单独一行表头要 22px，而这两行的信息量不足以占掉一行——
+           去掉之后决策流能多显示一整行。 -->
+      <div class="stream-foot">
+        <span class="ttl">决策流</span>
+        <span class="cnt" id="atRowsHint"></span>
+        <span class="bar"></span>
+        <span id="atSkipBand">
+          跳过 · 继续持有 <b id="atSkipCnt">0 次</b>
+        </span>
+        <!-- 过滤开关本体保留（renderAutoTrade 读它的 checked），只是不再单独占位 -->
+        <input type="checkbox" id="atShowSkip" class="sr-only">
+        <button class="btn-ghost" id="atSkipShow">看全量</button>
+      </div>
+    </div>
+    </div>
+  </div><!-- /#live-flow -->
+

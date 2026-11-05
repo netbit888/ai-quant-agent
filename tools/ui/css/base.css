@@ -1,0 +1,167 @@
+  :root {
+    /* 原生控件（<select> 的弹出列表、滚动条、number spinner、日期面板）按
+       深色绘制。缺这一行，弹层会用系统浅色主题画成白底——而 option 的文字色
+       继承的是深色主题的浅色字，结果是**白底白字**。2026-11-05 实机截图确认。
+       页面滚动条另有 ::-webkit-scrollbar 自定义，不受它影响。 */
+    color-scheme: dark;
+    --bg: #070a0f;
+    --bg2: #0b111a;
+    --panel: #0f151e;
+    --panel2: #141c27;
+    --border: #1e2a38;
+    --border-hi: #2a3a4d;
+    --text: #e8eef6;
+    --muted: #7d8fa3;
+    /* 说明文字/空状态/副标（dim=辅助说明，muted=次级正文）。
+       演变：#4d5c6e（对底只有 2.2:1）→ #6d7f95 → 现在 #8b9cb0。
+       注：中间那版的注释写"≈4.7:1"是**算错了**——那是相对 --panel 的值，
+       而 .mini 几乎都出现在 .card.l1 的底色 rgb(22,31,44) 上，实测只有 4.02:1。
+       现值对 l1 底约 5.6:1、对 --panel 约 6.3:1（tests/test_ui_tokens.py 会算）。
+       代价：与 --muted 的亮度差变小，层级改由字号和位置承担（靠 --fs-* 分档）。 */
+    --dim: #8b9cb0;
+    /* 涨跌方向：绿涨红跌（用户指定，与 A 股默认的红涨绿跌相反） */
+    --up: #2ecc71;
+    --down: #ff4d4f;
+    /* 语义状态：与涨跌无关 —— 好=绿、坏=红。不要把这两组混用。 */
+    --good: #2ecc71;
+    --bad: #ff4d4f;
+    --warn: #f0b429;
+    --info: #4a9eff;
+    /* 亮化变体：正文色在深底上不够跳，但直接拿 --info/--bad 当文字又太沉，
+       这三档是给"文字/小面积强调"用的。值取自原来散落各处的裸 hex。 */
+    --info-lit: #8fc4ff;
+    --bad-lit: #ff8b8d;
+    --good-lit: #6ee7a0;
+    --gold-lit: #f0c674;
+    /* --accent 之前没定义，三处使用全靠 fallback 兜底——等于隐式变量，
+       换肤时一定会漏。补成显式定义，使用点的 fallback 留着无害。 */
+    --accent: #4a9eff;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    /* ---- 间距：4pt 网格。原来 9/10/11/12/13/14/15/17px 混用，
+       相邻两个卡片的间距全靠手感，扫起来没有节奏。 ---- */
+    --sp1: 4px;  --sp2: 8px;  --sp3: 12px;
+    --sp4: 16px; --sp5: 20px; --sp6: 24px;
+    /* ---- 字号：十档（6 档常规文本 + 4 档展示数字）。
+       原来 17 档（10/10.5/11/11.5/12/12.5/13/13.5/14/15/15.5/16/20/22/24/42/.95em），
+       相邻半档肉眼分不出，却让"全局调一次字号"变成改 115 处硬编码。
+       收敛规则：所有 <11px 一律抬到 --fs-1（11px 是深色底可读下限）。 ---- */
+    --fs-1: 11px;    /* 微标签 / 表头 / 单位 / 徽章 */
+    --fs-2: 12px;    /* 次级说明 / 卡片标题 */
+    --fs-3: 12.5px;  /* 表单行 / 明细行 */
+    --fs-4: 13px;    /* 正文 / 表格 */
+    --fs-5: 14px;    /* 基线（body 默认，别在别处再写一遍） */
+    --fs-6: 15px;    /* 小标题 */
+    --fs-7: 16px;    /* 账户数字 */
+    --fs-8: 22px;    /* 展示数字（原 20/22 合并） */
+    --fs-9: 24px;    /* 展示数字·大 */
+    --fs-10: 42px;   /* 首屏主数字 */
+    /* 旧名保留为别名：历史引用不会断，新代码请直接用 --fs-* */
+    --fs-label: var(--fs-1);
+    --fs-body: var(--fs-4);
+    --fs-num: var(--fs-8);
+    --fs-num-lg: var(--fs-9);
+    /* ---- 圆角：四档 + 两个语义值。原来 14 种取值（含 2/5/9/14/16）。
+       7px→8px、11px→12px 是这次唯一有视觉差的映射，卡片因此整齐。 ---- */
+    --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 12px;
+    --r-pill: 999px; --r-round: 50%;
+    --r1: var(--r-md); --r2: var(--r-lg);   /* 旧名别名 */
+    /* 控件最小高度：原来按钮 27px、下拉 24px、单选命中区 13px。
+       桌面场景不要求 44px，但 28px 是"点得准"的下限。 */
+    --ctrl-h: 32px;
+    /* 层级强度：三档卡片的背景差。差一点点就够，不需要描边区分。 */
+    --surf1: rgba(22,31,44,.96);
+    --surf2: rgba(16,23,33,.92);
+    /* ---- v2（做单台重构）新增两个，全站只此一处定义 ----
+       决策环比 card.l1 再深一档：它是首屏视觉锚，要"陷下去"而不是"浮起来"。
+       否决留痕直接复用 --info，不新建蓝——新建就会有第二个蓝、第三个蓝。 */
+    --ring: #0a1017;
+    --ring-hi: #16202c;
+    --veto: var(--info);
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100%; }
+  body {
+    margin: 0; padding: 16px 26px 16px;
+    background:
+      radial-gradient(1200px 600px at 20% -10%, #101d2e 0%, transparent 60%),
+      radial-gradient(900px 500px at 90% 0%, #1a1220 0%, transparent 55%),
+      linear-gradient(180deg, var(--bg2) 0%, var(--bg) 100%);
+    background-attachment: fixed;
+    color: var(--text);
+    font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    /* 数字一律等宽：表格里 1 和 8 宽度不同会让整列数字的位数对不齐，
+       扫一眼分不出 +3.33 和 +13.33。中文不受影响。 */
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(rgba(120,160,200,.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120,160,200,.028) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+    mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+  }
+  body > * { position: relative; z-index: 1; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* 页脚：程序名 / 版本 / 检查更新。
+     这三样原来占着页面最顶上一整条带边框、带渐变的 header——而交易时
+     一眼都不看它们，却每天要为此交出一条 50px 高的视觉重量。改成网站
+     页脚的做法：最底下、一条淡分隔线、11px 小字、无框。
+     顶部让给状态带，第一眼看到的就是「在跑吗 / 有没有仓 / 现在多少」。 */
+  .foot {
+    display: flex; align-items: center; gap: 18px;
+    margin: var(--sp3) 0 0; padding: 11px 2px 0;
+    border-top: 1px solid var(--border);
+    font-size: var(--fs-1); color: var(--dim);
+  }
+  .foot-brand { font-weight: 600; letter-spacing: 1.8px; color: var(--muted); }
+  .foot-ver { font-family: var(--mono); }
+  .foot-ver b { font-weight: 600; color: var(--muted); }
+  .foot-link {
+    background: none; border: 0; padding: 0; min-height: 0;
+    font: inherit; color: var(--muted); cursor: pointer;
+    text-decoration: underline; text-underline-offset: 3px;
+    text-decoration-color: var(--border-hi);
+  }
+  .foot-link:hover { color: var(--text); text-decoration-color: currentColor; }
+  .foot-link:disabled { opacity: .6; cursor: default; }
+  .dot { width: 8px; height: 8px; border-radius: var(--r-round); background: var(--dim); transition: .3s; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(46,204,113,.6), 0 0 10px rgba(46,204,113,.8); }
+    70%  { box-shadow: 0 0 0 8px rgba(46,204,113,0), 0 0 10px rgba(46,204,113,.4); }
+    100% { box-shadow: 0 0 0 0 rgba(46,204,113,0),   0 0 10px rgba(46,204,113,.8); }
+  }
+
+  /* ---- 实盘视图内部三态：做单台 / 复盘台 / 设置舱 ----
+     S1 只做结构分层：卡片原样搬，不动任何 id / class / 事件绑定。
+     状态带（sticky）与账户条刻意留在 #view-live 顶层——包进 pane 会改变
+     sticky 的包含块，吸附立刻失效。pane 只装普通卡片。 */
+  .live-subtabs {
+    display: flex; gap: var(--sp1); margin: 0; padding: 3px;
+    background: rgba(255,255,255,.02); border: 1px solid var(--border);
+    border-radius: var(--r1); width: fit-content;
+  }
+  .live-sub {
+    padding: 4px 12px; border-radius: var(--r-md); cursor: pointer;
+    font-size: var(--fs-3); background: transparent; color: var(--muted);
+    border: 0; transition: .18s ease; font-weight: 500;
+  }
+  .live-sub:hover { color: var(--text); }
+  .live-sub.active {
+    color: #fff; background: rgba(74,158,255,.16);
+    box-shadow: 0 0 0 1px rgba(74,158,255,.3) inset;
+  }
+  .live-sub .cnt {
+    margin-left: 6px; font-size: var(--fs-1); color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  /* .card / .kpi 带 animation: rise，元素从 display:none 转可见时会**重播**。
+     三态是高频切换，25 张卡每次切过去闪一遍既费性能也晃眼——只让做单台
+     （首屏）保留进场动效，复盘台/设置舱直接落位。 */
+  #live-review .card, #live-review .kpi,
+  #live-setup .card, #live-setup .kpi,
+  #live-flow .card, #live-flow .kpi { animation: none; }
+

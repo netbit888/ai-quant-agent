@@ -1,0 +1,123 @@
+  /* ---- 决策流独立页 ----
+     整块从做单台卡片底部搬出来（2026-11-04）。.stream 原来靠 border-top
+     与上方的决策环分隔，独立成页后上面没有东西了，那条线要去掉；
+     卡片撑满视口，列表自己内部滚（和它在做单台时一样）。 */
+  #live-flow > .card.l1 {
+    display: flex; flex-direction: column;
+    padding: var(--sp3) var(--sp4); margin-top: var(--sp2);
+  }
+  #live-flow .stream { border-top: 0; margin-top: 0; padding-top: 0; }
+
+  /* ---- 决策流：11 列压成 6 列 ----
+     原来 11 列里「来源 / 开仓理由 / 平仓理由 / 详情」占了 4 列，1280 宽下
+     必须横向滚才看得到盈亏。现在一条理由列（最多两行，各自带 title 全文）。 */
+  .stream {
+    margin-top: var(--sp2); padding-top: var(--sp2);
+    border-top: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    flex: 1 1 auto;
+    /* 真·下限：表头 22 + 三行（40/24 混排）+ 页脚 24 ≈ 168。
+       原来是 88px，屏幕一矮就被压成 56px——只剩表头加半行，等于没有。
+       空间不够时宁可让整页滚，也不把这个区压成一条缝。 */
+    min-height: 168px;
+  }
+  /* 卡片本身变成 flex 列，max-height 由 fitDesk() 按实际可用高度写内联值。
+     决策流搬走之后，卡片里只剩决策环 + 持仓面板：这两块按内容定高只有 245px，
+     而卡片撑满视口有 ~480px，多出来的高度必须由它们自己吸收——所以 at-grid
+     从 flex:none 改成 flex:1。网格项本身是 stretch，两栏跟着等高。 */
+  #live-desk > .card.l1 {
+    display: flex; flex-direction: column;
+    padding: var(--sp3) var(--sp4) var(--sp3); margin-top: var(--sp2);
+  }
+  #live-desk .at-grid { flex: 1 1 auto; min-height: 0; }
+  /* 上下分栏之后这两块都是整幅宽度，原来为「半宽」定的尺寸全显得单薄：
+     22px 的判断条拉成 1000px 就像一条细装饰线，直方图 30px 也压不住底部。
+     加高它们同时把「理由 → 直方图」之间那段空档吃掉。 */
+  #live-desk .put-track { height: 36px; }
+  #live-desk .cmp-cell { height: 14px; }
+  #live-desk .r-track { height: 30px; }
+  /* 面板内部只有 5 个区块，撑高后不能让空白全堆在闸门灯下面：
+     按原有区块均匀铺开。**只调间距，不动内容**——加东西属于另一件事。 */
+  #live-desk .pos-panel { justify-content: space-between; }
+
+  /* ---- 矮窗口紧凑排版（.tight 由 fitPane 实测后挂到 #live-desk 上）----
+     1120×720 是窗口允许的最小尺寸（desktop.py 的 min_size），这一档要把
+     卡片内外边距和轨道高度一起压下来才装得下。
+     行高不再由 .tight 改：.at-grid 已经是 auto / 1fr（见文件上半段），
+     宽屏的富余高度统一进持仓面板，环不再被拉出空洞。 */
+  #live-desk.tight > .card.l1 { padding-top: var(--sp2); padding-bottom: var(--sp2); }
+  #live-desk.tight #ring { padding: 10px 14px; }
+  #live-desk.tight .pos-panel { padding: 10px 14px; }
+  #live-desk.tight .put-track { height: 28px; }
+  /* 矮窗口：左图右字保住三个大字和参数行（打法参数不能被省掉），只压色块高度。 */
+  #live-desk.tight .cmp-cell { height: 10px; }
+  /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
+     （表头 22px + 过滤条），决策流因此少显示整整一行。 */
+  .stream-foot {
+    display: flex; align-items: center; gap: var(--sp2);
+    margin-top: var(--sp1); padding: 2px var(--sp2);
+    border-top: 1px dashed var(--border);
+    font-size: var(--fs-1); color: var(--dim);
+  }
+  .stream-foot .ttl { font-size: var(--fs-2); color: var(--muted); font-weight: 600; }
+  .stream-foot .cnt { font-variant-numeric: tabular-nums; }
+  .stream-foot .bar {
+    flex: 1; height: 2px;
+    background: repeating-linear-gradient(90deg, var(--border-hi) 0 6px, transparent 6px 11px);
+  }
+  .stream-foot b { color: var(--muted); font-family: var(--mono); font-weight: 600; }
+  .stream-foot .btn-ghost { margin: 0; padding: 0 8px; font-size: var(--fs-1);
+                            line-height: 1.5; min-height: 0; }
+  /* 只给屏幕阅读器/JS 用的复选框：不占位、不可见，但仍然可被 .checked 读到 */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+  /* 做单台按「撑满剩余视口」布局：页面本身不滚，决策流自己滚。
+     写死高度试过两次都不对——204px 在 1120×720 下把列表压成 1 行，
+     clamp() 又会随视口长高而长高，永远比视口多出 190px。
+     真正的剩余高度只能由 JS 量（卡片顶部上方有 sticky 带、账户条，
+     窄窗口下账户条还会折行，任何 calc() 常量都会算错）。 */
+  .stream-body {
+    overflow-y: auto; overflow-x: hidden;
+    flex: 1 1 auto; min-height: 0; max-height: none;
+    /* 底边淡出：滚动区最后一行常被切一半，看着像布局坏了。淡一下既是遮丑，
+       也是「下面还有」的信号。（mask 里用黑色不等于渲染成黑色，只是透明度通道） */
+    -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,1) calc(100% - 12px), rgba(0,0,0,0) 100%);
+    mask-image: linear-gradient(180deg, rgba(0,0,0,1) calc(100% - 12px), rgba(0,0,0,0) 100%);
+  }
+  .stream table { font-size: var(--fs-3); }
+  .stream th, .stream td { padding: 2px var(--sp2); }
+  .stream th:first-child, .stream td:first-child { padding-left: 2px; }
+  /* .tl = 文本列左对齐。原来是 .stream 专属，结果设置舱那张闸门表的
+     「作用」一列整段右对齐，长句子读起来眼睛要倒着走。提成全局工具类。 */
+  td.tl, th.tl { text-align: left; }
+  .stream .why-cell { max-width: 620px; min-width: 200px; white-space: normal; }
+  .stream .why-out { color: var(--dim); }
+  .act-badge {
+    display: inline-block; font-size: var(--fs-1); padding: 0 6px;
+    border-radius: var(--r-xs); border: 1px solid var(--border-hi);
+    color: var(--muted); white-space: nowrap;
+  }
+  .act-badge.open { color: var(--good-lit); border-color: rgba(46,204,113,.4); }
+  .act-badge.close { color: var(--info-lit); border-color: rgba(74,158,255,.4); }
+  .act-badge.review { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
+  .act-badge.bad { color: var(--bad-lit); border-color: rgba(255,77,79,.4); }
+  .mini-put {
+    position: relative; display: inline-block; width: 42px; height: 7px;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--r-xs); overflow: hidden; vertical-align: middle;
+  }
+  .mini-put::after {
+    content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+    background: var(--border-hi);
+  }
+  .mini-put i { position: absolute; top: 0; bottom: 0; }
+  .stream .putnum {
+    font-size: var(--fs-1); color: var(--dim); margin-left: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  /* 跳过行计数在页脚带子里（见 .stream-foot），不再单独一条——
+     计数器必须在滚动区**外面**才永远看得见：放进 tbody 会被解析器提到
+     表头上面（<tr> 里不许放 div），放进滚动区则滚到底也看不见。 */
+

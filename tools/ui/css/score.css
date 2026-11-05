@@ -1,0 +1,55 @@
+  /* ---------------- 交易评分 ---------------- */
+  .score-top { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
+  .grade-badge {
+    width: 78px; height: 78px; flex: 0 0 78px; border-radius: var(--r-lg);
+    display: grid; place-items: center; font-size: var(--fs-10); font-weight: 800;
+    font-family: var(--mono); line-height: 1;
+    border: 2px solid; box-shadow: 0 0 30px -8px currentColor;
+  }
+  .g-A { color: #4ade80; border-color: rgba(74,222,128,.5); background: rgba(74,222,128,.1); }
+  .g-B { color: var(--info); border-color: rgba(74,158,255,.5); background: rgba(74,158,255,.1); }
+  .g-C { color: var(--warn); border-color: rgba(240,180,41,.5); background: rgba(240,180,41,.1); }
+  .g-D { color: #f97316; border-color: rgba(249,115,22,.5); background: rgba(249,115,22,.1); }
+  .g-F { color: var(--bad); border-color: rgba(255,77,79,.55); background: rgba(255,77,79,.12); }
+  .g-insufficient { color: var(--muted); border-color: rgba(125,143,163,.4); background: rgba(125,143,163,.08); font-size: var(--fs-6); }
+  .score-meta { flex: 1 1 260px; min-width: 200px; }
+  .score-meta .line1 { font-size: var(--fs-6); font-weight: 700; }
+  .score-meta .line2 { font-size: var(--fs-2); color: var(--muted); margin-top: 4px; line-height: 1.6; }
+  .score-meta .red { font-size: var(--fs-2); color: var(--bad-lit); margin-top: 6px; line-height: 1.6; }
+  .dev-box {
+    flex: 0 1 300px; padding: 12px 15px; border-radius: var(--r-md);
+    background: rgba(255,255,255,.025); border: 1px solid var(--border);
+  }
+  .dev-box .t { font-size: var(--fs-1); color: var(--dim); letter-spacing: .6px; }
+  .dev-box .v { font-size: var(--fs-8); font-family: var(--mono); font-weight: 700; margin-top: 4px; }
+  .dev-box .s { font-size: var(--fs-2); color: var(--muted); margin-top: 3px; }
+
+  .dim-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+  .dim-row:last-child { border-bottom: 0; }
+  .chip { width: 24px; height: 24px; flex: 0 0 24px; border-radius: var(--r-sm); display: grid; place-items: center;
+          font-size: var(--fs-2); font-weight: 800; font-family: var(--mono); }
+  .c-A { background: rgba(74,222,128,.2); color: var(--good-lit); }
+  .c-B { background: rgba(74,158,255,.2); color: var(--info-lit); }
+  .c-C { background: rgba(240,180,41,.2); color: #f6c659; }
+  .c-D { background: rgba(249,115,22,.2); color: #fb923c; }
+  .c-F { background: rgba(255,77,79,.22); color: var(--bad-lit); }
+  .dim-row .nm { flex: 0 0 88px; font-size: var(--fs-3); }
+  .dim-row .val { flex: 0 0 118px; font-family: var(--mono); font-size: var(--fs-3); }
+  .dim-row .tg { flex: 1 1 auto; font-size: var(--fs-2); color: var(--dim); }
+  .dim-row .nt { flex: 0 0 240px; font-size: var(--fs-1); color: var(--muted); text-align: right; }
+  @media (max-width: 820px) { .dim-row .nt { display: none; } }  /* ---------------- 本场复盘 ---------------- */
+  .sess-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+  .sess-top .big { font-size: var(--fs-9); font-weight: 700; font-family: var(--mono); letter-spacing: -.5px; }
+  .sess-top .sub2 { font-size: var(--fs-2); color: var(--muted); }
+  .sess-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
+  .sess-kpi { background: rgba(255,255,255,.02); border: 1px solid var(--border);
+              border-radius: var(--r-md); padding: 10px 12px; }
+  .sess-kpi .k { font-size: var(--fs-1); color: var(--dim); letter-spacing: .3px; }
+  .sess-kpi .v { font-size: var(--fs-6); font-family: var(--mono); margin-top: 3px; }
+  .sess-kpi .s { font-size: var(--fs-1); color: var(--dim); margin-top: 2px; }
+  .sess-note { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; margin: 14px 0 4px; }
+  .sess-note textarea {
+    flex: 1 1 320px; min-height: 44px; resize: vertical; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-md); padding: 8px 10px; font: inherit; font-size: var(--fs-3);
+  }
+  .sess-note textarea:focus { outline: none; border-color: var(--border-hi); }

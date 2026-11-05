@@ -1,0 +1,29 @@
+  /* ================= 视觉层收敛补丁（2026-10-30）=================
+     只改"看起来的样子"：命中区、常驻红色、断点、分章节奏。
+     不动任何 id / class / 文案 / 事件，因此交互与测试选择器零影响。
+     ================================================================ */
+
+  /* 1) 命中区下限。原来按钮 27px、下拉 24px、做单模式单选只有 13px——
+        决定"真实做单还是纸面"的三选一，命中区比周围文字还小。
+        用 min-height 而不是 padding：视觉厚度不变，只是可点范围变大。 */
+  .btn-ghost, .btn-ok, .btn-cancel { min-height: var(--ctrl-h); }
+  /* 单选/复选框的原生方框仍画 13px，但它的命中区是外层 <label>（下面那条
+     把它撑到 28px），点 label 就等于点它——不用把圆点也放大。 */
+  select, input:not([type=radio]):not([type=checkbox]) { min-height: 28px; }
+  .at-mode label, .at-mode .at-sub { min-height: 28px; padding: 0 var(--sp2); }
+
+  /* 3) 真正的窗口区间断点。
+        原来只有 900 / 820 两个，而 desktop.py 的 min_size=1120 让它们永远
+        触发不了（只有把页面当普通网页在浏览器里打开时才可能命中，故保留）。
+        1120–1480 才是真实会出现的宽度：KPI 从 6 列压到 5 列，避免数字挤压。 */
+  @media (max-width: 1280px) {
+    .kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  }
+
+  /* 4) 分章节奏（替代"分区标题吸顶"：见 docs/ui-audit-2026-10-30.html 的妥协说明）。
+        吸顶会被 .card:has(> table) 的 overflow-x:auto 变成的滚动容器吃掉，
+        7 个 l3 卡片里有 4 个带表格，做了也是白做。
+        退而求其次：把章节标题从"和正文同色的小灰字"抬成可扫读的锚点。 */
+  .card.l3 h2 { font-size: var(--fs-2); color: var(--text); letter-spacing: .5px; }
+  .card.l3 { border-top: 2px solid var(--border-hi); }
+

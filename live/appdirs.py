@@ -2,7 +2,7 @@
 
 一个原则：**能写的东西一律不放进 bundle。**
 
-    bundle_root()   只读资源：dashboard_template.html、strategies/*.py
+    bundle_root()   只读资源：tools/ui/ 模板分片、strategies/*.py
     app_root()      可写数据：data/、config/
 
 冻结后（PyInstaller onedir）：
@@ -78,8 +78,13 @@ def strategies_dir() -> Path:
     return Path(env).expanduser() if env else bundle_root() / "strategies"
 
 
-def template_file() -> Path:
-    return bundle_root() / "tools" / "dashboard_template.html"
+def ui_dir() -> Path:
+    """面板模板分片目录：index.html + css/ + html/ + js/。
+
+    必须是真磁盘目录（不是打包进 PYZ 的模块）：面板每次请求 `/` 都读一遍，
+    开发时改完分片刷新即生效。拼装逻辑在 live/uiparts.py。
+    """
+    return bundle_root() / "tools" / "ui"
 
 
 def setup_marker() -> Path:

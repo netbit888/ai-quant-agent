@@ -337,6 +337,148 @@ class Cfg:
     comment: str = "aqa_ai"
 
 
+# --------------------------------------------------------- 谁能改这些参数
+#
+# 起因（2026-11-05）：面板的 /api/autotrade/start 手写了 14 个字段的映射，
+# 而 Cfg 有 49 个。剩下 35 个既不在映射里、也没有任何地方声明，落在**没人管
+# 的地带**：想调只能改代码，新增字段也会静静掉进同一个洞——不报错，只是
+# 永远用不上。
+#
+# 所以把归属写成数据，让测试守（tests/test_cfg_ownership.py）：
+#   PANEL_FIELDS —— 面板 / API 可以传，传了就以传的为准
+#   CODE_ONLY    —— 只由**本版代码的默认值**决定，面板永不覆盖
+#
+# 判据不是「重要不重要」，是**这个数是怎么来的**：
+# 回放扫出来的阈值（sl / tp / 持仓上限 / 快查节拍 / zone_edge…）让人在界面上
+# 随手拖，拖出来的就是噪声——227 笔反事实回放里所有放松版本都更差，tp 扫描
+# 是锯齿。这类「有证据的数」只能随代码走，改它要带上新证据。
+# 反过来「这单投多大、多久问一次、要不要真下单、亏多少就停」是仓位与节奏，
+# 本来就该按当下的账户和心情调。
+PANEL_FIELDS: tuple[str, ...] = (
+    # 仓位与节奏
+    "symbol", "lots", "interval_sec",
+    # 平仓冷却，按方向分两档（依据见 Cfg.cooldown_same_sec 上面的实测）
+    "cooldown_sec", "cooldown_same_sec",
+    # 三种模式：纸面 / 真实 / 辅助
+    "dry_run", "assist",
+    "assist_entry_wait_sec", "assist_exit_wait_sec",
+    "assist_max_slip_usd", "assist_deny_cooldown",
+    # 三个刹车：笔数 / 亏损 / 时长，0 = 不限
+    "max_trades", "max_loss_usd", "max_minutes",
+    # 验证期的对照开关。面板上暂时没有控件，留给 API 和回放对照用——
+    # 它们以前被写成「开关保留」，但两条路都不通，等于永远打不开。
+    "act_guard", "top_long_ban", "mtf_conflict",
+)
+
+CODE_ONLY: tuple[str, ...] = (
+    "magic", "tf", "bars", "comment", "ticks", "review", "ignore_spread",
+    "min_hold_sec", "min_hold_exempt_usd", "min_edge",
+    "sl_usd", "tp_min_usd", "max_hold_sec",
+    "guard_sec", "guard_near_sec", "tp_wake_band", "tp_wake", "tp_reask_sec",
+    "stale_wake", "stale_sec", "stale_frac", "stale_reask_sec", "stale_min_peak",
+    "zone_edge", "trend_follow", "tp_min_trend", "max_hold_trend",
+    "trend_span_atr_max",
+    "be_at_entry", "be_arm_usd", "be_retry_sec",
+    "assist_raise_window",
+)
+
+_TYPE_LABEL = {"int": "整数", "float": "数字", "bool": "布尔值（true/false）",
+               "str": "文本"}
+
+
+def _field_kind(name: str) -> str:
+    """字段的类型名：`"int"` / `"float"` / `"bool"` / `"str"`。
+
+    模块开了 `from __future__ import annotations`，所以 `field.type` 现在是
+    **字符串**。但这里不写死这个假设——哪天有人去掉那行 future，拿到的是
+    真类型对象，`_field_kind` 不该跟着崩。
+    """
+    tp = Cfg.__dataclass_fields__[name].type
+    return tp if isinstance(tp, str) else getattr(tp, "__name__", str(tp))
+
+
+def _as_bool(name: str, raw) -> bool:
+    """宽松但**不骗人**的布尔转换。
+
+    旧代码是 `bool(body.get("dry_run"))`——`bool("false")` 是 True。前端现在
+    传的是真 bool，但这条路以后会被 curl / 脚本走，字符串 "false" 被当成
+    打开就等于「纸面演练」静默变真单。
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if text in ("", "0", "false", "no", "off", "n", "f"):
+        return False
+    raise ValueError(f"{name} 必须是布尔值，收到 {raw!r}")
+
+
+def _coerce(name: str, raw):
+    kind = _field_kind(name)
+    try:
+        if kind == "bool":
+            return _as_bool(name, raw)
+        if kind == "int":
+            if isinstance(raw, bool):
+                raise TypeError
+            if isinstance(raw, float) and not raw.is_integer():
+                raise ValueError
+            return int(raw)
+        if kind == "float":
+            if isinstance(raw, bool):
+                raise TypeError
+            return float(raw)
+        return str(raw).strip()
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} 必须是{_TYPE_LABEL.get(kind, kind)}，收到 {raw!r}") from None
+
+
+def cfg_from_start_body(body: dict | None = None) -> Cfg:
+    """把面板 / API 的启动参数收敛成 Cfg。**启动路径的唯一入口。**
+
+    三条规矩，都是踩过的坑：
+
+    1. **只认 PANEL_FIELDS**。body 里出现 CODE_ONLY 的字段直接报错，而不是
+       静静忽略——静默忽略就是"假开关"：调用方以为改了，实际跑的还是默认值。
+       body 里不认识的非 Cfg 键（confirm / account / 旧版本的 cfg 嵌套）
+       照旧忽略，那是协议字段不是参数。
+    2. **不拿 `or` 兜底**。旧代码是 `int(body.get("x") or 默认值)`，于是 0
+       被当成"没填"吞掉：想把冷却关掉（0 秒）配不了，一定会变回 60。
+       现在只看"键在不在"。
+    3. **空串 = 没填**。前端下拉框没选中时传的是 `""`，不能让它变成
+       `symbol=""` 再被 validate_cfg 拒掉——那是界面的空状态，不是用户的选择。
+
+    拿不到值就抛 ValueError（带字段名和收到的值），由调用方翻成 400。
+    类型不对是**调用方的错**，不该让它掉进 validate_cfg 的语义检查里混淆。
+    """
+    body = dict(body or {})
+    code_only_hit = sorted(k for k in body if k in CODE_ONLY)
+    if code_only_hit:
+        raise ValueError(
+            f"{'/'.join(code_only_hit)} 属于代码所有参数（阈值由回放证据定），"
+            "面板/API 不能改；要改请连同依据一起改代码默认值"
+        )
+
+    kwargs: dict[str, object] = {}
+    for name in PANEL_FIELDS:
+        if name not in body:
+            continue
+        raw = body[name]
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        kwargs[name] = _coerce(name, raw)
+    try:
+        return Cfg(**kwargs)
+    except TypeError as exc:      # 理论上到不了：字段名已按白名单过滤
+        raise ValueError(f"启动参数不匹配：{exc}") from None
+
+
 # ------------------------------------------------------------------ 存储
 
 
@@ -492,12 +634,123 @@ def _finish(state: dict, row: dict, login: int | str | None = None,
     return row
 
 
+# 分桶用的来源名。`be` = 券商端那条线被打（仓位在终端消失时才能确认），
+# `be_local` = 挂了保本线但本地兜底平的（改单没成，浮盈回 0 时程序代平）。
+_SL_SOURCES = ("sl",)
+_BE_SOURCES = ("be", "be_local")
+
+
+def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
+                source: str | None, reason: str | None,
+                held_sec: int | None = None,
+                dry_run: bool | None = None) -> dict:
+    """一笔平仓的**唯一记账出口**：更新计数器、清仓位、返回 close 行。
+
+    为什么收敛
+    ----------
+    平仓有三条路：决策轮自己平的、发现仓位在终端消失（人工 / 保本线被触发）、
+    面板「停止并清仓」。以前三处各写一遍「加计数 + 拼 close 行」，于是**字段
+    已经分叉**：`peak_pnl`/`peak_ts`/`plan`/`atr` 只有决策轮那条写，另外两条
+    不写。后果不是报错，而是统计静默变形——「这笔 tp 是几倍 ATR」会把人工平仓
+    和清仓的单子直接排除，而那正是用来定 tp 参数的口径。`sl_closes` /
+    `be_closes` 同理，只有决策轮计数，于是"止损占比"看着比实际低。
+
+    这正是 `_finish` 收敛过的那个坑（二十多个出口各写一遍，漏一处的后果是
+    流水写了 state 没写）。出口收敛了，记账漏了。
+
+    本函数**不管**的（各路径语义不同，留在调用点）：
+      - 成交价与 pnl 怎么算（要 bid/ask，读不到报价时清仓路径按 0 记）
+      - `be_sl`、`via`、`signal_id`/`exec_by`/`slip`、`error` 这些路径专属字段
+      - 复盘排队（`queue_review`），以及 `pos["exit_reason"]/exit_source`
+
+    `source` 决定计数分桶：硬止损 = 入场方向错了；保本止损 = 方向对过但没吃到。
+    混在一起就再也分不开「入场不行」和「出场没拿够」。
+    """
+    held = (int(held_sec) if held_sec is not None
+            else int(now) - int(pos.get("opened_at") or now))
+    state["closed"] = int(state.get("closed") or 0) + 1
+    if pnl > 0:
+        state["wins"] = int(state.get("wins") or 0) + 1
+    state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
+    state["last_close_ts"] = now
+    state["last_close_pnl"] = round(float(pnl), 2)
+    # 同向重进的冷却靠它判（见 cooldown_left）。平仓当刻这笔的方向还拿得到，
+    # 之后 position 就被清了——所以必须在清仓之前记。
+    state["last_close_dir"] = pos.get("direction")
+    state["position"] = None
+    if source in _SL_SOURCES:
+        state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
+    elif source in _BE_SOURCES:
+        state["be_closes"] = int(state.get("be_closes") or 0) + 1
+    return {
+        "ts": now, "kind": "close", "ticket": pos.get("ticket"),
+        "direction": pos.get("direction"), "pnl": round(pnl, 2),
+        "p_up": pos.get("p_up"), "hit": pnl > 0,
+        "held_sec": held,
+        "peak_pnl": pos.get("peak_pnl"),
+        "peak_ts": pos.get("peak_ts"),
+        # plan / atr 在 close 行冗余一份（open 行已有）：做「这笔 tp 是几倍
+        # ATR」的统计时不用再按 ticket 反查 open 行，少一次 join 就少一处漏。
+        "plan": pos.get("plan"),
+        "atr": pos.get("atr"),
+        # 两个理由分别存：开仓理由来自当初的进场判断，平仓理由来自这次离场
+        # 判断。合成一个字段就再也分不清「为什么进」和「为什么出」，复盘直接废掉。
+        "entry_reason": pos.get("entry_reason"),
+        "reason": reason, "source": source,
+        "dry_run": bool(dry_run) if dry_run is not None else bool(pos.get("dry_run")),
+    }
+
+
+def _tail_lines(p: Path, limit: int, chunk: int = 256 * 1024) -> list[str]:
+    """从文件尾部倒着读，凑够 `limit` 行就停。返回**完整**的文本行。
+
+    为什么不用 `read_text()` 再切片
+    ------------------------------
+    流水只在手动重置时轮转，所以它只会变长。`read_log(limit=N)` 原来是
+    「全文解析 → 取后 N 条」：N 只是返回值上限，**省不了任何成本**，
+    面板每秒轮询一次，代价随文件线性涨。文件 5000 行以后，每轮都在解析
+    几年前的行。
+
+    从尾部按块读，成本只和 `limit` 有关，与文件多大无关。
+    """
+    with p.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        buf = b""
+        # 多读一行再丢：块边界可能正好切在一行中间，靠"多凑一个换行"兜住。
+        while pos > 0 and buf.count(b"\n") <= limit:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step) + buf
+
+    if pos > 0:
+        # 起点在文件中间：第一段是半行，按字节切掉（不能在解码后切——
+        # 多字节汉字可能正好被切在中间，解出来是乱码，会污染那一行的 JSON）。
+        cut = buf.find(b"\n")
+        buf = buf[cut + 1:] if cut >= 0 else b""
+    return buf.decode("utf-8", "replace").splitlines()
+
+
 def read_log(login: int | str | None = None, limit: int | None = None) -> list[dict]:
+    """读决策流水。`limit` 只读尾部 N **行**（真·只读 N 行，不是读完再切）。
+
+    和旧实现的唯一语义差别：坏行（进程被杀时写了一半）会被跳过，所以返回
+    条数可能比 `limit` 少。旧实现是"全解析 → 取后 N 条"，坏行不影响条数。
+    为这一点保留 O(文件) 的代价不值得——坏行本来就说明那次写入没完成，
+    少一条比多解析十万行划算。
+    """
     p = log_path(login)
     if not p.exists():
         return []
+    if limit and limit > 0:
+        lines = _tail_lines(p, int(limit))
+        # 行数可能少于 limit（文件本来就短），也可能多一行（倒读的余量）。
+        lines = lines[-int(limit):]
+    else:
+        lines = p.read_text(encoding="utf-8").splitlines()
     out: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -505,7 +758,8 @@ def read_log(login: int | str | None = None, limit: int | None = None) -> list[d
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return out[-limit:] if limit else out
+    return out
+
 
 
 def append_lesson(row: dict, login: int | str | None = None) -> None:
@@ -3932,16 +4186,6 @@ def _tick_body(cfg: Cfg, login, now: int,
         int(p.get("ticket") or 0) == int(pos.get("ticket") or -1) for p in live_positions
     ):
         pnl = _realized_pnl(cfg, pos, bid, ask)
-        state["closed"] = int(state.get("closed") or 0) + 1
-        if pnl > 0:
-            state["wins"] = int(state.get("wins") or 0) + 1
-        state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
-        state["last_close_ts"] = now
-        state["last_close_pnl"] = round(float(pnl), 2)
-        # 同向重进的冷却靠它判（见 cooldown_left）。平仓时这笔的方向还拿得到，
-        # 之后 position 就被清了——所以必须在这一行之前记下来。
-        state["last_close_dir"] = pos.get("direction")
-        state["position"] = None
         # 平仓来源：这笔单挂了券商端保本止损（be_ok）时，「仓在终端消失」十有
         # 八九是那条线被打了，不是人手动平的。再用 deal.reason 复核一次——
         # 有人在你挂着保本线的时候手动平仓是完全可能的，那种情况记 external。
@@ -3959,21 +4203,12 @@ def _tick_body(cfg: Cfg, login, now: int,
                 source = "be"
                 why = (f"券商端保本止损 {float(pos.get('be_sl') or 0):.3f} 被触发"
                        f"（峰值浮盈后把 SL 抬到开仓价）")
-                state["be_closes"] = int(state.get("be_closes") or 0) + 1
-        row = {
-            "ts": now, "kind": "close", "ticket": pos.get("ticket"),
-            "direction": pos.get("direction"), "pnl": round(pnl, 2),
-            "p_up": pos.get("p_up"), "hit": pnl > 0,
-            "held_sec": now - int(pos.get("opened_at") or now),
-            # 两个理由分别存：开仓理由来自当初的进场判断，平仓理由来自这次离场判断。
-            # 合成一个字段就再也分不清「为什么进」和「为什么出」，复盘直接废掉。
-            "entry_reason": pos.get("entry_reason"),
-            "reason": why,
-            "source": source,
-        }
+        # 计数 / 清仓位 / close 行统一走 _book_close：这条路上的单子以前不带
+        # peak_pnl/peak_ts/plan/atr，于是"人工平仓的单子在 ATR 统计里不存在"。
+        row = _book_close(state, pos, pnl, now, source=source, reason=why)
         if pos.get("be_ok"):
             row["be_sl"] = float(pos.get("be_sl") or 0.0)
-            row["peak_pnl"] = pos.get("peak_pnl")
+
         # 复盘排进队列：等 7 根 K 线走完再复盘，这期间照常判断下一笔。
         # 平仓当刻就复盘看不出「平完之后怎么走」，等于白问。
         pos["exit_reason"] = why
@@ -4201,43 +4436,16 @@ def _tick_body(cfg: Cfg, login, now: int,
             return _stop(state, f"平仓失败（{res.get('reason')}），已自动停止", now, login)
 
         pnl = _realized_pnl(cfg, pos, bid, ask)
-        state["closed"] = int(state.get("closed") or 0) + 1
-        if pnl > 0:
-            state["wins"] = int(state.get("wins") or 0) + 1
-        state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
-        state["last_close_ts"] = now
-        state["last_close_pnl"] = round(float(pnl), 2)
-        # 同向重进的冷却靠它判（见 cooldown_left）。平仓时这笔的方向还拿得到，
-        # 之后 position 就被清了——所以必须在这一行之前记下来。
-        state["last_close_dir"] = pos.get("direction")
-        state["position"] = None
-        row = {
-            "ts": now, "kind": "close", "ticket": pos.get("ticket"),
-            "direction": pos.get("direction"), "pnl": round(pnl, 2),
-            "p_up": pos.get("p_up"), "hit": pnl > 0,
-            "held_sec": held_sec,
-            "peak_pnl": pos.get("peak_pnl"),
-            "peak_ts": pos.get("peak_ts"),
-            # plan / atr 在 close 行冗余一份（open 行已有）：做「这笔 tp 是几倍
-            # ATR」的统计时不用再按 ticket 反查 open 行，少一次 join 就少一处漏。
-            "plan": pos.get("plan"),
-            "atr": pos.get("atr"),
-            "entry_reason": pos.get("entry_reason"),
-            "reason": decision.get("reason"), "source": decision.get("source"),
-            "dry_run": cfg.dry_run,
-        }
+        # 计数 / 清仓位 / close 行统一走 _book_close（含 sl_closes / be_closes
+        # 分桶）。这里只补这条路径特有的字段。
+        row = _book_close(state, pos, pnl, now,
+                          source=decision.get("source"),
+                          reason=decision.get("reason"),
+                          held_sec=held_sec, dry_run=cfg.dry_run)
         # 这笔是不是"峰值停滞唤醒"之后才平的。统计「靠唤醒救回来的单」时
         # 只能靠这个字段，否则它和"浮盈到门槛后正常平"在流水里长得一模一样。
         if decision.get("via"):
             row["via"] = decision["via"]
-        # 止损是程序发的，不是模型判断。必须能单独数出来，
-        # 否则「模型平仓命中率」会被一堆止损单污染。
-        if decision.get("source") == "sl":
-            state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
-        # 保本线兜底平仓（2026-10-29）单独计数：它和硬止损是两码事——
-        # 硬止损说明入场方向错了，保本止损说明方向对过、没吃到。
-        if decision.get("source") == "be_local":
-            state["be_closes"] = int(state.get("be_closes") or 0) + 1
         if decision.get("error"):
             row["error"] = decision["error"]
         if sig_id:
@@ -5864,23 +6072,12 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
             bid, ask = _quote(cfg.symbol) or (0.0, 0.0)
             # 拿不到报价时按 0 记，不能编一个价出来
             pnl = _realized_pnl(cfg, pos, bid, ask) if (bid and ask) else 0.0
-            state["closed"] = int(state.get("closed") or 0) + 1
-            if pnl > 0:
-                state["wins"] = int(state.get("wins") or 0) + 1
-            state["pnl"] = round(float(state.get("pnl") or 0.0) + pnl, 2)
-            state["last_close_ts"] = now
-            state["last_close_pnl"] = round(float(pnl), 2)
-            state["last_close_dir"] = pos.get("direction")
-            state["position"] = None
-            append_log({
-                "ts": now, "kind": "close", "ticket": pos.get("ticket"),
-                "direction": pos.get("direction"), "pnl": round(pnl, 2),
-                "p_up": pos.get("p_up"), "hit": pnl > 0,
-                "held_sec": now - int(pos.get("opened_at") or now),
-                "entry_reason": pos.get("entry_reason"),
-                "reason": why, "source": "panel",
-                "dry_run": is_paper,
-            }, login)
+            # 清仓也走同一个记账出口。以前这里少 peak_pnl/peak_ts/plan/atr，
+            # 于是"面板清仓的单子"在按打法 / ATR 倍数的统计里整批消失。
+            row = _book_close(state, pos, pnl, now, source="panel", reason=why,
+                              dry_run=is_paper)
+            append_log(row, login)
+
             # 面板清仓这一笔也要复盘：AI 停掉后不会跑，队列留在 state 里，
             # 下次启动时 if 到期就跑（K 线还在，窗口按 closed_at 切片，不受影响）。
             pos["exit_reason"] = why

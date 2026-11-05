@@ -1,0 +1,232 @@
+  <!-- 常驻状态带：滚到哪里都能看到「在不在跑 / 有没有仓 / 现在多少」。
+       数字由 renderAutoTrade 填，和下面 AI 卡片同源，不会出现两处打架。
+       **只有一行**：上一版这里还挂着「最近一次判断的原话 + 程序建议」两行，
+       整条带子长到 104px（做完单台改版后那些内容在决策环里有更大的版面）。
+       现在只留 5 个固定位 + 唯一一颗红色急停，44px 封顶。 -->
+  <div class="statusbar" id="atBar">
+    <span class="sb-dot"></span>
+    <span class="sb-state" id="atBarState">未启动</span>
+    <span class="sb-why-tag" id="atWhyTag">—</span>
+    <span class="sb-sep"></span>
+    <span id="atBarPos"><span class="sb-k">空仓</span></span>
+    <span class="sb-sep"></span>
+    <span class="sb-k" id="atBarStat">—</span>
+    <span class="mini sb-alarm" id="atFail"></span>
+    <span class="mini sb-alarm" id="atDecline"></span>
+    <span class="sb-grow"></span>
+    <button class="btn-ghost btn-mute" id="atBarMute" onclick="toggleMute()"
+            title="AI 信号/成交提示音开关。静音时弹窗、置顶、标题闪烁照常。">提示音：开</button>
+    <button class="btn-ghost btn-danger" id="atBarStop" onclick="stopAutoTrade()"
+            title="急停（吸顶带这一颗滚到哪都点得到）：停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）。和下方 AI 卡片里的「关闭并清仓」是同一个动作，点哪个都一样。">关闭并清仓</button>
+  </div>
+  <div class="acct" id="acct">
+    <div class="who">
+      <b class="mono" id="acctLogin">读取中…</b>
+      <span id="acctServer">—</span>
+    </div>
+    <span class="badge-mode badge-demo" id="acctMode">—</span>
+    <span class="badge-live" id="acctSync" style="display:none">实时</span>
+    <div class="acct-pick">
+      <select id="acctPick" title="选择查看哪个账户。切换账户请在 MT5 终端里操作，这里会自动归档。">
+        <option value="">读取中…</option>
+      </select>
+      <button class="btn-ghost btn-danger hidden" id="btnDelAcct" style="margin-left:8px"
+              title="把本地账本移到 data/live/_trash/，不是真删除">删除账户</button>
+    </div>
+    <div class="figs">
+      <div class="fig"><i>余额</i><b class="mono" id="acctBalance">—</b></div>
+      <div class="fig"><i>净值</i><b class="mono" id="acctEquity">—</b></div>
+      <div class="fig"><i>可用保证金</i><b class="mono" id="acctFree">—</b></div>
+      <div class="fig"><i>净入金</i><b class="mono" id="acctDep">—</b></div>
+      <div class="fig"><i>杠杆</i><b class="mono" id="acctLev">—</b></div>
+    </div>
+  </div>
+  <div class="acct-note" id="acctNote"></div>
+
+  <!-- 实盘视图四态切换：做单台 / 决策流 / 复盘台 / 设置舱。
+       切态用 display，不销毁节点——所有 render 函数与轮询仍然照常写 DOM。 -->
+  <!-- 一行装完「切哪一态 + 现在什么模式 + 三颗动作」。
+       原来是两行：子标签 41px、卡片头 44px。卡头那行只放标题（和顶部
+       sticky 带重复）加三颗按钮，等于用 44px 换一颗「开始做单」——
+       内容区因此永远少一行。现在合并：左边切态，右边动作。 -->
+  <div class="live-bar">
+    <div class="live-subtabs" role="tablist" aria-label="实盘子视图">
+      <button class="live-sub active" data-sub="desk" role="tab">做单台</button>
+      <button class="live-sub" data-sub="flow" role="tab">决策流</button>
+      <button class="live-sub" data-sub="review" role="tab">复盘台</button>
+      <button class="live-sub" data-sub="setup" role="tab">设置舱</button>
+    </div>
+    <div class="live-bar-acts">
+      <span class="badge-off" id="atState" style="display:none">未启动</span>
+      <span class="at-now" id="atNowMode">—</span>
+      <!-- 常驻备注（经验库条数 / 停止原因）。归轮询写，单独一个槽位。 -->
+      <span class="mini at-head-note" id="atNote"></span>
+      <!-- 做单时真正会点的只有这三颗。
+           参数不在这里（设置舱），运维（重置战绩/清空经验）也在设置舱——
+           它们跑起来之后本来也不该点。 -->
+      <div class="at-head-acts">
+        <button class="btn-ghost" id="atStart" onclick="startAutoTrade()">开始做单</button>
+        <button class="btn-ghost btn-danger" id="atStop" onclick="stopAutoTrade()"
+                title="收工：停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）。和顶部吸顶带的那一颗是同一个动作。">关闭并清仓</button>
+        <button class="btn-ghost" id="atCurtainBtn" onclick="enterTradingFullscreen()"
+                title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="live-desk" class="live-pane">
+
+  <!-- 做单台一屏两区：上决策环（这一轮模型想了什么）、下持仓面板
+       （这笔单离止损/保本/止盈还有多远）。决策流 2026-11-04 已搬去独立标签，
+       做单台只留「当前这一笔」，不再兼职流水。
+       配置项一个都不在这里——品种/模式/间隔/模型/经验库/闸门参数全部走
+       设置舱，做单台不提供可误触的入口。 -->
+  <div class="card l1">
+    <!-- 操作结果单独一块：atNote 归轮询用（每 15 秒被 renderAutoTrade 覆写），
+         把「启动失败」写在那里等于写了个寂寞——下一秒就被清空，
+         用户看到的就是「点了没反应」。 -->
+    <div class="at-msg hidden" id="atMsg"></div>
+
+    <div class="at-grid">
+      <!-- ============ 决策环 ============
+           核心新增组件。之前「这一轮想了什么」只是 KPI 卡里的一行副标题，
+           字号 16px，p_up 是纯数字；而开仓条件是 |p_up−0.50| ≥ min_edge，
+           读 0.62 要先心算再判线。现在：动作大字 + 双向条（带阈值刻线）+
+           原话理由 + 建议胶囊 + 等待锚点。 -->
+      <div class="ring" id="ring">
+        <div class="ring-head">
+          <span class="ring-tag hidden" id="ringTag">—</span>
+          <!-- 闸门 / 待复盘：原来是环底单独一行（27px + 8px 内边距），并到环头。
+               标题「本轮判断」2026-11-05 下移到右栏、紧贴结论「不做」；
+               act 也不在环头：右栏 24px 的「不做」加副标题已经是两份。 -->
+          <span class="ring-meta" title="闸门 = 程序闸门是否放行；待复盘 = 平仓后还没复盘的笔数">
+            <span>闸门 <b id="fGate">—</b></span>
+            <span>待复盘 <b id="fPend">—</b></span>
+          </span>
+          <span class="ts" id="ringTs">—</span>
+        </div>
+        <div class="ring-body">
+          <!-- 左栏 = 图：信号条 / 模型原话 / 「模型 / 我」方向对照。
+               0.00–1.00 的刻度本来就该越宽越好，786px 不是浪费。 -->
+          <div class="ring-vis">
+            <div class="put-top">
+              <span class="lb">信号强度 |p_up − 0.50|</span>
+              <span class="vv" id="putV">—</span>
+              <span class="edge" id="putEdge"></span>
+            </div>
+            <div class="put-track">
+              <div class="put-fill" id="putFill" style="left:50%;width:0"></div>
+              <div class="put-thr" id="putThrLo" style="left:44%"></div>
+              <div class="put-thr" id="putThrHi" style="left:56%"></div>
+              <div class="put-axis"></div>
+            </div>
+            <div class="put-ticks">
+              <span style="left:0">0.00</span><span style="left:30%">0.30</span>
+              <span style="left:50%">0.50</span><span style="left:70%">0.70</span>
+              <span style="left:100%">1.00</span>
+            </div>
+            <div class="ring-why" id="ringWhy">还没跑过。点「开始做单」后这一格会显示模型这一轮的理由原话。</div>
+            <div class="ring-adv hidden" id="ringAdv">
+              <span class="txt" id="ringAdvTxt"></span>
+            </div>
+            <div class="ring-anchor hidden" id="ringAnchor">
+              <span class="lb">等待锚点</span>
+              <span class="lv" id="anchorLv">—</span>
+              <span class="ago" id="anchorAgo"></span>
+              <span class="drift hidden" id="anchorDrift">已漂移，重新观察</span>
+            </div>
+            <!-- 本轮上下文里的对照：8 个固定格位，全部由后端 summary() 现算下发。 -->
+            <div class="ctx-cmp">
+              <div class="cmp-row">
+                <span class="k">模型</span>
+                <div class="cmp-grid" id="cmpModel"></div>
+              </div>
+              <div class="cmp-row">
+                <span class="k">我</span>
+                <div class="cmp-grid" id="cmpMine"></div>
+                <span class="cmp-note" id="cmpNote">—</span>
+              </div>
+            </div>
+          </div>
+          <!-- 右栏 = 字：纵向结论列。三行同一节奏，都是「11px 标签 + 24px 值」：
+               本轮判断：不做 → 市场状态：震荡市 → 当前打法：低买高卖 → 参数。
+               标题跟着值走：原来「本轮判断」在卡片左上角，离结论 740px，
+               读的时候标签和值接不上。
+               打法由后端按 regime + cfg 现算，空仓也有具体文案，前端不拼口径。 -->
+          <div class="ring-side" id="ringSide">
+            <div class="side-kv">
+              <span class="k">本轮判断</span>
+              <div class="ring-act hold" id="ringAct"><span id="ringWord">—</span><small id="ringActSub">还没跑过</small></div>
+            </div>
+            <div class="ctx-state" id="ctxState">
+              <div class="side-kv">
+                <span class="k">市场状态</span><span class="v" id="ctxRegime">—</span>
+              </div>
+              <div class="side-kv">
+                <span class="k">当前打法</span><span class="v play" id="ctxPlay">—</span>
+              </div>
+              <span class="ctx-stale fresh hidden" id="ctxStale">—</span>
+            </div>
+            <div class="ctx-ev" id="ctxEv">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 持仓面板 ============ -->
+      <div class="pos-panel" id="posPanel">
+        <div class="pos-head">
+          <span class="pos-side none" id="posSide">空仓</span>
+          <span class="pos-plan hidden" id="posPlan">震荡单</span>
+        </div>
+        <div class="pos-rows">
+          <div class="prow"><span class="k">开仓价</span><span class="v idle" id="posEntry">—</span></div>
+          <div class="prow"><span class="k">当前浮盈</span><span class="v idle" id="posPnl">—</span></div>
+          <div class="prow"><span class="k">峰值浮盈</span><span class="v idle" id="posPeak">—</span></div>
+          <div class="prow"><span class="k">持仓时长</span><span class="v idle" id="posHold">—</span></div>
+        </div>
+        <!-- 浮盈刻度尺：保本线 / 止盈线 / 当前 / 峰值画在同一根尺上，
+             刻线位置全部由数值算出（不写死百分比）。 -->
+        <div class="ruler" id="rulerBox">
+          <div class="ruler-top">
+            <span class="k" id="rulerLb">浮盈刻度 · 距止盈门槛</span>
+            <span class="v" id="rulerV">—</span>
+          </div>
+          <div class="r-track" id="rTrack">
+            <span class="end">0</span>
+            <div class="r-fill" id="rFill" style="width:0"></div>
+            <div class="r-peak hidden" id="rPeak" style="left:0"></div>
+            <div class="r-line dash" id="rBe"><span class="cap" id="rBeCap">保本 —</span></div>
+            <div class="r-line end" id="rTp"><span class="cap" id="rTpCap">止盈 —</span></div>
+          </div>
+        </div>
+        <!-- 保本三态：未触发（灰）/ 已挂券商（绿）/ 挂失败本地兜底（黄）。
+             挂失败那段时间只有 5 秒快查在兜，用户必须能分辨。 -->
+        <div class="be-badge off" id="beBadge">
+          <span class="dot"></span>
+          <span id="beText">保本止损</span>
+          <span class="note" id="beNote">—</span>
+        </div>
+        <!-- 闸门指示灯：正常只显示名字，逼近转黄、触发转实心。
+             改造前是 6 个常驻胶囊写着固定参数，整个交易日不变，看了等于没看。
+             阈值与开关都在设置舱的「出场闸门」表里（所以这里只给 title）。 -->
+        <div class="gate-leds" id="gateBox"
+             title="闸门只显示「有没有逼近」：转黄=逼近，转实心=触发。阈值与开关在 设置舱 → 出场闸门">
+          <div class="gate-led" id="ledSl"><i></i><span>硬止损</span><span class="gv" id="ledSlV"></span></div>
+          <div class="gate-led" id="ledGuard"><i></i><span>止损快查</span><span class="gv" id="ledGuardV"></span></div>
+          <div class="gate-led" id="ledBe"><i></i><span>保本</span><span class="gv" id="ledBeV"></span></div>
+          <div class="gate-led" id="ledTp"><i></i><span>止盈门槛</span><span class="gv" id="ledTpV"></span></div>
+          <div class="gate-led" id="ledStale"><i></i><span>停滞唤醒</span><span class="gv" id="ledStaleV"></span></div>
+          <div class="gate-led" id="ledHold"><i></i><span>持仓上限</span><span class="gv" id="ledHoldV"></span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  </div><!-- /#live-desk -->
+
+  <!-- 决策流独立成页（2026-11-04）。
+       原来它挂在做单台卡片底部，一做单台首屏就吃掉卡片 40%~58% 的高度
+       （1600x900 实测：卡片 532 里决策流占 253），而做单台真正要盯的
+       只有决策环和持仓面板。整块搬出来，做单台把那部分空间还给上面两块。
+       结构一个字没改：还是 .stream / #rowsAuto / #atRowsHint / 跳过带，
+       所以 renderAutoTrade 的渲染路径与所有事件绑定原样可用。 -->

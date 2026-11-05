@@ -12,14 +12,14 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
+
+from live.uiparts import load_template
 
 
 class TestReasonCells(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.html = (Path(__file__).resolve().parents[1]
-                    / "tools" / "dashboard_template.html").read_text(encoding="utf-8")
+        cls.html = load_template().decode("utf-8")
 
     def test_no_hard_slice_on_reason(self):
         """曾经的 80 字砍断：`String(whyIn).slice(0, 80)`，一个都不许回。"""

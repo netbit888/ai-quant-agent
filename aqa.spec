@@ -43,8 +43,10 @@ except Exception:  # noqa: BLE001
 
 # ---- 只读资源：必须是真磁盘文件 ------------------------------------------
 datas = [
-    # 面板模板。每次请求都从磁盘重读，缺失就直接 500 "template missing"。
-    (str(ROOT / "tools" / "dashboard_template.html"), "tools"),
+    # 面板模板分片（index.html + css/ + html/ + js/）。必须整目录原样落到
+    # _internal/tools/ui：每次请求都从磁盘读分片并拼装（live/uiparts.py），
+    # 压缩进 PYZ 就读不到，缺失会直接 500 "template missing"。
+    (str(ROOT / "tools" / "ui"), "tools/ui"),
     # 策略源码：/api/strategies 靠 glob + exec_module 动态加载，压缩进 PYZ 读不到。
     (str(ROOT / "strategies"), "strategies"),
     *wv_datas,

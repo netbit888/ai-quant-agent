@@ -230,5 +230,66 @@ class TestMoneyGates(LiveServerCase):
         self.assertFalse(payload["ok"])
 
 
+class TestStartCfgWiring(LiveServerCase):
+    """启动接口真的用上了归属表——不是新建了一个没人调的函数。
+
+    `/api/autotrade/start` 以前是自己手写 14 个字段的映射，所以「参数收敛
+    写对了」和「接口用上了」是两件事，得分别钉。这里测后者：真发一次 POST，
+    看 WORKER.start 收到的那个 Cfg 是什么。
+    """
+
+    def _start(self, body: dict):
+        from live import paths
+
+        captured: dict = {}
+
+        class _Worker:
+            def start(self, cfg, login=None):
+                captured["cfg"] = cfg
+                return {"ok": True, "symbol": cfg.symbol, "lots": cfg.lots,
+                        "interval_sec": cfg.interval_sec}
+
+        # set_login 是模块级全局，测完必须还原，否则会影响后续用例的
+        # 「当前账户」——目录不同，断言可能看着过了其实读的是别人的账本。
+        before = paths._current_login
+        try:
+            with mock.patch("live.journal.probe_login", return_value=990001), \
+                 mock.patch("live.autotrade.precheck",
+                            return_value={"ok": True, "errors": []}), \
+                 mock.patch("live.autotrade.WORKER", _Worker()):
+                status, payload = self.post("/api/autotrade/start",
+                                            {"confirm": True, **body})
+        finally:
+            paths.set_login(before)
+        return status, payload, captured.get("cfg")
+
+    def test_panel_values_reach_the_worker(self):
+        from live import autotrade
+
+        status, payload, cfg = self._start(
+            {"interval_sec": 30, "cooldown_sec": 0, "cooldown_same_sec": 0})
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.interval_sec, 30)
+        # 旧写法 `int(x or 60)` 会把「关掉冷却」吞成 60，这里钉住 0。
+        self.assertEqual(cfg.cooldown_sec, 0)
+
+    def test_code_only_field_is_refused(self):
+        """改阈值要带证据，不能在启动请求里顺手改。"""
+        status, payload, cfg = self._start({"sl_usd": 5.0})
+        self.assertEqual(status, 400, payload)
+        self.assertIn("sl_usd", payload["error"])
+        self.assertIsNone(cfg, "参数被拒了却仍然启动了做单线程")
+
+    def test_thin_body_uses_this_version_defaults(self):
+        from live import autotrade
+
+        status, payload, cfg = self._start({})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(cfg.sl_usd, autotrade.Cfg.sl_usd)
+        self.assertEqual(cfg.tp_min_trend, autotrade.Cfg.tp_min_trend)
+
+
 if __name__ == "__main__":
     unittest.main()

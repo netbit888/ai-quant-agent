@@ -615,10 +615,9 @@ class TestUpdateDialogMarkup(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from pathlib import Path
+        from live.uiparts import load_template
 
-        cls.html = (Path(__file__).resolve().parents[1]
-                    / "tools" / "dashboard_template.html").read_text(encoding="utf-8")
+        cls.html = load_template().decode("utf-8")
 
     def _block(self, selector: str) -> str:
         # 取某条 CSS 规则的声明块（够用即可，不引 CSS 解析器）

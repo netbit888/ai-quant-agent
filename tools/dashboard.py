@@ -38,13 +38,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app_version import APP_VERSION
-from live import appdirs
+from live import appdirs, uiparts
 
 # 两种路径，别混：模板走 bundle（冻结后是 _MEIPASS/_internal，只读），
 # 数据走 app_root（冻结后是 exe 同级，可写）。混了会出两种事故：
 # 模板 500，或者账本写进临时目录随进程消失。
 ROOT = appdirs.app_root()
-TEMPLATE = appdirs.template_file()
 
 
 class Server(ThreadingHTTPServer):
@@ -123,10 +122,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/":
-            if not TEMPLATE.exists():
+            # 模板是 tools/ui/ 下的分片，每次请求按 mtime 缓存拼装：
+            # 改完分片刷新即生效，不用重启面板。
+            try:
+                page = uiparts.load_template()
+            except uiparts.TemplateMissing:
                 self._send(500, b"template missing", "text/plain; charset=utf-8")
                 return
-            self._send(200, TEMPLATE.read_bytes(), "text/html; charset=utf-8")
+            self._send(200, page, "text/html; charset=utf-8")
             return
 
         if parsed.path == "/api/accounts":
@@ -559,30 +562,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             paths.set_login(login)
 
-            cfg = autotrade.Cfg(
-                symbol=(body.get("symbol") or "XAUUSDm").strip(),
-                lots=float(body.get("lots") or 0.01),
-                interval_sec=int(body.get("interval_sec") or autotrade.Cfg.interval_sec),
-                cooldown_sec=int(body.get("cooldown_sec")
-                                 or autotrade.Cfg.cooldown_sec),
-                cooldown_same_sec=int(body.get("cooldown_same_sec")
-                                      or autotrade.Cfg.cooldown_same_sec),
-                dry_run=bool(body.get("dry_run", False)),
-                max_trades=int(body.get("max_trades") or 0),
-                max_loss_usd=float(body.get("max_loss_usd") or 0.0),
-                max_minutes=int(body.get("max_minutes") or 0),
-                # AI 辅助模式（第三种）。与 dry_run 不互斥：
-                # assist + dry_run = 演练，弹窗照弹、同意只记账。
-                assist=bool(body.get("assist", False)),
-                assist_entry_wait_sec=int(body.get("assist_entry_wait_sec")
-                                          or autotrade.Cfg.assist_entry_wait_sec),
-                assist_exit_wait_sec=int(body.get("assist_exit_wait_sec")
-                                         or autotrade.Cfg.assist_exit_wait_sec),
-                assist_max_slip_usd=float(body.get("assist_max_slip_usd")
-                                          or autotrade.Cfg.assist_max_slip_usd),
-                assist_deny_cooldown=int(body.get("assist_deny_cooldown")
-                                         or autotrade.Cfg.assist_deny_cooldown),
-            )
+            # 参数收敛统一走 autotrade.cfg_from_start_body：谁能改写在
+            # autotrade.PANEL_FIELDS 里，别在这里再手写一遍字段映射。原来那
+            # 份 14 个字段的手写清单正是不该存在的债——Cfg 有 49 个字段，
+            # 漏掉的不报错、只是静默回落默认值，于是"调过又变回去"。
+            try:
+                cfg = autotrade.cfg_from_start_body(body)
+            except ValueError as exc:
+                # 类型错 / 改了不该改的参数：这是调用方的错，400 比 200 诚实。
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
             # 间隔太短等于把点差当水喝；冷却只是防连环单的下限，无上限——
             # 「1 分钟内重开」的硬需求已删，教训库和刚平仓提醒管节奏。
             # 这些是逻辑约束，启动时就说清楚，别让它跑起来再悄悄违约。

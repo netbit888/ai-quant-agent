@@ -1,0 +1,289 @@
+  /* 逐笔进场理由：表格里的小输入框，失焦即保存 */
+  .note-in {
+    width: 150px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-sm); padding: 4px 7px;
+    font: inherit; font-size: var(--fs-2);
+  }
+  .note-in::placeholder { color: var(--muted); }
+  .note-in:focus { outline: none; border-color: var(--border-hi); }
+  .note-in.saved { border-color: rgba(46,204,113,.65); }
+  .note-in.failed { border-color: rgba(255,77,79,.65); }
+  .sess-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .sess-tag { padding: 5px 11px; border-radius: var(--r-pill); border: 1px solid var(--border);
+              background: transparent; color: var(--muted); font: inherit; font-size: var(--fs-2); cursor: pointer; }
+  .sess-tag:hover { color: var(--text); }
+  .sess-tag.on { border-color: rgba(74,158,255,.5); color: var(--info-lit); background: rgba(74,158,255,.13); }
+  .sess-rule { margin-top: 14px; padding: 12px 14px; border-radius: var(--r-md); font-size: var(--fs-3);
+               border: 1px solid rgba(240,180,41,.3); background: rgba(240,180,41,.06); }
+  .sess-rule.pass { border-color: rgba(46,204,113,.32); background: rgba(46,204,113,.06); }
+  .sess-rule.fail { border-color: rgba(255,77,79,.35); background: rgba(255,77,79,.07); }
+  .sess-rule .t { font-weight: 600; margin-bottom: 4px; }
+  .sess-ai { margin-top: 14px; padding: 13px 15px; border-radius: var(--r-md);
+             border: 1px solid rgba(74,158,255,.22); background: rgba(74,158,255,.05); }
+  .sess-ai .hl { font-size: var(--fs-5); font-weight: 600; line-height: 1.5; }
+  .sess-ai .ev { margin-top: 9px; font-size: var(--fs-3); color: var(--muted); line-height: 1.6; }
+  .sess-ai .ev b { color: var(--text); font-weight: 600; }
+  .sess-ai .num { color: var(--info-lit); font-family: var(--mono); }
+  .sess-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .btn-danger { background: rgba(255,77,79,.1); color: var(--bad-lit); border-color: rgba(255,77,79,.4); }
+  .btn-danger:hover { background: rgba(255,77,79,.18); border-color: var(--bad); }
+
+  /* AI 实时做单：跳过 / 持有行置灰 —— 这些行没有下单，也不花钱，
+     和真正成交的行混在一起看会高估交易频率 */
+  #rowsAuto tr.at-skip td { opacity: .5; }
+  #rowsAuto tr.at-skip td:nth-child(2) { font-style: italic; }
+
+  /* 做单模式二选一：纸面 / 真实。单选按钮保持可见，
+     这是个会动钱的开关，不该藏在复选框里让人找。 */
+  .at-mode { display: flex; align-items: center; gap: 12px; margin-left: 12px; }
+  .at-mode label { display: flex; align-items: center; gap: 4px; font-size: var(--fs-3); cursor: pointer; }
+  .at-mode input { accent-color: var(--info); margin: 0; cursor: pointer; }
+  /* 「纸面演练」只在选了 AI 辅助时才有意义，没选就收起来，
+     否则控制条上会多一个永远点不动的复选框。显隐由 updateModeHint 直接改
+     style.display —— 不用查询父节点，冒烟测试的假 DOM 里没有 querySelector。 */
+  .at-mode .at-sub { display: none; color: var(--dim); font-size: var(--fs-2); }
+  .at-int { display: flex; align-items: center; gap: 4px; }
+  /* 全局 select 的 min-width:300px 是给账户选择器的；套到「品种」「间隔」上
+     会把选择器拉成一条横贯整行的白条，把后面的按钮全部挤到第二行。 */
+  .at-int select { min-width: 0; }
+  .at-int select { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
+                   border-radius: var(--r1); padding: 3px 6px; font-size: var(--fs-2); cursor: pointer; }
+
+  /* 成本提示单独占一行。它有三四十个字（"真实 · 黄金 XAUUSD · 每 60 秒判断 ·
+     约 60 次调用/小时…"），夹在控件中间会把「关闭并清仓」顶到下一行去。 */
+  .at-bar #atModeHint { flex: 1 0 100%; order: 99; color: var(--dim); }
+
+  /* 模型切换条：不重启、不改 .env，放在卡头下面单独一块。
+     布局用 grid 而不是 flex-wrap：这里是三组「标签 + 控件」，靠换行对齐会散架
+     （标签跑到左边、控件掉到下一行，2026-11-05 的截图就是这样）。grid 让
+     标签列固定、控件列吃满，三行天然左对齐。 */
+  .at-llm { display: grid; grid-template-columns: auto minmax(0, 1fr);
+            align-items: center; gap: 8px 10px;
+            margin: 0 0 10px; padding: 10px 12px; border-radius: var(--r-sm);
+            background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.1); }
+  .at-llm-k { font-size: var(--fs-2); color: var(--muted); white-space: nowrap; }
+  .at-llm select, .at-llm input {
+    background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-xs);
+    padding: 4px 8px; font-size: var(--fs-2); }
+  /* 全局 select 是 min-width:300px（给账户选择器用的），这里要收回：
+     两个下拉各占 300px 会把控件列撑爆，窗口一窄就换行。 */
+  .at-llm select { cursor: pointer; width: 100%; min-width: 0; max-width: none; }
+  .at-llm-row { display: flex; align-items: center; gap: 8px;
+                flex-wrap: wrap; min-width: 0; }
+  .at-llm-row input { flex: 1 1 150px; min-width: 0; max-width: 320px; }
+  .at-llm input:focus, .at-llm select:focus { outline: none; border-color: var(--info); }
+  .at-llm input.bad { border-color: var(--bad); }
+  .at-llm-now { grid-column: 1 / -1; justify-self: end;
+                font-size: var(--fs-2); color: var(--muted, #8b96a5);
+                min-width: 0; overflow-wrap: anywhere; }
+  .at-llm-now b { color: #e8edf5; font-family: var(--mono); }
+  /* 经验库选择器：复用账户下拉的模式。select 全局 min-width:300px 是给
+     账户选择器的，这里空间窄，必须压回去。 */
+  .lesson-packs { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; flex-wrap: wrap; }
+  .lesson-packs select {
+    flex: 1; min-width: 0; background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-xs);
+    padding: 4px 6px; font-size: var(--fs-2); cursor: pointer; }
+  .lesson-packs select:hover { border-color: var(--info); background: rgba(74,158,255,.08); }
+  /* 同上：弹出项配色走全局 select option。 */
+  .lesson-packs .btn-ghost { padding: 4px 8px; font-size: var(--fs-2); flex: none; }
+  /* 首启向导：一行一个字段，label 固定宽度让三个输入框左边缘对齐 */
+  .modal .setup-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .modal .setup-row label { width: 66px; flex: none; font-size: var(--fs-3); color: var(--muted); }
+  .modal .setup-row select, .modal .setup-row input {
+    flex: 1; min-width: 0; background: rgba(255,255,255,.06); color: inherit;
+    border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-xs);
+    padding: 6px 8px; font-size: var(--fs-3); }
+  .modal .setup-row select { cursor: pointer; }
+  .modal .setup-row input:focus, .modal .setup-row select:focus {
+    outline: none; border-color: var(--info); }
+  .modal .setup-ok { color: var(--good); }
+  .modal .setup-err { color: var(--bad); }
+
+  /* 操作结果条：只由 start/stop 写，轮询不碰它 */
+  .at-msg { margin: 0 0 10px; padding: 9px 12px; border-radius: var(--r-sm);
+            font-size: var(--fs-4); line-height: 1.6; }
+
+  /* ---- AI 交易员卡片的排版 ----
+     原来卡头一行塞了「标题 + 状态 + 品种 + 模式单选 + 提示 + 间隔 + 5 个按钮
+     + 备注」，1440 宽以下必然折行，而且折完之后「关闭并清仓」会掉到第二行
+     最左边，跟「开始做单」隔着半个屏——那是个会真动钱的按钮，不能让它乱跑。
+     现在拆成两层：上层只放身份和状态，下层放全部控制项，用分隔线分成
+     「参数 | 运维」两组。 */
+  /* 备注（经验库条数 / 停止原因）跟在状态徽章后面，单行截断——
+     它只是"这轮为什么停"的提示，全文在 title 里。 */
+  .at-head-note {
+    margin-left: var(--sp2); line-height: 1.5; max-width: 34ch;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .at-head-note.red { color: var(--bad-lit); }
+  /* 设置舱的头条备注是固定说明文案，不是"这轮为什么停"那种会变的短提示，
+     34ch 截断只会截出半句话——这里放开宽度。 */
+  #live-setup .at-head-note { max-width: none; }
+  /* 三颗做单按钮：靠右、不换行。它们是全卡唯一会真动钱的地方，
+     位置固定比"好看"重要——上一版它们挤在控件流里，窄窗口下会掉到第二行最左。 */
+  .at-head-acts { display: flex; gap: var(--sp2); flex: none; }
+  .at-head-acts .btn-ghost { margin: 0; }
+  /* ---- 实盘一行工具条：左「做单台/复盘台/设置舱」，右「模式 + 三颗动作」----
+     合并前是两行：子标签 41px + 卡片头 44px，而卡片头里只有标题（与顶部
+     sticky 带重复）和三颗按钮。做单台一屏装不下的主要元凶之一就是这 44px。 */
+  .live-bar {
+    display: flex; align-items: center; gap: var(--sp2) var(--sp3);
+    margin: 0 0 var(--sp2); flex-wrap: nowrap; min-width: 0;
+  }
+  .live-bar .live-subtabs { margin: 0; flex: none; }
+  .live-bar-acts {
+    display: flex; align-items: center; gap: var(--sp2);
+    margin-left: auto; min-width: 0; flex: 0 1 auto;
+  }
+  /* 备注可能很长（"经验库 12 条 · 上次线程已不在…"），这里让它独占剩余宽度
+     再截断，别去挤压按钮。 */
+  .live-bar-acts .at-head-note { max-width: 30ch; flex: 0 1 auto; min-width: 0; }
+  .live-bar-acts .at-now { white-space: nowrap; }
+  /* 吸顶带那颗「关闭并清仓」一直在视口里，这里再放一颗就是同一屏两个红按钮
+     （间距 30px），危急时反而要多看一眼才敢按。留吸顶那颗，这颗只保留 DOM
+     给 JS 改 disabled 状态。 */
+  .live-bar-acts #atStop { display: none; }
+  .at-bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
+    margin: 0 0 10px; padding: 9px 12px; border-radius: var(--r-sm);
+    background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.09);
+  }
+  .at-bar .at-sep { width: 1px; align-self: stretch; min-height: 20px;
+                    background: rgba(255,255,255,.12); }
+  .at-bar .at-grow { flex: 1 1 auto; }
+  .at-bar .btn-ghost { margin: 0; }
+
+  /* 三条出场闸门做成常驻胶囊：这是每 60 秒都在用的数字，不该埋在一段
+     小字里让人找。详细规则收进下面的折叠块，默认收起。 */
+  .at-gates { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+  .at-gate { display: inline-flex; align-items: baseline; gap: 6px;
+             padding: 4px 10px; border-radius: var(--r-pill); font-size: var(--fs-2);
+             color: var(--muted);
+             background: rgba(255,255,255,.04);
+             border: 1px solid rgba(255,255,255,.1); }
+  .at-gate b { font-family: var(--mono); font-size: var(--fs-3); color: var(--text); }
+  .at-gate.sl b { color: var(--bad); }
+  .at-gate.tp b { color: var(--good); }
+  .at-gate.guard b { color: var(--info); }
+  .at-gate.be b { color: var(--accent); }
+  .at-gate.off { opacity: .45; }
+  .at-gate.off b { color: var(--muted); text-decoration: line-through; }
+
+  .at-rules summary { cursor: pointer; color: var(--muted); font-size: var(--fs-2); }
+  .at-rules summary:hover { color: var(--text); }
+  .at-rules[open] summary { margin-bottom: 7px; }
+  .at-rules .at-rules-body { font-size: var(--fs-2); color: var(--dim);
+                             line-height: 1.75; padding-left: 2px; }
+  .at-rules .at-rules-body b { color: var(--muted); }
+
+  /* 运行计数行：每段之间用间隔号分开，空段由 JS 置空后不会留下孤立的分隔符 */
+  .at-status { display: flex; flex-wrap: wrap; align-items: baseline;
+               gap: 2px 4px; margin: 0 0 10px; min-height: 1px; }
+  .at-status span:not(:empty) + span:not(:empty)::before {
+    content: '·'; margin-right: 4px; color: var(--dim);
+  }
+
+  /* 流水表上方的过滤条：左边开关、右边"共 N 条 / 显示 M 条" */
+  .tbl-bar { display: flex; align-items: center; gap: var(--sp3);
+             margin: var(--sp2) 0 6px; }
+  .tbl-bar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .tbl-bar input { accent-color: var(--info); margin: 0; cursor: pointer; }
+  .tbl-bar #atRowsHint { margin-left: auto; color: var(--dim); }
+
+  /* ---- 常驻状态带（sticky）----
+     第一性原理：这个面板 90% 的使用场景是「瞄一眼」。要回答的只有一句
+     「在跑吗、有没有仓、现在多少」。但原来这条信息要滚回页面顶部才看得到——
+     看完流水第 200 行想确认一下持仓，得往上滑一屏。
+     所以把它做成 sticky 的一条，贴在视口顶端，滚到哪儿都跟着。
+     它只属于实盘视图（是 #view-live 的第一个子元素），切到别的 tab 自然没有。 */
+  .statusbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: var(--sp2) var(--sp3); flex-wrap: wrap;
+    margin: 0 0 var(--sp2); padding: 5px var(--sp3);
+    border-radius: var(--r1);
+    background: rgba(9,13,19,.9);
+    -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    border: 1px solid var(--border-hi);
+    box-shadow: 0 16px 32px -24px #000;
+    /* 13.5 不是 13 也不是 14：三处（运行中/持仓/今日战绩）在 13px 下仍显小，
+       14px 又会跟下面 16px 的理由行挤成一整块。 */
+    font-size: var(--fs-4);
+  }
+  .statusbar .sb-dot { width: 8px; height: 8px; border-radius: var(--r-round);
+                       background: var(--dim); flex: 0 0 auto; }
+  .statusbar.on .sb-dot { background: var(--good); box-shadow: 0 0 10px rgba(46,204,113,.85); }
+  .statusbar.on .sb-state { color: var(--good); }
+  .statusbar.warn .sb-dot { background: var(--warn); box-shadow: 0 0 10px rgba(240,180,41,.8); }
+  .statusbar.warn .sb-state { color: var(--warn); }
+  .statusbar .sb-state { font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .statusbar .sb-sep { width: 1px; align-self: stretch; min-height: 16px; background: var(--border); }
+  .statusbar .sb-grow { flex: 1 1 auto; }
+  .statusbar .sb-k { color: var(--dim); font-size: var(--fs-2); }
+  .statusbar .sb-v { font-family: var(--mono); font-weight: 600; }
+  /* 持仓时这一串是「多 0.01 @4028.561 浮盈 +1.20 峰 +3.63/7.00」，原本是
+     连续的 inline span、零间距，字号提到 13.5 之后会糊成一片。
+     统一 5px：标签靠颜色（dim）与数值（等宽粗体）区分，不再靠间距区分。 */
+  #atBarPos { display: inline-flex; align-items: baseline; gap: 5px; }
+  .statusbar .btn-ghost { margin: 0; padding: 3px 10px; font-size: var(--fs-3); }
+  /* 窄窗口（窗体的最小宽 1120）这条带子会折成两行、白吃 40px 纵向空间，
+     还让「关闭并清仓」孤零零跳到第二行。让出「今日战绩」和「主动放弃次数」——
+     这两个数在复盘台的运行计数卡里是同一份，急停按钮不能被迫换行。 */
+  @media (max-width: 1260px) {
+    .statusbar #atBarStat, .statusbar #atDecline { display: none; }
+  }
+  /* 静音态：不用危险红（那不是错误），用 dim 灰表示"这个通道被关了"。 */
+  .statusbar .btn-ghost.btn-mute.off { color: var(--dim); border-style: dashed; }
+  /* 常驻状态带的第二行：最近一次判断的原话。
+     为什么要有：空仓时最想知道"为什么没做"，而理由原来只躺在流水里，
+     流水默认还隐藏跳过行 —— 等于要翻日志才知道它在等什么。
+     用 flex:1 1 100% 换行，状态带本身是 sticky，滚到哪儿都看得见。 */
+  .statusbar .sb-why {
+    flex: 1 1 100%; min-width: 0;
+    display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px var(--sp2);
+    padding-top: 8px; margin-top: var(--sp1); border-top: 1px dashed var(--border);
+    /* 这条是**用户会主动读**的内容（空仓时靠它看模型在想什么），
+       不是注脚。11.5px/--muted 是当注脚处理的规格，读起来像附属信息，
+       所以提到正文档 13px、颜色提到 --text（压 12% 亮度）。
+       换行改成最多三行：原来是 nowrap + 省略号，长理由直接截断，
+       而「为什么没做」恰恰全在句子后半段。 */
+    font-size: var(--fs-7); line-height: 1.6;
+  }
+  .sb-why-tag {
+    flex: none; margin-top: 4px; padding: 3px 9px; border-radius: var(--r-sm);
+    font-size: var(--fs-4); font-weight: 600; white-space: nowrap;
+    border: 1px solid var(--border); background: rgba(255,255,255,.05); color: var(--dim);
+  }
+  .sb-why-tag.is-skip { color: var(--warn); border-color: rgba(240,180,41,.35); background: rgba(240,180,41,.08); }
+  .sb-why-tag.is-veto { color: var(--bad); border-color: rgba(255,77,79,.38); background: rgba(255,77,79,.08); }
+  .sb-why-tag.is-act { color: var(--good); border-color: rgba(46,204,113,.38); background: rgba(46,204,113,.08); }
+  .sb-why-tag.is-override { color: var(--accent, var(--info)); border-color: rgba(74,158,255,.38); background: rgba(74,158,255,.09); }
+  /* 已否决 / 超时 / 作废：这是"人看过并拦下"，不是"规则拦下"也不是"模型不做"。
+     刻意用中性灰而不是红——红色留给 is-veto，那才是程序替你做了决定。 */
+  .sb-why-tag.is-deny { color: var(--muted); border-color: rgba(160,170,185,.34); background: rgba(160,170,185,.10); }
+  .sb-why-text {
+    min-width: 0; flex: 1 1 240px; color: var(--text); opacity: .9;
+    white-space: normal; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+    overflow: hidden;
+  }
+  /* 锚点放在 tag 右侧、正文之前：放行尾会跟正文抢宽度——窄窗口下正文被压成
+     一条窄柱、右边还空一大块（1060px 实测）。让正文独占余下全部宽度。 */
+  .sb-why-wait {
+    flex: none; margin-top: 6px; color: var(--dim);
+    font-family: var(--mono); font-size: var(--fs-2);
+  }
+  /* 程序建议单独占一行（只有真给建议时才出现，284 笔里 13 笔）。
+     以前它只藏在 tag 的 title 里——等于没显示：要 hover 才知道程序有意见，
+     而空仓时"模型想做什么"和"程序觉得该不该"是同一件事的两面，得并排看见。 */
+  .sb-why-adv {
+    flex: 1 1 100%; display: none;
+    color: var(--info); font-size: var(--fs-6); line-height: 1.6;
+    padding-left: 2px; margin-top: 2px;
+  }
+  .sb-why-adv.on { display: block; }
+  .at-msg.err { background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.45); color: #ff9b9d; }
+  .at-msg.ok  { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.4); color: #7bdba0; }
+  .at-msg b { color: #fff; }
+

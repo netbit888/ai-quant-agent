@@ -186,9 +186,13 @@ data/live/
 543 个单测，全部**不依赖 MT5 终端**：`tests/_stubs.py` 在没装 `MetaTrader5` 时装最小桩，
 账本路径通过 `live/paths.py` 的 `set_root(tmp)` 重定向到临时目录。
 
-前端另有一套冒烟：`tools/smoke_dashboard.js`，从 `dashboard_template.html` 抠出内联
-`<script>`，在 Node 的假 DOM 里执行，用一份真实的 `/api/live` 快照（`live_probe.json`，
-本地生成、不入库）跑各渲染分支。它钉住的是「JS 改了以后页面还能画出来」。
+前端另有一套冒烟：`tools/smoke_dashboard.js`，先把 `tools/ui/` 的分片拼装成整页
+（`tools/ui_assemble.js`，与 `live/uiparts.py` 同一套规则），再抠出内联 `<script>`
+在 Node 的假 DOM 里执行，用一份真实的 `/api/live` 快照（`live_probe.json`，本地生成、
+不入库）跑各渲染分支。它钉住的是「JS 改了以后页面还能画出来」。
 
-**改前端必须跑它。** 这套页面是单文件内联脚本，语法错一个字符整页白屏，而白屏在
-Python 测试里看不出来。
+**改前端必须跑它。** 页面脚本仍是一段连续的内联脚本（分片之间共享作用域），语法错
+一个字符整页白屏，而白屏在 Python 测试里看不出来。
+
+模板已按视觉区块拆成 `tools/ui/` 下的 36 个分片，拼装规则与「改哪块看哪个文件」的
+对照表见 `docs/ui-map.md`。

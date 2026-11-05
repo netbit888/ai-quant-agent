@@ -1,0 +1,132 @@
+  /* 全局 toast：alert() 的替代品。系统 alert 是原生模态——样式不随主题、
+     打断操作流、在 WebView2 里还慢一拍。toast 固定右下角，不切 tab 也看得见，
+     几秒后自己消失。错误/结果反馈统一走这里。 */
+  .qa-toast {
+    position: fixed; right: 18px; bottom: 18px; z-index: 12000;
+    max-width: min(420px, calc(100vw - 60px));
+    padding: 10px 14px; border-radius: var(--r-md); font-size: var(--fs-3); line-height: 1.6;
+    background: var(--surf1); border: 1px solid var(--border-hi);
+    color: var(--text); white-space: pre-line; word-break: break-word;
+  }
+  .qa-toast.hidden { display: none; }
+  .qa-toast.err { border-color: rgba(255,77,79,.45); }
+  .qa-toast.ok  { border-color: rgba(46,204,113,.4); }
+
+  /* ---- 全屏提醒幕布 ----
+     目的只有一个：**别让人误操作这台电脑**。所以第一版把「AI 交易员正在交易」
+     做成 150px 红字是搞反了主角——路过的家人读到的应该是「别动」，
+     而不是「有个 AI 在交易」。现在主标题是「请勿操作这台电脑」。
+     颜色也换了语义：红色只表示**异常**（AI 已停止），正常运行时用近白 + 琥珀，
+     否则真出事的时候没有更强的信号可用。 */
+  .curtain {
+    position: fixed; inset: 0; z-index: 9999;
+    display: grid; grid-template-rows: auto 1fr auto;
+    padding: clamp(20px, 2.6vw, 44px) clamp(24px, 3.4vw, 64px);
+    background:
+      radial-gradient(1200px 620px at 50% 0%, rgba(255,45,45,.07), transparent 70%),
+      #07080b;
+    color: var(--text);
+    overflow: hidden;
+  }
+  .curtain.hidden { display: none; }
+
+  /* 顶部状态条：这屏是「活的」还是「死的」，一眼能看出来。
+     时钟放在最右且用等宽字——离开一会儿回来，第一眼看的就是时间。 */
+  .cur-top {
+    display: flex; align-items: center; gap: clamp(10px, 1.2vw, 20px);
+    font-size: clamp(13px, 1.15vw, 20px); color: var(--muted);
+  }
+  .cur-state { display: inline-flex; align-items: center; gap: 10px; }
+  .cur-state b { color: #cfd9e4; font-weight: 600; }
+  .cur-dot {
+    width: clamp(8px, .7vw, 12px); aspect-ratio: 1; border-radius: var(--r-round);
+    background: var(--good); box-shadow: 0 0 14px rgba(46,204,113,.9);
+    animation: pulse 1.6s infinite;
+  }
+  .cur-sep { width: 1px; height: 1.1em; background: rgba(255,255,255,.16); }
+  .cur-grow { flex: 1 1 auto; }
+  .cur-clock {
+    font-family: var(--mono); font-size: clamp(18px, 1.9vw, 34px);
+    color: var(--text); letter-spacing: .02em;
+  }
+
+  .cur-mid {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; min-height: 0;
+    padding: clamp(12px, 2vw, 40px) 0;
+  }
+  .cur-title {
+    margin: 0; font-weight: 900; color: #f4f8fc;
+    font-size: clamp(44px, 7.6vw, 148px);
+    line-height: 1.04; letter-spacing: -.02em;
+    text-wrap: balance; max-width: 13em;
+    text-shadow: 0 0 90px rgba(255,255,255,.06);
+  }
+  /* 停止状态：整块转红。红色在这个屏上只有一个意思——**出事了**。 */
+  .curtain.is-stopped .cur-title { color: #ff3b3b; text-shadow: 0 0 80px rgba(255,59,59,.35); }
+  .curtain.is-stopped .cur-dot {
+    background: var(--bad); box-shadow: 0 0 14px rgba(255,77,79,.95);
+    animation: none;
+  }
+  .cur-lead {
+    margin-top: clamp(14px, 2.2vh, 32px);
+    font-size: clamp(15px, 1.5vw, 26px); line-height: 1.6;
+    color: #93a3b6; max-width: 34em; text-wrap: balance;
+  }
+
+  /* 数字卡：路人只需要三个数——有没有仓、现在赚不赚、今天多少。
+     横排三块，等宽字体，扫一眼就够。 */
+  .cur-stat { margin-top: clamp(18px, 3.4vh, 56px); width: 100%; }
+  .cur-cards {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: clamp(10px, 1.4vw, 26px);
+  }
+  .cur-card {
+    display: flex; flex-direction: column; gap: clamp(4px, .6vh, 10px);
+    flex: 1 1 0; min-width: clamp(150px, 15vw, 240px); max-width: clamp(190px, 19vw, 330px);
+    padding: clamp(12px, 1.4vw, 24px) clamp(16px, 1.8vw, 32px);
+    border-radius: clamp(8px, .8vw, 14px);
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.1);
+  }
+  .cur-card i {
+    font-style: normal; font-size: clamp(11px, 1vw, 16px);
+    color: var(--muted); letter-spacing: .06em;
+  }
+  .cur-card b {
+    font-family: var(--mono); font-weight: 700;
+    font-size: clamp(22px, 2.5vw, 46px); line-height: 1.15;
+    color: var(--text);
+  }
+  /* 涨跌色必须写成 `.cur-card b.xxx`：`.cur-card b` 是「元素+类」，
+     特异性比单独的 `.pos` 高，直接写 class 会被压掉（"多"绿、"0.01"白）。 */
+  .cur-card b.pos, .cur-card b.pos-long { color: var(--up); }
+  .cur-card b.neg, .cur-card b.pos-short { color: var(--down); }
+  .cur-card b.idle, .cur-card b.neut { color: var(--muted); }
+  .cur-card s {
+    text-decoration: none; font-size: clamp(11px, 1vw, 16px); color: #6b7686;
+    font-family: var(--mono);
+  }
+
+  .cur-bot {
+    display: flex; flex-direction: column; align-items: center;
+    gap: clamp(8px, 1.2vh, 16px); text-align: center;
+  }
+  .cur-rules {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: clamp(8px, 1.4vw, 26px);
+    font-size: clamp(12px, 1.05vw, 18px); color: var(--muted);
+  }
+  .cur-rules span::before { content: "·"; margin-right: 8px; color: #45525f; }
+  .cur-rules span:first-child::before { content: none; }
+  /* 停了就别再喊「别手动开平仓」——那时候手动平仓是正确动作 */
+  .curtain.is-stopped .cur-rules { display: none; }
+  .cur-exit { font-size: clamp(14px, 1.25vw, 22px); color: #a9b6c5; }
+  .cur-exit kbd {
+    font-family: var(--mono); font-size: .95em; color: #fff;
+    padding: 3px 12px; margin: 0 3px; border-radius: var(--r-sm);
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.18);
+    box-shadow: 0 1px 0 rgba(255,255,255,.14) inset;
+  }
+

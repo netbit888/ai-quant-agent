@@ -12,8 +12,16 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import ui_lint  # noqa: E402
+from live.uiparts import load_template  # noqa: E402
 
-TPL = Path(__file__).resolve().parents[1] / "tools" / "dashboard_template.html"
+
+def _html() -> str:
+    """拼装后的整页 HTML。
+
+    模板已拆成 tools/ui/ 分片（见 live/uiparts.py）：测断言的对象仍是
+    「浏览器最终收到的那一整页」，所以这里读拼装结果，而不是某个分片。
+    """
+    return load_template().decode("utf-8")
 
 
 def _lum(rgb):
@@ -36,7 +44,7 @@ def _hex(h):
 
 
 def _root():
-    src = TPL.read_text(encoding="utf-8")
+    src = _html()
     i = src.index(":root {")
     return src[i:src.index("\n  }", i)]
 
@@ -82,7 +90,7 @@ class TestDuplicateIds(unittest.TestCase):
     """
 
     def test_template_has_no_duplicate_ids(self):
-        src = TPL.read_text(encoding="utf-8")
+        src = _html()
         tail = src[src.index("</style>"):]
         # 模板字符串拼出来的动态 id 不算静态 id
         ids = re.findall(r'(?<![\w-])id="([^"$]+)"', tail)
@@ -100,7 +108,7 @@ class TestNativeControlDarkTheme(unittest.TestCase):
     """
 
     def setUp(self):
-        self.css = TPL.read_text(encoding="utf-8")
+        self.css = _html()
 
     def test_color_scheme_is_declared_dark(self):
         self.assertIn("color-scheme: dark", self.css,
@@ -117,20 +125,22 @@ class TestNativeControlDarkTheme(unittest.TestCase):
     def test_lint_reports_duplicate_id(self):
         """规则本身要能抓到——不然上面的测试只是因为"刚好没错"才绿。"""
         import tempfile
-        html = (
-            "<style>\n  :root {\n    --x: 1;\n  }\n  .a { color: #fff; }\n</style>\n"
-            '<div id="dup"></div>\n<div id="dup"></div>\n'
-        )
         with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "tpl.html"
-            f.write_text(html, encoding="utf-8")
-            orig = ui_lint.TPL
-            ui_lint.TPL = f
+            root = Path(d)
+            (root / "css").mkdir()
+            (root / "html").mkdir()
+            (root / "css" / "base.css").write_text(
+                ":root {\n    --x: 1;\n  }\n.a { color: #fff; }\n",
+                encoding="utf-8")
+            (root / "html" / "a.html").write_text(
+                '<div id="dup"></div>\n<div id="dup"></div>\n', encoding="utf-8")
+            orig = ui_lint.UI
+            ui_lint.UI = root
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = ui_lint.main([])
             finally:
-                ui_lint.TPL = orig
+                ui_lint.UI = orig
         self.assertEqual(rc, 1, "重复 id 没被拦下来：" + buf.getvalue())
         self.assertIn("#dup", buf.getvalue())

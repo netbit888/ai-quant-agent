@@ -1,0 +1,167 @@
+  /* ---- 滚动条 ----
+     原生窗口里不需要浏览器那种粗滚动条：默认最大化 + 宽屏，正文基本一屏装得下，
+     偶尔超出的地方（长表格、参数详情、弹窗）用滚轮就能滚。
+     注意：`width/height: 0` 只藏视觉，**滚动能力不变**；
+     真用 `display:none` 在部分内核上会连滚动一起废掉，别改。 */
+  *::-webkit-scrollbar { width: 0; height: 0; }
+  * { scrollbar-width: none; }          /* Firefox / 新版 WebView2 */
+  .grid-line { stroke: rgba(120,160,200,.09); stroke-width: 1; }
+  .zero-line { stroke: rgba(140,170,200,.42); stroke-width: 1; stroke-dasharray: 4 4; }
+  .line-up { fill: none; stroke: var(--up); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(46,204,113,.55)); }
+  .line-info { fill: none; stroke: var(--info); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(74,158,255,.55)); }
+  .line-down { fill: none; stroke: var(--down); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255,77,79,.55)); }
+  /* 语义「坏」的曲线（如回撤）：红，但不是「跌」 */
+  .line-bad { fill: none; stroke: var(--bad); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255,77,79,.55)); }
+  .pt { fill: #0b111a; stroke: var(--info); stroke-width: 1.6; }
+  .lbl { fill: var(--dim); font-size: var(--fs-1); font-family: var(--mono); }
+  /* 对照线：低权重灰蓝细虚线，视觉权重必须压不过主线 */
+  .line-ghost { fill: none; stroke: #7f93a8; stroke-width: 1.3; stroke-dasharray: 6 4; opacity: .85; }
+  /* 全量 hover 的竖向参考线 */
+  .hover-line { stroke: rgba(140,170,200,.45); stroke-width: 1; stroke-dasharray: 3 3; }
+  /* hover 浮窗：position:fixed 定位在 body 上，不进 svg——
+     preserveAspectRatio="none" 会把 svg 内的元素拉伸变形，浮窗进去文字必花 */
+  .chart-tip {
+    position: fixed; z-index: 1200; pointer-events: none;
+    background: #131c27; border: 1px solid var(--border-hi); border-radius: var(--r-sm);
+    padding: 6px 9px; font-size: var(--fs-1); line-height: 1.6; color: var(--text);
+    font-variant-numeric: tabular-nums; box-shadow: 0 8px 24px -8px rgba(0,0,0,.8);
+    white-space: nowrap;
+  }
+  .chart-tip.hidden { display: none; }
+
+  table { width: 100%; border-collapse: collapse; font-size: var(--fs-body); }
+  th, td { padding: 6px 12px; text-align: right; border-bottom: 1px solid rgba(30,42,56,.55);
+           white-space: nowrap; }
+  /* 理由列是长句，必须能换行；但得限宽，否则它会把「时间 / 动作 / 方向」
+     这些短列压到只剩一个字宽——中文可以在任意字之间断行，压缩的表现就是
+     表头还正常、每行第一列只剩「时」「间」上下两行。 */
+  /* v2 决策流只有 6 列，理由落在第 6 列（原来第 7/8 列是开仓/平仓理由）。 */
+  #rowsAuto td:nth-child(6),
+  #rowsTrade td:nth-child(11), #rowsPos td:nth-child(9) {
+    white-space: normal; max-width: 340px; word-break: break-word;
+  }
+  /* 理由列的上限只做「视觉折行」，不再在 JS 里砍字符串。
+     原来渲染时写的是 String(reason).slice(0,80)——正好断在「（反事实校正：
+     平仓后回」，既没有省略号提示被截断，也没有任何地方能看全。现在整段文本
+     进 DOM，这里限 6 行、超出由浏览器自己出省略号，悬停看 title 全文，
+     「详情」弹窗里还有一份完整版（renderTradeDetail 没做任何截断）。 */
+  .why-clamp {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6;
+    overflow: hidden; white-space: normal; word-break: break-word;
+  }
+  /* 决策流里一行只留两行理由：这条表是用来"扫"的，不是用来读的；
+     全文在 title 和「时刻」上的详情弹窗里。
+     行高就是这张表的"容量"：每一行理由从 26px 收到 20px，同样高度能多显示
+     好几行。主理由给两行（模型的一句话常正好两行，砍一行等于砍半句），
+     附带的平仓理由只给一行——它是补充说明，全文在 title 里。 */
+  .stream .why-clamp { -webkit-line-clamp: 2; line-height: 1.45; }
+  .stream .why-clamp.why-out { -webkit-line-clamp: 1; }
+  /* 长文本和文本类列一律左对齐。右对齐对数字有意义（个位对个位），
+     对「窄幅震荡，收盘位置 50%」这种句子是灾难：每行末尾才对齐，
+     眼睛每次都要横向扫到最右边才能开始读。 */
+  .tbl-left, #rowsAuto td:nth-child(2), #rowsAuto td:nth-child(3),
+  #rowsAuto td:nth-child(6),
+  #rowsAuto th:nth-child(2), #rowsAuto th:nth-child(3),
+  #rowsAuto th:nth-child(6),
+  #rowsTrade td:nth-child(2), #rowsTrade td:nth-child(3),
+  #rowsTrade td:nth-child(8), #rowsTrade td:nth-child(11),
+  #rowsTrade th:nth-child(2), #rowsTrade th:nth-child(3),
+  #rowsTrade th:nth-child(8), #rowsTrade th:nth-child(11),
+  #rowsPos td:nth-child(2), #rowsPos td:nth-child(3),
+  #rowsPos th:nth-child(2), #rowsPos th:nth-child(3) { text-align: left; }
+  /* 空状态是整行一句话，不能被 td 的 nowrap 撑成一条超长的单行 */
+  .empty { white-space: normal; }
+  /* 直接装表格的卡片允许横向滚。表格现在所有格都不换行（不然中文会被压成
+     一个字一列），11 列的「最近平仓记录」在 1280 宽下会顶出卡片——
+     让卡片自己滚，别把整页撑出横向滚动条。 */
+  .card:has(> table) { overflow-x: auto; }
+  th {
+    color: var(--muted); font-weight: 600; font-size: var(--fs-1);
+    letter-spacing: .4px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover { background: rgba(74,158,255,.055); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.current td {
+    background: rgba(74,158,255,.09);
+    box-shadow: inset 3px 0 0 var(--info);
+  }
+
+  .gate { display: flex; flex-direction: column; gap: 9px; }
+  .gate-row { display: flex; align-items: center; gap: 11px; font-size: var(--fs-4); }
+  .badge {
+    display: inline-block; min-width: 50px; text-align: center;
+    padding: 3px 9px; border-radius: var(--r-sm);
+    font-size: var(--fs-1); font-weight: 700; letter-spacing: .8px;
+  }
+  .badge.pass {
+    background: rgba(46,204,113,.12); color: var(--good);
+    box-shadow: 0 0 0 1px rgba(46,204,113,.3) inset;
+  }
+  .badge.fail {
+    background: rgba(255,77,79,.12); color: var(--bad);
+    box-shadow: 0 0 0 1px rgba(255,77,79,.3) inset;
+  }
+  .verdict {
+    margin-top: 14px; padding: 12px 14px; border-radius: var(--r-md); font-size: var(--fs-4);
+    font-weight: 500; letter-spacing: .2px;
+  }
+  .verdict.ok {
+    background: linear-gradient(90deg, rgba(46,204,113,.14), rgba(46,204,113,.04));
+    border: 1px solid rgba(46,204,113,.4); color: #a8e6c4;
+  }
+  .verdict.no {
+    background: linear-gradient(90deg, rgba(255,77,79,.14), rgba(255,77,79,.04));
+    border: 1px solid rgba(255,77,79,.4); color: #ffb3b3;
+  }
+
+  select {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-md);
+    padding: 9px 13px; font-size: var(--fs-4); min-width: 300px; max-width: 100%;
+    transition: border-color .2s;
+    font-family: var(--mono);
+    color-scheme: dark;   /* 弹层跟着深色走，别只靠 :root 继承 */
+  }
+  select:hover, select:focus { border-color: var(--border-hi); outline: none; }
+  /* 弹出项的背景**不会**继承 select 自己的 background，必须单独给。
+     不给的后果就是「白底 + 浅色字」（截图里那一片白）。
+     :checked 用 --panel2 提亮一档，替掉系统那行灰底深字——它跟深色主题不搭。 */
+  select option { background: var(--panel2); color: var(--text); }
+  select option:checked { background: #1d2733; color: #fff; }
+  .muted { color: var(--muted); }
+  .empty { text-align: center; color: var(--dim); padding: 32px 0; font-size: var(--fs-3); }
+  pre {
+    background: rgba(8,12,18,.85); border: 1px solid var(--border);
+    border-radius: var(--r-md); padding: 15px; overflow: auto; max-height: 420px;
+    font-family: var(--mono); font-size: var(--fs-2); line-height: 1.6;
+    margin: 13px 0 0; color: #b8c8da;
+  }
+  button.link {
+    background: none; border: 0; padding: 0; color: var(--info);
+    border-bottom: 1px dotted rgba(74,158,255,.6);
+    cursor: pointer; font-size: var(--fs-4); transition: .15s;
+  }
+  button.link:hover { color: var(--info-lit); border-bottom-color: var(--info-lit); }
+  .hidden { display: none; }
+
+  .card, .kpi { animation: rise .35s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* 键盘可达性：只在键盘聚焦时画环（:focus-visible），鼠标点完不留蓝边。
+     面板上有六个会真动钱的按钮，看不见焦点等于不能用键盘操作。 */
+  :focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+  button:focus:not(:focus-visible) { outline: none; }
+
+  /* 尊重系统「减少动态效果」：一屏三十个卡片同时淡入，对前庭敏感的人是干扰 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
+  }
+

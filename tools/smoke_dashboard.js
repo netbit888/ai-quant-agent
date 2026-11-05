@@ -1,7 +1,7 @@
 /**
  * 面板渲染冒烟测试（不需要浏览器）
  *
- * 做法：用假 DOM 执行 dashboard_template.html 里的脚本，调 renderLive(真实 API 响应)，
+ * 做法：拼装 tools/ui/ 分片，用假 DOM 执行页面脚本，调 renderLive(真实 API 响应)，
  * 检查每个渲染分支是否抛错、关键字段是否被赋值。曾经靠它抓到
  * /api/live 漏传 trades 导致「最近成交」整块空白的问题。
  *
@@ -14,7 +14,8 @@
  * 那种失败跟渲染对不对无关，只会让人误判。
  */
 const fs = require('fs');
-const src = fs.readFileSync('tools/dashboard_template.html', 'utf8');
+const { assemble } = require('./ui_assemble');
+const src = assemble('tools/ui');
 const probePath = process.argv[2] || 'live_probe.json';
 
 let liveJson;
@@ -279,6 +280,23 @@ try {
   const detailBtns = (made.rowsAuto.innerHTML.match(/tradeDetailShow/g) || []).length;
   console.log(`  open/close 行带「详情」按钮 ${detailBtns >= 2 ? '✓' : '✗'}（${detailBtns} 个）`);
   if (detailBtns < 2) failed = true;
+
+  // 每秒轮询时数据大多数时候一个字都没变，表格不该重画（重画会清掉文字选中、
+  // 把滚动弹回顶部）。探针：先塞一个哨兵，再用**同一份数据**渲染——哨兵还在
+  // 就说明跳过了；换成新数据必须真重画，否则就成了「卡住不更新」。
+  made.rowsAuto.innerHTML = 'SENTINEL';
+  api.renderAutoTrade(atSample);
+  const noRepaintOk = made.rowsAuto.innerHTML === 'SENTINEL';
+  console.log(`  相同数据不重画表格 ${noRepaintOk ? '✓' : '✗'}`);
+  if (!noRepaintOk) failed = true;
+  const changedSample = JSON.parse(JSON.stringify(atSample));
+  changedSample.recent[0].reason = '换了一条理由';
+  api.renderAutoTrade(changedSample);
+  const repaintOk = made.rowsAuto.innerHTML !== 'SENTINEL'
+    && made.rowsAuto.innerHTML.includes('换了一条理由');
+  console.log(`  数据变了必须重画 ${repaintOk ? '✓' : '✗'}`);
+  if (!repaintOk) failed = true;
+  api.renderAutoTrade(atSample);        // 还原，后面的断言仍看原始数据
 
   // 品种选择：下拉框必须由后端 symbols 填充，且运行中锁定并显示实际在跑的品种
   const symHtml = String(made.atSymbol.innerHTML || '');

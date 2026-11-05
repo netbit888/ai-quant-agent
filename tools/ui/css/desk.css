@@ -1,0 +1,389 @@
+  /* ==================== 做单台 v2 ====================
+     设计依据 docs/ui-v2-spec.md。分区：状态带（顶层 sticky）→ 操作条 →
+     决策环（上）+ 持仓面板（下）两区 ----2026-11-04 由左右分栏改成上下，
+     决策流同日搬去独立标签，做单台专注当前这一笔。
+     为什么重做：改造前这一张卡里有 25 个块，其中配置 20 个、运维 4 个，
+     真正「做单时要读」的只有 6 个——98% 的面积服务于开跑之前和出事之后。
+     这里只留那 6 个，其余全部搬进设置舱。 */
+  .at-desk-bar {
+    display: flex; align-items: center; gap: var(--sp2) var(--sp3);
+    flex-wrap: wrap; margin: 0 0 var(--sp3);
+  }
+  .at-desk-bar .at-grow { flex: 1 1 auto; }
+  .at-desk-bar .at-now { font-size: var(--fs-1); color: var(--dim); }
+
+  /* 上下分栏（2026-11-04 由左右 62/38 改成）。
+     决策流搬走之后卡片又宽又高，横着并排反而两头都不够用：环里的理由原话
+     被挤成两行半，持仓面板那 38% 宽度下四个数字已经挤到要退回 2×2。
+     改成上下铺满之后，p_up 条和理由一行能放的字数翻了近一倍，持仓面板也能
+     把 6 盏闸门灯从 3×2 摊成一行 6 个，省下整整一行高度。
+     行高改 auto / 1fr（2026-11-05 收空白）：环里内容只有 ~190px，被 1.05fr
+     拉到 303px 之后 `.ctx-cmp` 的 margin-top:auto 把 96px 空白堆在「理由」和
+     「模型/我」之间，右栏参数行下面同样空一截——1600×900 实测两条空洞。
+     改成环按内容定高、富余进持仓面板：持仓面板本来就靠 space-between 吸收
+     高度，多给它属于「铺开」不是「挖洞」。卡片本身的富余另由 fitDesk 收口
+     （最多长 80px），否则 1080 高时页面底部会空掉三分之一。 */
+  .at-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: var(--sp3); align-items: stretch;
+  }
+
+  /* ---- 决策环 ---- */
+  .ring {
+    position: relative; overflow: hidden; display: flex; flex-direction: column;
+    background: var(--ring); border: 1px solid var(--ring-hi);
+    border-radius: var(--r-md); padding: var(--sp3) var(--sp4);
+  }
+  /* 否决留痕：左边缘 3px 蓝条。只在「有程序建议」时亮——它是事后按
+     「听了 / 没听」分桶算期望的唯一依据，不能只藏在 title 里。 */
+  .ring::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: transparent; transition: background .18s;
+  }
+  .ring.veto::before { background: var(--veto); }
+  .ring-head { display: flex; align-items: center; gap: var(--sp2);
+               margin-bottom: var(--sp2); min-width: 0; }
+  /* 环头不再放标题：「本轮判断」是「不做」的标签，不是卡片标题。原来它在
+     左上角、结论在右栏，横着隔 740px、竖着差 26px，中间还夹着信号条，
+     标签和值分家。现在标题下移到右栏，正好排在「不做」前面；环头只剩
+     闸门/待复盘/时刻，meta 靠左补位，时刻仍靠右。 */
+  .ring-head .ts {
+    margin-left: auto; font-size: var(--fs-1); color: var(--dim);
+    font-family: var(--mono); white-space: nowrap;
+  }
+  /* 闸门 / 待复盘：从环底那一行并到这里。两小段都不换行，
+     窄一点就整体收窄（不折行，折行会顶高环头）。 */
+  .ring-meta {
+    display: flex; gap: var(--sp3); min-width: 0;
+    font-size: var(--fs-1); color: var(--dim); white-space: nowrap; overflow: hidden;
+  }
+  .ring-meta b { color: var(--muted); font-weight: 500; font-family: var(--mono); }
+  .ring-tag {
+    font-size: var(--fs-1); color: var(--info-lit);
+    border: 1px solid rgba(74,158,255,.5); background: rgba(74,158,255,.1);
+    border-radius: var(--r-xs); padding: 0 6px; white-space: nowrap;
+  }
+  .ring-tag.bad { color: var(--bad-lit); border-color: rgba(255,77,79,.5);
+                  background: rgba(255,77,79,.1); }
+  /* 左图右字（2026-11-05）：左栏吃掉全部剩余宽度，右栏按内容定宽。
+     纯 flex 3:1 在 1600 窗口下会把字列拉到 380px 而右半边空一半；268 是
+     「只做位置明显的单」撑出来的下限（8 字×24 + 标签 44 + 间距 8 = 244，
+     可用 252，余 8px）。1120 窗口实测：内容 1070 = 786 + 16 + 268。 */
+  .ring-body {
+    display: flex; align-items: stretch; gap: var(--sp4);
+    flex: 1 1 auto; min-height: 0;
+  }
+  .ring-vis { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .ring-side {
+    flex: 0 0 clamp(268px, 25%, 320px); min-width: 0; position: relative;
+    display: flex; flex-direction: column;
+    padding-left: var(--sp4); border-left: 1px solid var(--border);
+  }
+  .ring-act {
+    font-size: var(--fs-9); line-height: 1.15; font-weight: 700;
+    letter-spacing: -.3px;
+  }
+  .ring-act.long { color: var(--up); }
+  .ring-act.short { color: var(--down); }
+  .ring-act.hold { color: var(--dim); }
+  .ring-act small {
+    display: block; font-size: var(--fs-1); font-weight: 500; color: var(--dim);
+    margin-top: var(--sp1); letter-spacing: .2px;
+  }
+  /* p_up 双向条：中轴 0.50 + 两条开仓阈值刻线。
+     开仓条件是 |p_up−0.50| ≥ min_edge，读 0.62 要心算减 0.5 再判线；
+     画成条之后阈值直接可见。p_up=0.00 那种被照抄的异常会贴死中轴。 */
+  .put-top { display: flex; align-items: baseline; gap: var(--sp2); margin-bottom: 5px; }
+  .put-top .lb { font-size: var(--fs-1); color: var(--dim); }
+  .put-top .vv { font-family: var(--mono); font-size: var(--fs-6); font-weight: 600; }
+  .put-top .edge { margin-left: auto; font-size: var(--fs-1); color: var(--dim); }
+  .put-track {
+    position: relative; height: 22px; background: var(--bg2);
+    border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden;
+  }
+  .put-fill {
+    position: absolute; top: 0; bottom: 0; background: rgba(46,204,113,.55);
+    transition: left .3s, width .3s, background .3s;
+  }
+  .put-fill.bear { background: rgba(255,77,79,.55); }
+  .put-axis {
+    position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+    background: var(--border-hi); z-index: 3;
+  }
+  .put-thr {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(240,180,41,.45); z-index: 2;
+  }
+  .put-ticks {
+    position: relative; height: 14px; margin-top: 2px;
+    font-size: var(--fs-1); color: var(--dim); font-family: var(--mono);
+  }
+  .put-ticks span { position: absolute; transform: translateX(-50%); }
+  .put-ticks span:first-child { transform: none; }
+  .put-ticks span:last-child { transform: translateX(-100%); }
+
+  .ring-why {
+    margin-top: var(--sp2); font-size: var(--fs-4); color: var(--text);
+    line-height: 1.55; white-space: normal; word-break: break-word;
+    display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2; overflow: hidden;
+  }
+  /* 程序建议：只在真给了建议时出现。默认配置是不拦只留痕，
+     所以这里要写清「已采纳/未采纳」，否则用户会以为程序拦了。 */
+  .ring-adv {
+    display: flex; gap: var(--sp2); align-items: flex-start; margin-top: var(--sp2);
+    background: rgba(74,158,255,.07); border: 1px solid rgba(74,158,255,.28);
+    border-radius: var(--r-sm); padding: var(--sp2) var(--sp3);
+  }
+  .ring-adv .txt {
+    font-size: var(--fs-3); color: var(--text); line-height: 1.55;
+    min-width: 0; white-space: normal; word-break: break-word;
+  }
+  .ring-adv .txt b { color: var(--info-lit); font-weight: 600; }
+
+  .ring-anchor {
+    display: flex; align-items: center; gap: var(--sp2); flex-wrap: wrap;
+    margin-top: var(--sp2); padding-top: var(--sp2);
+    border-top: 1px dashed var(--border);
+  }
+  .ring-anchor .lb { font-size: var(--fs-1); color: var(--dim); }
+  .ring-anchor .lv {
+    font-family: var(--mono); font-size: var(--fs-6); font-weight: 600;
+    color: var(--gold-lit);
+  }
+  .ring-anchor .ago { font-size: var(--fs-1); color: var(--dim); }
+  .ring-anchor.drift .lv { color: var(--warn); }
+  .ring-anchor .drift {
+    font-size: var(--fs-1); color: var(--warn);
+    border: 1px solid rgba(240,180,41,.4); border-radius: var(--r-xs); padding: 0 6px;
+  }
+
+  /* 本轮上下文（2026-11-05 重做）：删掉「最近 8 轮 p_up 直方图」。
+     决策环已有本轮 p_up 与阈值，决策流页已有逐行 p_up 微条，第三份重复
+     不改变任何决定；柱高还被 min_edge 截断，八成信号画成同一高度。
+     2026-11-05 二次改版：由「整幅上下三层」改成「左图右字」——
+     左栏 = 信号条 + 模型原话 + 「模型 / 我」对照，右栏 = 纵向结论列。 */
+  /* 右栏：三个 --fs-9 与环里的「不做」同规格，靠 11px 标签分层。
+     标签与值同基线，读作「市场状态：震荡市」。 */
+  .ctx-state { display: flex; flex-direction: column; min-width: 0; }
+  .side-kv {
+    display: flex; align-items: baseline; gap: var(--sp2); flex-wrap: wrap;
+    margin-top: var(--sp2); min-width: 0;
+  }
+  .side-kv .k { font-size: var(--fs-1); color: var(--dim); white-space: nowrap; }
+  /* 「本轮判断 不做」是第一行，标签和值同一基线；后续两行才有上间距。
+     必须限定 .ring-side 的直接子元素，否则 .ctx-state 里的「市场状态」
+     也会命中 :first-child 而丢掉上间距。 */
+  .ring-side > .side-kv:first-child { margin-top: 0; }
+  .side-kv .v {
+    font-size: var(--fs-9); line-height: 1.15; font-weight: 700;
+    letter-spacing: -.3px; color: var(--text);
+  }
+  /* 修饰类不能叫 act：全局有个 .act（蓝底卡片，padding 12/14 + 边框），
+     命中之后「低买高卖」会多出一圈内边距和背景，看着像个按钮。
+     旧版 .big.act 一直带着这个 bug。 */
+  .side-kv .v.play { color: var(--gold-lit); }
+  /* 降饱和只压到 0.7：过期提示主要由琥珀章承担，大字本身不能弱到读不出。
+     「不做」不参与——它是结论，不该跟着一起灰。 */
+  .ctx-state.stale .v { opacity: .7; }
+  /* 绝对定位：JS 每轮用 className= 整体覆写这个节点，若它参与流式布局，
+     「新鲜 ↔ 过期」切换会把三个大字顶下去 14px。新鲜时直接隐藏（环头
+     的「N 分前 / 时:分:秒」时间戳仍在，不丢信息），所以不需要预留高度。 */
+  .ctx-stale {
+    position: absolute; top: 2px; right: 0;
+    font-size: var(--fs-1); color: var(--warn);
+    border: 1px solid rgba(240,180,41,.4); border-radius: var(--r-xs);
+    padding: 1px 6px; white-space: nowrap;
+  }
+  .ctx-stale.fresh { display: none; }
+  /* 参数行：紧贴「当前打法」，不用 margin-top:auto 顶到栏底。
+     1600×900 下环会被拉到 ~230px，顶到底会让 tp 与打法之间空出 140px，
+     参数看着像另一块东西；宁可右栏下面留白，也不要让参数离开它解释的那一行。 */
+  .ctx-ev {
+    padding-top: var(--sp2);
+    font-size: var(--fs-1); color: var(--dim); font-family: var(--mono);
+    word-break: break-word; font-variant-numeric: tabular-nums;
+  }
+  /* 左栏底部：8 个固定格位。格位固定 = 缺一轮留空格，不再 space-between 自动铺开。 */
+  .ctx-cmp {
+    display: flex; flex-direction: column; gap: 3px;
+    margin-top: auto; padding-top: var(--sp2);
+  }
+  .cmp-row { display: flex; align-items: center; gap: var(--sp2); }
+  .cmp-row .k { flex: 0 0 26px; font-size: var(--fs-1); color: var(--dim); }
+  /* 格位不铺满整幅宽度：1120 窗口下 8 格拉成 130px 的长条会读成进度条，
+     而不是 8 个离散轮次。520 而不是 560：左栏 786 里
+     26 + 8 + 560 + 8 + 176(结论文字) = 778，只剩 4px——窗口再窄一档就溢出。 */
+  .cmp-grid { display: flex; gap: 3px; flex: 1 1 auto; min-width: 0; max-width: 520px; }
+  .cmp-cell {
+    flex: 1 1 0; min-width: 0; height: 13px; border-radius: var(--r-xs);
+    background: var(--bg2); border: 1px solid var(--border);
+  }
+  .cmp-cell.up { background: rgba(46,204,113,.75); border-color: transparent; }
+  .cmp-cell.down { background: rgba(255,77,79,.75); border-color: transparent; }
+  .cmp-cell.none { background: rgba(139,156,176,.32); border-color: transparent; }
+  .cmp-cell.miss { background: transparent; border-style: dashed; }
+  .cmp-cell.against { outline: 2px solid var(--gold-lit); outline-offset: 1px; }
+  .cmp-note {
+    margin-left: var(--sp2); white-space: nowrap;
+    font-size: var(--fs-1); color: var(--dim); font-variant-numeric: tabular-nums;
+  }
+  .cmp-note b { color: var(--gold-lit); font-family: var(--mono); font-weight: 600; }
+  .cmp-note.zero b { color: var(--muted); }
+
+  /* ---- 持仓面板 ---- */
+  .pos-panel {
+    display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--r-md); padding: var(--sp3) var(--sp4);
+  }
+  .pos-head { display: flex; align-items: baseline; gap: var(--sp2); margin-bottom: var(--sp2); }
+  .pos-side { font-size: var(--fs-8); font-weight: 700; line-height: 1.1; }
+  .pos-side.long { color: var(--up); }
+  .pos-side.short { color: var(--down); }
+  .pos-side.none { font-size: var(--fs-7); color: var(--dim); }
+  .pos-plan {
+    margin-left: auto; font-size: var(--fs-1); padding: 1px 6px;
+    border-radius: var(--r-xs); border: 1px solid var(--border-hi); color: var(--muted);
+    white-space: nowrap;
+  }
+  .pos-plan.trend { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
+  /* 四个数字排一行（原来 2×2 要两行 78px）。上下分栏之后面板是整幅宽度，
+     再用 space-between 会把四个数拉到两个极端（中间空一米），
+     改成左对齐 + 固定间距。 */
+  .pos-rows {
+    display: flex; justify-content: flex-start; gap: var(--sp6);
+    margin-bottom: var(--sp2);
+  }
+  .pos-rows .prow { flex: 0 1 auto; }
+  .pos-rows .prow .v { white-space: nowrap; }
+  /* 1200 以下 38% 栏宽撑不开四列：「当前浮盈」会折成两行、数字掉到第二行。
+     这种宽度本来就装不下一页，退回 2×2 反而清楚。 */
+  @media (max-width: 1199px) {
+    .pos-rows { display: grid; grid-template-columns: 1fr 1fr;
+                gap: var(--sp1) var(--sp3); }
+  }
+  .prow { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .prow .k { font-size: var(--fs-1); color: var(--dim); }
+  .prow .v {
+    font-family: var(--mono); font-size: var(--fs-5); font-weight: 600;
+    font-variant-numeric: tabular-nums; line-height: 1.35;
+  }
+  .prow .v.idle { color: var(--dim); font-weight: 500; }
+
+  /* 浮盈刻度尺：保本线 / 止盈线 / 当前 / 峰值画在同一根尺上，
+     「离落袋还有多远」不用算。刻线位置全部由数值算出，不写死百分比。 */
+  .ruler { margin-bottom: var(--sp2); }
+  .ruler-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .ruler-top .k { font-size: var(--fs-1); color: var(--dim); }
+  .ruler-top .v { font-family: var(--mono); font-size: var(--fs-7); font-weight: 700; }
+  .r-track {
+    position: relative; height: 22px; background: var(--bg2);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+  }
+  .r-track .end {
+    position: absolute; left: 5px; bottom: 2px; font-size: var(--fs-1);
+    color: var(--dim); font-family: var(--mono);
+  }
+  .r-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    border-radius: var(--r-sm) 0 0 var(--r-sm);
+    background: rgba(46,204,113,.34); transition: width .3s;
+  }
+  .r-fill.neg {
+    border-radius: 0 var(--r-sm) var(--r-sm) 0;
+    background: rgba(255,77,79,.34);
+  }
+  .r-peak {
+    position: absolute; top: -3px; bottom: -3px; width: 2px;
+    background: var(--good-lit); opacity: .75; transition: left .3s;
+  }
+  .r-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--gold-lit); z-index: 3; }
+  .r-line.dash {
+    background: repeating-linear-gradient(180deg, var(--dim) 0 3px, transparent 3px 6px);
+  }
+  .r-line .cap {
+    position: absolute; bottom: 3px; left: 4px; white-space: nowrap;
+    font-size: var(--fs-1); color: var(--gold-lit); font-family: var(--mono);
+  }
+  .r-line.dash .cap { color: var(--dim); }
+  .r-line.end .cap { left: auto; right: 4px; }
+
+  /* 保本三态：未触发（灰）/ 已挂券商（绿）/ 挂失败本地兜底（黄）。
+     三态颜色不能混——挂失败那段时间只有 5 秒快查在兜，用户必须知道。 */
+  .be-badge {
+    display: flex; align-items: center; gap: var(--sp2); font-size: var(--fs-3);
+    border-radius: var(--r-sm); padding: 3px var(--sp3);
+    margin-bottom: var(--sp2); white-space: nowrap;
+  }
+  .be-badge .dot {
+    width: 7px; height: 7px; border-radius: var(--r-round);
+    background: var(--muted); flex: none;
+  }
+  .be-badge .note {
+    margin-left: auto; font-size: var(--fs-1); opacity: .85;
+    white-space: normal; text-align: right; word-break: break-word;
+  }
+  .be-badge.off { background: var(--panel2); border: 1px solid var(--border); color: var(--dim); }
+  .be-badge.on {
+    background: rgba(46,204,113,.09); border: 1px solid rgba(46,204,113,.32);
+    color: var(--good-lit);
+  }
+  .be-badge.on .dot { background: var(--good); }
+  .be-badge.fail {
+    background: rgba(240,180,41,.09); border: 1px solid rgba(240,180,41,.32);
+    color: var(--gold-lit);
+  }
+  .be-badge.fail .dot { background: var(--warn); }
+
+  /* 闸门指示灯：正常只显示名字（灰），逼近转黄、触发转实心。
+     改造前这里是 6 个常驻胶囊，写着 −3.00 / 每5秒 / 3.25 …——这些数
+     整个交易日不变，看了等于没看。参数挪进设置舱，这里只回答一个问题：
+     现在有没有哪条在逼近。 */
+  /* 6 盏灯一行铺满（上下分栏之后宽度够了，原来 3×2 要占两行约 40px）；
+     窄窗口退回 3×2，否则每格放不下「止盈门槛」四个字。 */
+  /* 六灯恒为一行：原来 <1200px 折成 3×2，但窗口最小就是 1120（desktop.py 的
+     min_size），这一档下多出来的一行 22px 正好把第二排三个灯顶出卡片底部——
+     1120×720 实测「止盈门槛 / 停滞唤醒 / 持仓上限」三个灯看不见（改动前后
+     都存在，2026-11-05 顺手修）。1070 宽摊 6 个每格 178px，标签 + 数值放得下。 */
+  .gate-leds { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+               gap: var(--sp1) var(--sp2); }
+  .gate-led {
+    display: flex; align-items: center; gap: 6px; font-size: var(--fs-1);
+    color: var(--muted); padding: 3px 7px; border-radius: var(--r-xs);
+    background: var(--bg2); border: 1px solid transparent;
+    transition: color .15s, border-color .15s, background .15s;
+    min-width: 0;
+  }
+  .gate-led i {
+    width: 6px; height: 6px; border-radius: var(--r-round);
+    background: var(--border-hi); flex: none;
+  }
+  .gate-led .gv {
+    margin-left: auto; font-family: var(--mono); color: var(--dim);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .gate-led.near { color: var(--gold-lit); border-color: rgba(240,180,41,.3); }
+  .gate-led.near i { background: var(--warn); }
+  .gate-led.near .gv { color: var(--gold-lit); }
+  .gate-led.hit {
+    color: var(--good-lit); border-color: rgba(46,204,113,.35);
+    background: rgba(46,204,113,.08);
+  }
+  .gate-led.hit i { background: var(--good); }
+  .gate-led.hit .gv { color: var(--good-lit); }
+  .gate-led.hit.bad {
+    color: var(--bad-lit); border-color: rgba(255,77,79,.35);
+    background: rgba(255,77,79,.08);
+  }
+  .gate-led.hit.bad i { background: var(--bad); }
+  .gate-led.hit.bad .gv { color: var(--bad-lit); }
+  .gate-led.off { opacity: .55; }
+  .gate-led.off .gv { text-decoration: line-through; }
+  /* 闸门说明只在设置舱里写全，右栏底部不再占一行——那一行 20px，
+     换来的信息在 .gate-leds 的 title 里也有。 */
+  .gate-leds { cursor: help; }
+  .sb-alarm { color: var(--dim); white-space: nowrap; }
+  .sb-alarm:not(:empty) { color: var(--warn); }
+

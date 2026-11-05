@@ -1,0 +1,28 @@
+<!-- 全屏提醒幕布：默认隐藏，点「全屏提醒」才出来。
+     读者是**路过这台电脑的人**（家人、室友、回来的自己），不是看盘的人。
+     所以只有三个问题：这屏是活的吗 / 别做什么 / 现在什么状况。
+     任何分析性内容（最近判断的完整理由）都不该出现在这里。 -->
+<div class="curtain hidden" id="atCurtain">
+  <div class="cur-top">
+    <span class="cur-state"><span class="cur-dot"></span><b id="atCurtainState">运行中</b></span>
+    <span class="cur-sep"></span>
+    <span id="atCurtainSym">XAUUSD · M1</span>
+    <span class="cur-grow"></span>
+    <span class="cur-clock" id="atCurtainClock">--:--:--</span>
+  </div>
+
+  <div class="cur-mid">
+    <h1 class="cur-title" id="atCurtainTitle">请勿操作这台电脑</h1>
+    <div class="cur-lead" id="atCurtainLead">
+      手动开平仓、切走终端、让电脑睡眠，都会打乱它正在做的事。
+    </div>
+    <div class="cur-stat" id="atCurtainStat">—</div>
+  </div>
+
+  <div class="cur-bot">
+    <div class="cur-rules">
+      <span>别手动开平仓</span><span>别让电脑睡眠</span><span>别切走 MT5 终端</span>
+    </div>
+    <div class="cur-exit">要退出就按 <kbd>Esc</kbd></div>
+  </div>
+</div>

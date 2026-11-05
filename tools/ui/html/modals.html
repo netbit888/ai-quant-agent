@@ -1,0 +1,142 @@
+
+<div class="modal-mask hidden" id="modalMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h4 id="modalTitle">确认调用付费 API？</h4>
+    <div class="desc" id="modalDesc"></div>
+    <div class="cost" id="modalCost"></div>
+    <div class="actions">
+      <button class="btn-cancel" id="modalCancel">取消</button>
+      <button class="btn-ok" id="modalOk">继续</button>
+    </div>
+  </div>
+</div>
+
+<!-- 人工确认弹窗（AI 辅助做单）。**独立 DOM**，不复用 #modalMask：
+     那个是单槽 Promise（modalResolve 只有一个），信号和"确认付费"撞车时会
+     互相覆盖，点谁都算到对方头上。
+     这里也**不响应 Esc、不点遮罩关闭**——误按一次等于否决一次，代价是白丢
+     一个已经算好的信号。只能点按钮。 -->
+<div class="modal-mask sig-mask hidden" id="sigMask">
+  <div class="modal modal-sig" id="sigCard" role="dialog" aria-modal="true"
+       aria-labelledby="sigTitle">
+    <div class="sig-head">
+      <h4 id="sigTitle">AI 信号</h4>
+      <span class="mini" id="sigSub"></span>
+      <span class="sig-clock" id="sigClock">—</span>
+    </div>
+    <div class="sig-body-wrap">
+    <div class="sig-body" id="sigBody">
+      <div class="sig-sec">
+        <b>最终裁决（大模型）</b>
+        <div class="sig-verdict" id="sigVerdict">—</div>
+        <div class="sig-prob">
+          <div class="sig-prob-bar">
+            <div class="long" id="sigBarLong" style="width:50%"></div>
+            <div class="short" id="sigBarShort" style="width:50%"></div>
+          </div>
+          <div class="sig-prob-lab">
+            <span class="pos" id="sigLabLong">看涨 50%</span>
+            <span id="sigPriceLab" class="mini"></span>
+            <span class="neg" id="sigLabShort">看跌 50%</span>
+          </div>
+        </div>
+        <div class="sig-tags" id="sigTags"></div>
+      </div>
+      <div class="sig-sec">
+        <b>大模型判断</b>
+        <div class="sig-quote" id="sigModel">—</div>
+      </div>
+      <div class="sig-sec">
+        <b>程序判断（只给建议，不拦单）</b>
+        <div class="sig-quote" id="sigProg">—</div>
+      </div>
+    </div>
+    </div>
+    <div class="actions">
+      <button class="btn-cancel" id="sigNo">不做</button>
+      <button class="btn-ok" id="sigYes">同意</button>
+    </div>
+    <div class="hint" id="sigHint"></div>
+  </div>
+</div>
+
+<!-- 首启配置向导：没配 API key 时自动弹出，也能从模型条手动打开。
+     写进本机 config/.env，和打包后的可写目录同源。 -->
+<div class="modal-mask hidden" id="setupMask">
+  <div class="modal modal-wide" role="dialog" aria-modal="true">
+    <h4>配一下模型 API</h4>
+    <div class="desc">
+      面板要靠大模型做决策和复盘，没有 key 就没法用 AI 做单。
+      填一次就行，存在本机 <b>config/.env</b>，不会上传。
+    </div>
+    <div class="setup-row"><label for="setupProvider">供应商</label>
+      <select id="setupProvider" onchange="onSetupProviderChange()"></select></div>
+    <div class="setup-row"><label for="setupModel">模型</label>
+      <input id="setupModel" class="mono" size="26" autocomplete="off" placeholder="留空用该供应商默认模型"></div>
+    <div class="setup-row"><label for="setupKey">API key</label>
+      <input id="setupKey" type="password" class="mono" size="42" autocomplete="off" placeholder="sk-..."></div>
+    <div class="mini" id="setupMsg" style="min-height:18px;margin-top:2px"></div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="skipSetup()">稍后设置</button>
+      <button class="btn-ok" onclick="saveSetup()">测试并保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 退出程序。为什么要有这个按钮：Windows 给控制台关闭事件的处理时限只有约 5 秒，
+     弹窗根本来不及；关黑窗口只能「尽力平仓」不能确认。这里的按钮是唯一可控的出口。 -->
+<div class="modal-mask hidden" id="quitMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h4>退出程序</h4>
+    <div class="desc" id="quitDesc"></div>
+    <div class="cost" id="quitCost"></div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="quitMaskClose()">取消</button>
+      <button class="btn-danger" id="quitForce" onclick="postQuit(false)">强制退出</button>
+      <button class="btn-ok" id="quitFlatten" onclick="postQuit(true)">先平仓再退出</button>
+    </div>
+  </div>
+</div>
+
+<!-- 应用内更新：只在安装版（ui_mode==full）出现。检测/下载全走后端，
+     前端只是状态机——mode 不是 full 时按钮直接隐藏。 -->
+<div class="modal-mask hidden" id="updateMask">
+  <div class="modal modal-update" role="dialog" aria-modal="true">
+    <h4 id="updateTitle">发现新版本</h4>
+    <div class="mini mono" id="updatePlan" style="margin-bottom:6px"></div>
+    <div class="desc-wrap" id="updateDescWrap"><div class="desc" id="updateDesc"></div></div>
+    <div class="mini" id="updateProgress" style="min-height:18px"></div>
+    <div class="actions">
+      <button class="btn-cancel" id="updateLater" onclick="updateLater()">暂不</button>
+      <button class="btn-ok" id="updateGo" onclick="startUpdateDownload()">下载并安装</button>
+    </div>
+  </div>
+</div>
+
+<!-- 单笔交易溯源：原料 → 结构 → 程序判断 vs 模型判断 → 执行结果 → 复盘 -->
+<div class="modal-mask hidden" id="tradeMask" onclick="if(event.target===this) tradeMaskClose()">
+  <div class="modal modal-wide" role="dialog" aria-modal="true">
+    <h4 id="tdTitle">交易详情</h4>
+    <div id="tdBody" class="mini">读取中…</div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="tradeMaskClose()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 图表最大化查看：从 CHART_REG 重放同源入参（与原渲染同口径），
+     viewBox=实际像素 1:1 映射防文字变形。Esc / 点遮罩 / 关闭按钮均可退出。 -->
+<div class="modal-mask hidden" id="chartMask" onclick="if(event.target===this) chartMaskClose()">
+  <div class="modal modal-chart" role="dialog" aria-modal="true">
+    <div class="chart-mask-head">
+      <h4 id="chartMaskTitle"></h4>
+      <span class="mini" id="chartMaskLegend"></span>
+      <button class="btn-cancel" onclick="chartMaskClose()">关闭</button>
+    </div>
+    <div class="chart-big-wrap" id="chartBigWrap">
+      <svg id="chartBig" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+</div>
+
+

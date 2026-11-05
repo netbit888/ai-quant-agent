@@ -27,7 +27,7 @@ from pathlib import Path
 
 from live import paths
 
-# 与 dashboard_template.html 里那四个控件的出厂状态保持一致。
+# 与模板（tools/ui/html/view-setup.html）里那四个控件的出厂状态保持一致。
 DEFAULT_PREFS = {
     "symbol": "XAUUSDm",
     "interval_sec": 60,

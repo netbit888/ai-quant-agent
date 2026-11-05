@@ -1,0 +1,208 @@
+  <div id="live-setup" class="live-pane hidden">
+
+  <!-- 设置舱：做单台里抽出来的 20 个配置块全部落在这里。
+       分四组 + 一张闸门参数表。参数一律显示"实际生效值"（取自 state 里的 cfg），
+       不是模板里写死的默认值——0 就是「关闭」，不能画成开着。 -->
+  <div class="card l1">
+    <div class="card-head">
+      <h2>设置舱</h2>
+      <span class="mini at-head-note">跑起来之后这些控件自动锁死，避免「界面说真实、实际发纸面」</span>
+    </div>
+    <div class="setup-grid">
+
+      <div class="setup-card">
+        <h3>交易参数</h3>
+        <div class="sub">中途改这些等于换了一个策略，而仓位还挂在旧参数上——所以开跑即锁。没在跑的时候改过的会自动记住，下次打开不用重选。</div>
+        <div class="row">
+          <span class="lb">品种</span>
+          <label class="mini at-int" title="做单品种。只列实测过 point/contract/spread 的品种——没测过的品种点差成本会算成 0，风险失控">
+            <select id="atSymbol" onchange="updateModeHint(); saveAtPrefs()"></select>
+          </label>
+        </div>
+        <div class="row">
+          <span class="lb">模式</span>
+          <div class="at-mode" role="radiogroup" aria-label="做单模式">
+            <label title="只调模型、只在本地记账，不发单给券商">
+              <input type="radio" name="atMode" id="atModePaper" value="paper"
+                     onchange="updateModeHint(); saveAtPrefs()"> 纸面
+            </label>
+            <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
+              <input type="radio" name="atMode" id="atModeLive" value="live" checked
+                     onchange="updateModeHint(); saveAtPrefs()"> 真实做单
+            </label>
+            <label title="和真实做单一样，但每次开/平仓前弹窗等你点。硬止损和持仓上限仍由程序直接执行，不弹窗">
+              <input type="radio" name="atMode" id="atModeAssist" value="assist"
+                     onchange="updateModeHint(); saveAtPrefs()"> AI 辅助
+            </label>
+            <label class="at-sub" id="atAssistPaperWrap"
+                   title="演练：弹窗照弹、同意也只记账，不发真单">
+              <input type="checkbox" id="atAssistPaper" onchange="updateModeHint(); saveAtPrefs()"> 纸面演练
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <span class="lb">间隔</span>
+          <label class="mini at-int" title="两次决策之间的间隔。3 秒是物理下限：模型单次调用约 2.6 秒">
+            <select id="atInterval" onchange="updateModeHint(); saveAtPrefs()">
+              <option value="3">3 秒</option>
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
+              <option value="30">30 秒</option>
+              <option value="60" selected>60 秒</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <span class="mini" id="atModeHint">—</span>
+        </div>
+      </div>
+
+      <div class="setup-card">
+        <h3>AI 模型</h3>
+        <div class="sub">先选供应商，再选这一家的模型。换供应商要填该家的 key（同一个 key 不能跨家通用）；改这里就够了，不用动 .env、不用重启。</div>
+        <div class="at-llm" id="atLlmBar">
+          <label class="at-llm-k" for="atLlmProvider">供应商</label>
+          <select id="atLlmProvider" onchange="onLlmProviderChange()"
+                  title="换供应商要填该家的 key；同一个 key 不能跨家通用"></select>
+
+          <label class="at-llm-k" for="atLlmModel">模型</label>
+          <select id="atLlmModel" onchange="onLlmModelChange()"
+                  title="同一家的模型清单。DeepSeek 的两项是同一个 flash：默认 / 深度思考"></select>
+
+          <label class="at-llm-k" for="atLlmKey">API key</label>
+          <div class="at-llm-row">
+            <input id="atLlmKey" type="password" autocomplete="off"
+                   placeholder="沿用当前就留空">
+            <button class="btn-ghost" id="atLlmSave" onclick="switchLlm()">应用</button>
+            <button class="btn-ghost" onclick="openSetup()"
+                    title="重新填 API key / 换供应商。点错的「稍后设置」也能从这里回来"
+                    style="padding:3px 8px;font-size:var(--fs-2)">配置向导</button>
+          </div>
+
+          <span class="at-llm-now" id="atLlmNow">—</span>
+        </div>
+      </div>
+
+      <div class="setup-card">
+        <h3>经验库</h3>
+        <div class="sub">全局共享（不跟账户走）。AI 做单的提示词注入和复盘写入都用当前选中的这一套。</div>
+        <div class="lesson-packs">
+          <select id="lpSelect" title="选择当前生效的经验库。AI 做单的提示词注入和复盘写入都用它。">
+            <option value="">读取中…</option>
+          </select>
+          <button class="btn-ghost" id="lpImport" onclick="lpScanAndImport()"
+                  title="把 .jsonl 文件放进程序的 import 目录，然后点这里扫描导入">导入</button>
+          <button class="btn-ghost" id="lpExport" onclick="lpExportActive()"
+                  title="把当前选中的经验库导出成 .jsonl 备份，会弹保存对话框让你选位置">导出</button>
+          <button class="btn-ghost" id="lpNew" onclick="lpCreate()"
+                  title="新建一个空的经验库，从零积累">新建</button>
+        </div>
+        <!-- 教训库：跨场次复发统计。默认收起——它要扫所有归档流水数平仓笔，
+             比状态查询重，不该跟着 1 秒轮询跑，点开才拉。 -->
+        <details id="atLessons" style="margin:var(--sp3) 0 6px">
+          <summary class="mini" style="cursor:pointer">
+            教训库 <span id="atLessonsHint">点开看跨场次复发（这个错误还在不在犯）</span>
+          </summary>
+          <pre id="atLessonsText" style="white-space:pre-wrap">点开即加载…</pre>
+        </details>
+      </div>
+
+      <div class="setup-card">
+        <h3>运维</h3>
+        <div class="sub">重置战绩只清数字，旧流水归档保留、可回看；清空经验只清教训库，战绩不动。</div>
+        <div class="row">
+          <button class="btn-ghost" id="atReset" onclick="resetAutoTrade()"
+                  title="清空 AI 的战绩统计（旧流水归档保留），换参数前用。经验不受影响">重置战绩</button>
+          <button class="btn-ghost" id="atResetLessons" onclick="resetLessons()"
+                  title="只清 AI 攒的复盘教训，战绩和持仓都不动">清空经验</button>
+        </div>
+        <div class="sub" style="margin:var(--sp2) 0 0">
+          急停（关闭并清仓）有两处入口：顶部吸顶带、做单台操作条——都是同一个动作。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 出场闸门参数表：做单台把它们收起来了，但必须有一个地方能看全、
+       且显示的是「实际在跑的那份 cfg」。0 = 关闭，显示成「关闭」而不是 0。 -->
+  <div class="card">
+    <div class="card-head">
+      <h2>出场闸门</h2>
+      <span class="mini">数值来自 state 里实际在跑的 cfg，不是模板默认值</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="tl" style="width:120px">闸门</th><th class="tl" style="width:150px">生效值</th>
+        <th class="tl">作用</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="tl">硬止损</td>
+          <td class="tl"><span class="at-gate sl" id="atGateSl"
+                title="浮亏到线由程序直接市价平，不问模型。账本里仍记为「手动平仓」，不给订单挂 SL"><b id="atGateSlV">−3.00</b></span></td>
+          <td class="tl">出场第 1 顺位。到线不等模型，直接市价平。</td>
+        </tr>
+        <tr>
+          <td class="tl">止损快查</td>
+          <td class="tl"><span class="at-gate guard" id="atGateGuard"
+                title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。决策间隔是 60 秒，这中间价格能跑完一整根 M1，止损会超调"><b id="atGateGuardV">每 5 秒</b></span></td>
+          <td class="tl">必须严于决策间隔才有意义；配得不小于间隔时显示「关闭」。</td>
+        </tr>
+        <tr>
+          <td class="tl">保本止损</td>
+          <td class="tl"><span class="at-gate be" id="atGateBe"
+                title="趋势单浮盈摸到触发线后，把券商端的硬止损抬到开仓价。挂在券商那边，进程崩了、面板关了都还有效，成交就在开仓价上——轮询式止损实测超调 13%。挂不上时由 5 秒快查在浮盈回到 0 时代平"><b id="atGateBeV">3.25</b></span></td>
+          <td class="tl">只给趋势单。改的是券商端 SL，进程崩了也有效。</td>
+        </tr>
+        <tr>
+          <td class="tl">止盈门槛</td>
+          <td class="tl"><span class="at-gate tp" id="atGateTp"
+                title="浮盈没到这个数就不平、也不调模型（省 token）。到线才问模型要不要落袋"><b id="atGateTpV">3.25</b></span></td>
+          <td class="tl">按持仓锁定的 plan 取值：趋势单用 <span id="atGateTpTrend">—</span>。</td>
+        </tr>
+        <tr>
+          <td class="tl">停滞唤醒</td>
+          <td class="tl"><span class="at-gate" id="atGateStale"
+                title="峰值浮盈停滞 N 秒、且已掉到止盈门槛的 60% 以下，就把这一轮的决定权交回模型。阈值一个字没改，只是不再盲等——没有它，一笔摸到高点又吐回去的单子会被 tp_wait 全程挡着，模型一次都问不到"><b id="atGateStaleV">3 分钟</b></span></td>
+          <td class="tl">不改阈值，只把决定权交回模型，避免盲等。</td>
+        </tr>
+        <tr>
+          <td class="tl">持仓上限</td>
+          <td class="tl"><span class="at-gate" id="atGateHold"
+                title="到点无条件市价平，盈亏都平。防止震荡行情里拖成隔夜单"><b id="atGateHoldV">60 分钟</b></span></td>
+          <td class="tl">到点无条件平，防止拖成隔夜单。趋势单用 <span id="atGateHoldTrend">—</span>。</td>
+        </tr>
+      </tbody>
+    </table>
+    <!-- 完整规则与信息边界：这些都是「看一次就够」的口径说明，
+         摊在页面上会把数字挤到看不见，所以只在设置舱里展开。 -->
+    <details class="at-rules" style="margin-top:var(--sp3)">
+      <summary>完整规则与信息边界</summary>
+      <div class="at-rules-body">
+        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 60 秒、同向重进 180 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
+        · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
+        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 峰值停滞唤醒 → 止盈门槛，顺序写死。
+        浮盈 ≥ 止盈门槛时才会问模型要不要落袋；峰值停滞（默认 3 分钟没再抬高、且浮盈已掉到
+        门槛的 60% 以下）也会把这一轮的决定权交回模型——<b>阈值一个字没改，只是不再盲等</b>
+        （10-28 那笔摸到 +1.85 之后 455 秒、7 轮 tick 模型一次没被问到）。参数是用真实 M1 K 线回放 191 笔入场
+        扫出来的，不是拍的——见 <code>tools/replay_exit.py</code>；扫了 36 组，
+        <b>全部负期望</b>，最优一组仍是 −0.09/笔，所以别指望调这两个数扭亏。
+        <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；
+        收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
+        <br><b>无视点差成本</b>（不由模型负责）· 止损是程序按浮亏主动市价平，
+        <b>不给订单挂 SL/TP</b>（账本里仍是手动平仓）。
+        <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，
+        且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」。
+        等待期间照常分析行情做下一笔。决策流里灰字是「跳过」——不花钱、没下单。
+      </div>
+    </details>
+  </div>
+
+  <!-- 程序名 / 版本 / 检查更新：**只属于设置舱**，跟着设置舱一起显示。
+       原来它挂在页面最底下、所有视图共用一条页脚，等于让「做单台」每天
+       交出一条 30px 的高度去摆一样交易时一眼都不看的东西——而做单台的
+       硬约束是一屏装完不许滚。移进来之后做单台 / 决策流 / 复盘台都没有
+       这一条，需要看版本或检查更新时切到设置舱即可。
+       「退出程序」按钮已删除——窗口右上角本来就有 X，而 X 走的关闭路径
+       （_on_window_closing → onCloseRequested → /api/app/quit）和按钮
+       完全同一条，确认弹窗、停线程、必要时平仓一个都不少。 -->
