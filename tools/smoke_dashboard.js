@@ -743,6 +743,11 @@ try {
     && src.indexOf('class="t">本轮判断') < 0;
   console.log(`  「本轮判断」紧跟「不做」且不再出现在环头 ${labelOk ? '✓' : '✗'}`);
   if (!labelOk) failed = true;
+  // 行高必须是 auto / 1fr：回到 1.05fr 让环跟着拉伸，宽屏又会在「理由」和
+  // 「模型/我」之间堆出上百像素的空洞（1600×900 实测 96px）。
+  const rowOk = /\.at-grid\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/.test(src);
+  console.log(`  做单台行高 auto / 1fr（环按内容定高） ${rowOk ? '✓' : '✗'}`);
+  if (!rowOk) failed = true;
 } catch (e) {
   failed = true;
   console.log('渲染抛错:', e.message);

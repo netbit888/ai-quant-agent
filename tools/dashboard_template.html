@@ -192,10 +192,15 @@
      被挤成两行半，持仓面板那 38% 宽度下四个数字已经挤到要退回 2×2。
      改成上下铺满之后，p_up 条和理由一行能放的字数翻了近一倍，持仓面板也能
      把 6 盏闸门灯从 3×2 摊成一行 6 个，省下整整一行高度。
-     行高 1.05 : 1 —— 环里要放模型原话，天然比四个数字需要多一点。 */
+     行高改 auto / 1fr（2026-11-05 收空白）：环里内容只有 ~190px，被 1.05fr
+     拉到 303px 之后 `.ctx-cmp` 的 margin-top:auto 把 96px 空白堆在「理由」和
+     「模型/我」之间，右栏参数行下面同样空一截——1600×900 实测两条空洞。
+     改成环按内容定高、富余进持仓面板：持仓面板本来就靠 space-between 吸收
+     高度，多给它属于「铺开」不是「挖洞」。卡片本身的富余另由 fitDesk 收口
+     （最多长 80px），否则 1080 高时页面底部会空掉三分之一。 */
   .at-grid {
     display: grid; grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1.05fr) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     gap: var(--sp3); align-items: stretch;
   }
 
@@ -600,21 +605,15 @@
   #live-desk .pos-panel { justify-content: space-between; }
 
   /* ---- 矮窗口紧凑排版（.tight 由 fitPane 实测后挂到 #live-desk 上）----
-     1120×720 是窗口允许的最小尺寸（desktop.py 的 min_size），在这一档下
-     宽松版自然高度 638px，而可用只有 550px——差 88px 全靠空档：
-     `grid-template-rows: 1.05fr / 1fr` 在「容器高度不定」时会把两行一起
-     往上抬，环里原来的 .rspacer 各被撑到 42px（设计意图是 4px），
-     持仓面板的 space-between 同理。改 auto 之后这两处空白立刻归零，
-     内容一个字没动。（.rspacer 已随左图右字改版删除，空档改由
-     .ctx-cmp / .ctx-ev 的 margin-top:auto 承担，同样会归零。）
-     只在装不下时才挂 .tight：宽屏上那些留白是刻意铺开的呼吸位，不能删。 */
-  #live-desk.tight .at-grid { grid-template-rows: auto minmax(0, 1fr); }
+     1120×720 是窗口允许的最小尺寸（desktop.py 的 min_size），这一档要把
+     卡片内外边距和轨道高度一起压下来才装得下。
+     行高不再由 .tight 改：.at-grid 已经是 auto / 1fr（见文件上半段），
+     宽屏的富余高度统一进持仓面板，环不再被拉出空洞。 */
   #live-desk.tight > .card.l1 { padding-top: var(--sp2); padding-bottom: var(--sp2); }
   #live-desk.tight #ring { padding: 10px 14px; }
   #live-desk.tight .pos-panel { padding: 10px 14px; }
   #live-desk.tight .put-track { height: 28px; }
-  /* 矮窗口：左图右字保住三个大字和参数行（打法参数不能被省掉），只压色块高度。
-     .ctx-ev 的 margin-top:auto 在装不下时本来就会归零，不需要另写覆盖。 */
+  /* 矮窗口：左图右字保住三个大字和参数行（打法参数不能被省掉），只压色块高度。 */
   #live-desk.tight .cmp-cell { height: 10px; }
   /* 页脚一条带子兼三件事：标题 / 条数 / 跳过行开关。原来这三样各占一行
      （表头 22px + 过滤条），决策流因此少显示整整一行。 */
@@ -6965,10 +6964,14 @@ function fitPane(paneId) {
     minH = card.scrollHeight;
   }
   if (avail > minH) {
-    // 富余空间交给卡片自己：做单台给 at-grid（各区块按间距铺开），
-    // 决策流给 .stream-body（列表变长）。空仓/未启动时也不会在底部留一条空档。
-    card.style.height = avail + 'px';
-    card.style.maxHeight = avail + 'px';
+    // 富余空间交给卡片自己：决策流给 .stream-body（列表变长）。
+    // 做单台例外：它只有「环 + 持仓」两块固定内容，撑满视口只会把空白摊进
+    // 卡片内部（1600×900 实测：环里一条 96px 空洞，或持仓面板被 space-between
+    // 撑散）；完全不撑又会在 1080 高的屏上留下三分之一屏的空白背景。
+    // 折中：最多再长 80px（一行呼吸位），其余富余留给页面。
+    const capH = paneId === 'live-desk' ? Math.min(avail, minH + 80) : avail;
+    card.style.height = capH + 'px';
+    card.style.maxHeight = capH + 'px';
     // 自校验：撑满后文档还是比视口高，说明 top 量早了（账户条/标题还没渲染出来），
     // 或者内容确实装不下——退回最小高度让页面滚，绝不把卡片撑到视口外。
     if (document.documentElement.scrollHeight > window.innerHeight + 1) {
@@ -6982,8 +6985,9 @@ function fitPane(paneId) {
     pane.classList.add('tight');
     const minTight = card.scrollHeight;
     if (avail > minTight) {
-      card.style.height = avail + 'px';
-      card.style.maxHeight = avail + 'px';
+      const capTight = Math.min(avail, minTight + 80);
+      card.style.height = capTight + 'px';
+      card.style.maxHeight = capTight + 'px';
       if (document.documentElement.scrollHeight > window.innerHeight + 1) {
         card.style.height = '';
         card.style.maxHeight = minTight + 'px';
