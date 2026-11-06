@@ -231,6 +231,10 @@ python -m live.backup --restore 2026-11-04 --login 277733809 --yes
 .venv\Scripts\python.exe tools\query.py --preset giveback
 .venv\Scripts\python.exe tools\query.py --sql "SELECT source, count(*) FROM log WHERE kind='close' GROUP BY 1"
 
+# 账户绩效报告（绝对口径不需要参数；Sharpe/回撤率/HTML 要 --balance）
+.venv\Scripts\python.exe tools\report.py --balance 1000
+.venv\Scripts\python.exe tools\report.py --balance 1000 --html report.html
+
 # 静态检查（开发用，不是运行依赖）
 .venv\Scripts\ruff.exe check .
 
