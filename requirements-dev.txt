@@ -1,0 +1,11 @@
+# 开发/分析用的可选依赖。**不进运行依赖，也不打进安装包**（aqa.spec 只收
+# 程序真正 import 的东西，这些只在手工跑工具时用）。
+#
+#   .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+#
+# dtale：tools/inspect_log.py 的图形界面（Man Group 开源，LGPL-2.1）。
+# 它会带进 pandas + flask —— 也就是说 venv 里会重新出现 numpy。
+# 这是**可接受的**：运行时代码一行都没 import 它们（2026-11-05 删 numpy 的
+# 理由是"运行依赖里不该有以防万一"，这里正相反：这是真的在用）。
+# 装完可以顺手跑 `pip list | grep -i numpy` 确认；卸载 dtale 不会影响程序。
+dtale>=3.14

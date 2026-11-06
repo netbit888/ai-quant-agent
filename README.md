@@ -221,6 +221,11 @@ python -m live.backup --restore 2026-11-04 --login 277733809 --yes
 .venv\Scripts\python.exe aqa.py doctor           # 环境自检：MT5 进程、连接、账本、端口
 .venv\Scripts\python.exe aqa.py accounts list    # 已归档账户
 
+# 看决策流水（只读）：嵌套 JSON 摊平成表，可选 dtale 图形界面或导出 CSV
+.venv\Scripts\python.exe tools\inspect_log.py --kind close
+.venv\Scripts\python.exe tools\inspect_log.py --ticket 4925197542 --csv out.csv
+# 图形界面要另装（不进运行依赖）：pip install -r requirements-dev.txt
+
 # 测试
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```
