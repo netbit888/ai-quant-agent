@@ -117,7 +117,6 @@ def engine_cfg(symbol: str, balance: float = 3000):
 
 def cmd_data(args) -> None:
     if args.action == "pull":
-        import MetaTrader5 as mt5
 
         from mt5.bridge import get_rates, mt5_session, save_csv
 
@@ -221,9 +220,8 @@ def cmd_backtest(args) -> None:
 
 
 def cmd_evaluate(args) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    from backtest.metrics import compute_metrics
     from tools.evaluate import eval_stress, eval_years
 
     path = data_path(args.symbol, args.tf)
@@ -506,7 +504,7 @@ def cmd_live(args) -> None:
         if sc.get("dimensions"):
             from live.scoring import grade_text
 
-            print(f"\n=== 交易评分 ===")
+            print("\n=== 交易评分 ===")
             print(f"  综合等级 {sc['grade']}（{grade_text(sc['grade'])}）  参考分 {sc.get('score')}  "
                   f"单笔均分 {sc.get('avg_trade_score')}")
             for d in sc["dimensions"]:
@@ -558,7 +556,7 @@ def cmd_live(args) -> None:
     while True:
         try:
             once()
-            print(f"\n--- {time.strftime('%H:%M:%S')} 已同步，{args.interval}s 后继续 ---\n")
+            print(f"\n--- {_time.strftime('%H:%M:%S')} 已同步，{args.interval}s 后继续 ---\n")
             _time.sleep(args.interval)
         except KeyboardInterrupt:
             print("已停止")
@@ -693,7 +691,7 @@ def cmd_doctor(args) -> None:
         with socket.create_connection((host, port), timeout=2):
             print(f"  [OK] http://{host}:{port} 正在监听")
     except OSError:
-        print(f"  [未运行] 启动：start-dashboard.bat 或 python -m tools.dashboard")
+        print("  [未运行] 启动：start-dashboard.bat 或 python -m tools.dashboard")
 
     if not alive:
         print(

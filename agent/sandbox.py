@@ -7,10 +7,8 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
 
 from backtest.engine import EngineConfig
-from backtest.models import Bar
 
 
 def extract_code(text: str) -> str:

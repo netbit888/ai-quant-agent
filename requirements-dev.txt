@@ -9,3 +9,13 @@
 # 理由是"运行依赖里不该有以防万一"，这里正相反：这是真的在用）。
 # 装完可以顺手跑 `pip list | grep -i numpy` 确认；卸载 dtale 不会影响程序。
 dtale>=3.14
+
+# duckdb：tools/query.py 的引擎（嵌入式，不用装服务、不留 .db 文件）。
+# 纯 Python 侧只有一个 C 扩展 wheel，约 30MB。
+duckdb>=1.0
+
+# ruff：静态检查（连字符号都没有，是个独立二进制，约 20MB）。
+# 为什么值得装：第一次跑就抓到两个真 bug（aqa.py 的 time 未定义、
+# aqa_launcher.py 的 _short_tb 定义在调用之后），两个都在不常走的路径上，
+# 单测覆盖不到。`tests/test_lint_clean.py` 会用它守门。
+ruff>=0.9

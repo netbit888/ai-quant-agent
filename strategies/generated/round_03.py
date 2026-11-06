@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from backtest.indicators import atr, ema, sma
+from backtest.indicators import atr, ema
 from backtest.models import Bar
 
 

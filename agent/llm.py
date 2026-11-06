@@ -27,7 +27,11 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
+# 这个 Path **在模块里看着没用**，但它是测试的打桩入口：
+# `tests/test_llm.py` 拿 `llm.Path.read_text` 计数，验证 `.env` 只读一次。
+# ruff 的 F401 会把它当死导入删掉（2026-11-06 真被删过一次，全量测试红），
+# 所以留 noqa 而不是删。
+from pathlib import Path  # noqa: F401
 
 from openai import OpenAI
 

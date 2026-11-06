@@ -95,7 +95,6 @@ def main() -> None:
         return
 
     cls = aqa.load_strategy_class(args.strategy)
-    spec = aqa.SYMBOLS.get(args.symbol, {})
     cfg = aqa.engine_cfg(args.symbol, args.balance)
     if args.spread:
         cfg = type(cfg)(**{**cfg.__dict__, "spread_points": args.spread})

@@ -23,7 +23,6 @@
 
 from __future__ import annotations
 
-import json
 import statistics
 from pathlib import Path
 

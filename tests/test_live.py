@@ -8,7 +8,7 @@ from tests._stubs import install_missing_stubs
 
 install_missing_stubs()  # 没装 MetaTrader5 / openai 时用最小桩，别让无关用例变红
 
-from live.journal import Trade, _reason, build_trades, is_demo_mode
+from live.journal import _reason, build_trades, is_demo_mode
 from live.stats import compute, risk_flags
 
 DAY = 86400
@@ -231,7 +231,6 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------- 近期质量
-import itertools
 
 from live.quality import (
     MIN_SAMPLE,

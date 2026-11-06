@@ -14,7 +14,7 @@ from backtest.engine import EngineConfig, run_backtest
 from backtest.indicators import atr, ema, macd, sma
 from backtest.metrics import compute_metrics
 from backtest.models import Bar
-from backtest.structure import SwingIndex, detect_bos, detect_pattern, swing_points, trend_state
+from backtest.structure import SwingIndex, detect_pattern, swing_points
 from risk.guard import RiskConfig, RiskGuard
 
 

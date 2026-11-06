@@ -183,7 +183,7 @@ def fetch_latest() -> dict | None:
             print(f"[updater] rate limited ({exc.code})，稍后再试", flush=True)
         elif exc.code == 404:
             _last_fail_reason = "仓库不可达（404：私有/不存在，或还没有 Release）"
-            print(f"[updater] HTTP 404", flush=True)
+            print("[updater] HTTP 404", flush=True)
         else:
             _last_fail_reason = f"GitHub HTTP {exc.code}"
             print(f"[updater] HTTP {exc.code}", flush=True)

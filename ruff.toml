@@ -1,0 +1,31 @@
+# ruff 配置：**只挑真错误，不做风格改造**（2026-11-06 定）
+#
+# 为什么规则集这么小
+# ------------------
+# 全量默认规则在本项目是 306 条，其中 194 条可自动修，绝大多数是
+# `UP017`（datetime.UTC）、`I001`（import 排序）这类纯风格项。那类改动
+# 会让每份 diff 都变脏（这个项目一次提交常常只改一个函数），收益却是零。
+#
+# 保留的 `F` 是 pyflakes：未定义名、未使用导入/变量、重复定义、f-string
+# 缺参数。它不是风格，是**会真出错的地方**——第一次跑就抓到两个：
+#   · aqa.py 的 `time` 未定义（--watch 一进循环就 NameError）
+#   · aqa_launcher.py 的 `_short_tb` 定义在 `if __name__` 之后（崩溃弹窗自己先崩）
+# 两个都在不常走的路径上，单测和手工点界面都不一定碰得到。
+#
+# `E9` 是语法级错误（真跑不起来的那种）。
+target-version = "py310"
+line-length = 100
+
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "data",
+    # 自动生成的策略文件：它是产物不是源码，改它等于下次生成又被覆盖
+    "strategies/generated",
+    # 前端分片（js/css/html），不是 Python
+    "tools/ui",
+]
+
+[lint]
+select = ["F", "E9"]

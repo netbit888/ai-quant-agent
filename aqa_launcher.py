@@ -150,6 +150,18 @@ def main() -> int:
     return dashboard_main() or 0
 
 
+def _short_tb() -> str:
+    """给弹窗用的短 traceback：最后两行通常就够定位了。
+
+    **必须定义在 `if __name__` 之前**（2026-11-06 修）：这个块在模块执行到
+    那一行时就跑，不是等函数调用。原来把本函数放在文件末尾，于是启动失败时
+    弹窗自己先抛 NameError，被外层 `except: pass` 吞掉——用户看到的还是
+    "点了没反应"，而这次连错误框都没有。
+    """
+    lines = traceback.format_exc().strip().splitlines()
+    return "\n".join(lines[-2:])
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
@@ -179,8 +191,3 @@ if __name__ == "__main__":
             input("按回车退出…")
         raise
 
-
-def _short_tb() -> str:
-    """给弹窗用的短 traceback：最后两行通常就够定位了。"""
-    lines = traceback.format_exc().strip().splitlines()
-    return "\n".join(lines[-2:])

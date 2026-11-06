@@ -14,7 +14,6 @@ import json
 import marshal
 import os
 import struct
-import subprocess
 import tempfile
 import unittest
 import urllib.error

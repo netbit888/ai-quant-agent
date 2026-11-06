@@ -101,7 +101,9 @@ excludes = [
     # pandas 一旦被谁在运行时代码里 import 一下，PyInstaller 会连带把
     # scipy / statsmodels / matplotlib 一起打进去，安装包从 23MB 涨到 150MB+。
     "tools.inspect_log",
+    "tools.query",
     "pandas", "numpy", "scipy", "statsmodels", "matplotlib", "dtale", "flask",
+    "duckdb", "ruff",
 ]
 
 # 默认无控制台（原生窗口旁边再挂个黑窗，安装版就白做了）。

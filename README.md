@@ -226,6 +226,14 @@ python -m live.backup --restore 2026-11-04 --login 277733809 --yes
 .venv\Scripts\python.exe tools\inspect_log.py --ticket 4925197542 --csv out.csv
 # 图形界面要另装（不进运行依赖）：pip install -r requirements-dev.txt
 
+# 用 SQL 查账本（预设：plans / sources / giveback / conflict / skips / be）
+.venv\Scripts\python.exe tools\query.py --list
+.venv\Scripts\python.exe tools\query.py --preset giveback
+.venv\Scripts\python.exe tools\query.py --sql "SELECT source, count(*) FROM log WHERE kind='close' GROUP BY 1"
+
+# 静态检查（开发用，不是运行依赖）
+.venv\Scripts\ruff.exe check .
+
 # 测试
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```

@@ -1286,7 +1286,6 @@ def _set_topmost(h: int, on: bool) -> None:
     SWP_NOACTIVATE 是刻意的——抢焦点会打断用户正在别处输入的东西，
     信号需要的是「看得见」，不是「抢走键盘」。
     """
-    import ctypes
     from ctypes import wintypes
 
     _user32().SetWindowPos(

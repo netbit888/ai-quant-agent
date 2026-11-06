@@ -3648,7 +3648,6 @@ def ask_exit(rows: list[dict], position: dict, bid: float, ask: float,
                                trend_follow=cfg.trend_follow,
                                tp_min=float(exit_params(
                                    cfg, position.get("plan"))["tp_min_usd"] or 0.0))
-    held = int(time.time()) - int(position.get("opened_at") or time.time())
     try:
         text, usage = _chat(prompt, system_for(
             EXIT_SYSTEM, cfg, plan=position.get("plan")))
@@ -5103,7 +5102,7 @@ def validate_cfg(cfg: Cfg) -> list[str]:
     # 上一轮没回来下一轮已经开始，决策全挤在一起。
     if cfg.interval_sec < 3:
         issues.append(
-            f"决策间隔不能小于 3 秒（模型单次调用约 2.6 秒，再快只会堆积请求）"
+            "决策间隔不能小于 3 秒（模型单次调用约 2.6 秒，再快只会堆积请求）"
         )
     if cfg.lots <= 0:
         issues.append("手数必须大于 0")

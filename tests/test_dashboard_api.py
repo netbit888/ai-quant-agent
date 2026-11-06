@@ -264,7 +264,6 @@ class TestStartCfgWiring(LiveServerCase):
         return status, payload, captured.get("cfg")
 
     def test_panel_values_reach_the_worker(self):
-        from live import autotrade
 
         status, payload, cfg = self._start(
             {"interval_sec": 30, "cooldown_sec": 0, "cooldown_same_sec": 0})
