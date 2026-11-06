@@ -307,6 +307,8 @@ class Cfg:
     top_long_ban: bool = False
     # mtf_conflict：M1 判震荡、但 M5 净变动明显和这笔方向相反时给建议。
     # 同样默认关，理由同上。
+    # 2026-11-06 起，趋势单的同名冲突也会记录（代号 mtf_conflict_trend），
+    # 但**没有开关、永远不拦**——先攒样本，见 _entry_advice 里那段账。
     mtf_conflict: bool = False
     # 是否把 tick 级（逐笔 bid/ask）数据喂给模型。关掉可省 token 和一次数据查询。
     ticks: bool = True
@@ -2137,7 +2139,18 @@ def _entry_advice(cfg: Cfg, direction: int, feat: dict,
     # 阈值定 5.0 的依据（**样本很小，只够当提示不够当规律**）：
     # 历史带 M5 特征的 26 笔里，M5 ≤ -5 时做多 5 笔均值 -1.88、做空 4 笔 -1.03；
     # 而赢的那笔（21:52 上沿做空）M5 只有 -2.45。
-    if feat.get("regime") == "range":
+    #
+    # 2026-11-06 扩到趋势单（用户要求），但**只记录、永不拦截**：
+    #   · 逻辑上没理由放过：趋势单能拿 3 小时、震荡单 1 小时，逆中期方向的
+    #     暴露时间是 3 倍，越该管的地方反而没管，这是漏的；
+    #   · 但现有 5 笔趋势单里，冲突 3 笔均值 **+0.20**、非冲突 2 笔 **-1.70**，
+    #     且被砍掉的会包括唯一一笔 +3.71（peak 7.39）。样本 5 笔不足以下结论；
+    #   · 冲突率高达 3/5：趋势单的「冲突」多半是"14 分钟脉冲 vs 70 分钟方向"，
+    #     直接否决等于把趋势打法关掉一半。
+    # 所以代码用**独立代号** mtf_conflict_trend，`_gate_blocks` 对它永远返回
+    # False（没有开关）。先攒数据，等趋势单样本到 20 笔以上再谈阈值和拦不拦。
+    regime = feat.get("regime")
+    if regime in ("range", "trend"):
         mtf = feat.get("mtf") or {}
         drift = mtf.get("drift")
         if drift is not None:
@@ -2148,6 +2161,11 @@ def _entry_advice(cfg: Cfg, direction: int, feat: dict,
         if drift is not None and abs(drift) >= MTF_CONFLICT_DRIFT and direction * drift < 0:
             side = "下行" if drift < 0 else "上行"
             act_text = "做多" if direction > 0 else "做空"
+            if regime == "trend":
+                return ("mtf_conflict_trend",
+                        f"中期方向冲突：M5 净变动 {drift:+.2f}（明显{side}），"
+                        f"与这笔{act_text}相反。M1 的 ER 只说最近 14 分钟走得直，"
+                        f"M5 是 70 分钟的中期方向——这是逆着中期追短期脉冲（仅记录）")
             return ("mtf_conflict",
                     f"中期方向冲突：M5 净变动 {drift:+.2f}（明显{side}），"
                     f"与这笔{act_text}相反。M1 判震荡只是短期没方向，"
@@ -2168,6 +2186,13 @@ def _gate_blocks(cfg: Cfg, code: str) -> bool:
         return bool(cfg.top_long_ban)
     if code == "mtf_conflict":
         return bool(cfg.mtf_conflict)
+    if code == "mtf_conflict_trend":
+        # **故意没有开关**（2026-11-06）。趋势单的跨周期冲突目前只记录：
+        # 5 笔样本里冲突组均值 +0.20、非冲突 -1.70，且冲突率 3/5——现在拦
+        # 就是把趋势打法关掉一半，还可能砍掉唯一那笔 +3.71。
+        # 要升级成闸门，先拿 20 笔以上的趋势单把阈值（现在是绝对美元 5.0）
+        # 标定清楚，并改成按 ATR 归一化，别直接照搬震荡单的数。
+        return False
     return False
 
 

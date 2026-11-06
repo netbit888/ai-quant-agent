@@ -1050,6 +1050,31 @@ class TestEntryAdviceInTick(TempLedger):
         self.assertEqual(autotrade.load_state()["last_decision"]["veto"],
                          "top_long_ban")
 
+    def test_trend_conflict_logged_but_never_blocks(self):
+        """趋势单的跨周期冲突：开仓行留痕，但**开了个遍开关也不拦**。
+
+        纯函数对上不等于接进 tick 了对——这里走完整 tick()，把 M5 喂成
+        +11.8（单边上行）而模型要做空，验证单子照样出去、只多一行记录。
+        """
+        info = {"tf": "M5", "n": 14, "er": 0.6, "pos": 0.7,
+                "drift": 11.8, "regime": "单边上行"}
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.3,
+                                             "agree": False,
+                                             "reason": "连阴三根收在低位，弱势延续",
+                                             "source": "llm"}), \
+             mock.patch.object(autotrade, "send_open",
+                               return_value={"ok": True, "price": 4001.0,
+                                             "order": 602}), \
+             mock.patch.object(autotrade, "_mtf_bundle",
+                               return_value={"text": "【背景】M5 …", "info": info}):
+            row = autotrade.tick(
+                autotrade.Cfg(dry_run=True, mtf_conflict=True),
+                now=NOW, quote=(4000.0, 4000.24), rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "open")
+        self.assertEqual(row["would_veto"], "mtf_conflict_trend")
+        self.assertNotIn("veto", autotrade.load_state()["last_decision"])
+
 
 class TestWaitAnchor(unittest.TestCase):
     """等回踩的价位不许跟着价格漂。
@@ -1430,11 +1455,42 @@ class TestMtfConflictAdvice(unittest.TestCase):
         self.assertEqual(a[0], "mtf_conflict")
         self.assertIn("上行", a[1])
 
-    def test_trend_regime_not_flagged(self):
-        """趋势市本来就是顺势打法，由 prog_dir 管，这条不插手。"""
-        a = autotrade._entry_advice(autotrade.Cfg(), 1, self._feat(regime="trend"),
-                                    "顺势做多", True)
+    def test_trend_regime_is_recorded_but_never_blocks(self):
+        """趋势单的冲突也要记，但**永远不拦**（2026-11-06 扩）。
+
+        逻辑上趋势单更该管：能拿 3 小时，逆中期方向的暴露是震荡单的 3 倍。
+        但现有 5 笔里冲突组均值 +0.20、非冲突 -1.70，冲突率 3/5——现在拦
+        等于砍掉半个趋势打法，还会砍掉唯一那笔 +3.71。所以先只记录。
+        """
+        a = autotrade._entry_advice(autotrade.Cfg(), 1,
+                                    self._feat(regime="trend"), "顺势做多", True)
+        self.assertIsNotNone(a, "趋势单的跨周期冲突必须被记录")
+        self.assertEqual(a[0], "mtf_conflict_trend")
+        self.assertIn("逆着中期", a[1])
+        # 三个开关全打开也不许变成闸门——这个代号故意没有开关
+        self.assertFalse(autotrade._gate_blocks(
+            autotrade.Cfg(act_guard=True, top_long_ban=True, mtf_conflict=True),
+            "mtf_conflict_trend"))
+
+    def test_trend_aligned_with_m5_is_quiet(self):
+        """顺势且与中期同向：不许误报。"""
+        a = autotrade._entry_advice(autotrade.Cfg(), -1,
+                                    self._feat(regime="trend", drift=-7.1),
+                                    "顺势做空", True)
         self.assertIsNone(a)
+
+    def test_trend_real_trade_1106_is_recorded(self):
+        """2026-11-06 那笔实盘：M1 下行趋势做空，M5 却是 +11.79。
+
+        峰值 4.88 → 保本 0.00。它正是"逆着中期追 14 分钟脉冲"的样本，
+        所以必须被记下来，但又不能拦（拦了这笔也是 0.00，没有收益）。
+        """
+        feat = {"regime": "trend", "pos": 0.072,
+                "mtf": {"tf": "M5", "drift": 11.793, "er": 0.5959},
+                "ma28_gap": -1.8156, "ma28_side": -1}
+        a = autotrade._entry_advice(autotrade.Cfg(), -1, feat, "顺势做空", True)
+        self.assertEqual(a[0] if a else None, "mtf_conflict_trend")
+        self.assertIn("+11.79", a[1])
 
     def test_missing_mtf_is_not_flagged(self):
         self.assertIsNone(autotrade._entry_advice(

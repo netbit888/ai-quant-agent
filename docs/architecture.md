@@ -44,7 +44,10 @@
 6. direction = 1 if p_up > 0.5 else -1
 7. 记录程序建议：act_guard（理由写"等"却给了 act=true）/ top_long_ban（震荡市
    贴上沿做多）/ 跨周期冲突 —— 默认**只写日志不拦**（`would_veto`），
-   面板标「模型否决建议」；开关打开才真的拦
+   面板标「模型否决建议」；开关打开才真的拦。
+   跨周期冲突分两个代号：震荡单 `mtf_conflict`（有开关），趋势单
+   `mtf_conflict_trend`（2026-11-06 起记录，**故意没有开关、永不拦**——
+   5 笔样本里冲突组反而更好，先攒到 20 笔再定阈值）
 8. send_open：市价开仓，sl=None / tp=None
 9. 落盘：open / skip / hold / close 行 + 特征快照 feat
 ```
