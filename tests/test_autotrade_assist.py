@@ -459,6 +459,101 @@ class TestAssistEntry(TempLedger):
         self.assertEqual(row["kind"], "open")
         m_wait.assert_not_called()
 
+    # ---- 同意的结局要能对上号（2026-11-06）----------------------------------
+    # 实盘：用户在最后几秒点了同意，价已朝不利方向跑 3.38，漂移保护把这笔
+    # 作废。面板只写了一句「正在按当前价执行…」就再没下文 → 看着像卡死；
+    # 紧接着的冷却行还写「上一条信号未获批准」，把"人批了但没执行"说成
+    # "人没批"。下面几条钉住：文案要说实话，流水要能按 signal_id 对上号。
+
+    def test_cooldown_text_says_agreed_when_slip_voided(self):
+        self._tick("approve", ans_ask=4001.10)          # 0.86 > 0.80 → 作废
+        row = autotrade.tick(self.cfg, now=NOW + 60, quote=(4000.0, 4000.24),
+                             rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "skip")
+        self.assertEqual(row["answer"], "void_slip")     # 面板靠它出标签
+        self.assertIn("已同意", row["reason"])
+        self.assertNotIn("未获批准", row["reason"])
+        self.assertIn("不再弹窗", row["reason"])
+
+    def test_cooldown_text_after_deny_says_denied(self):
+        self._tick("deny")
+        row = autotrade.tick(self.cfg, now=NOW + 60, quote=(4000.0, 4000.24),
+                             rows=bars_up(), positions=[])
+        self.assertIn("否决", row["reason"])
+        self.assertNotIn("已同意", row["reason"])
+
+    def test_cooldown_text_without_history_stays_generic(self):
+        """旧 state 没有 last_decision.answer（升级后第一次跑）也不能崩。"""
+        state = autotrade.load_state()
+        state["assist_deny_until"] = {"entry": int(time.time()) + 120}
+        state["last_decision"] = None
+        autotrade.save_state(state)
+        row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                             rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "skip")
+        self.assertIn("未获批准", row["reason"])
+
+    def test_signal_row_uses_issue_ts_not_write_ts(self):
+        """signal 行在人答完之后才写盘，ts 必须是**信号发出**的时刻。
+        用写盘时的墙钟，会把这一行盖到 120 秒等待窗的末尾，流水按 ts 排
+        就变成「先有结论、后有信号」——像时间倒流。等了多久由 waited_sec 表达。"""
+        seen = {}
+
+        def fake_wait(cfg, sig, login=None, pos=None, **kw):
+            seen["ts"] = sig["ts"]
+            return {"answer": "approve", "bid": 4000.0, "ask": 4001.10,
+                    "fp": None, "waited_sec": 88.6, "src": "human", "late": False}
+
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "reason": "结构支持", "source": "llm"}), \
+             mock.patch.object(autotrade, "_await_human", side_effect=fake_wait), \
+             mock.patch.object(autotrade, "send_open") as m_open:
+            autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                           rows=bars_up(), positions=[])
+        m_open.assert_not_called()                       # 3.38 级别漂移 → 作废
+        sig = self._signal_rows()[-1]
+        self.assertEqual(sig["ts"], seen["ts"])
+        self.assertEqual(sig["waited_sec"], 88.6)
+
+    def test_approved_but_blocked_by_cooldown_keeps_signal_id(self):
+        """点了同意、却被同向冷却挡下：流水必须能把这笔对上号，
+        否则面板只能盯着 30 行流水猜哪一条是它的结局。
+
+        时间基准：辅助模式下这道判定用的是**真实时钟**（人可能点了 90 秒），
+        所以这里把 time.time 钉到 NOW 附近，让"短冷却已过、同向冷却还差 140 秒"
+        这个状态成立——`can_open` 用 now（不知方向，按 30 秒算）放行，
+        应答回来之后按方向再判一次才拦下，记成 void_state。"""
+        state = autotrade.load_state()
+        state["last_close_ts"] = NOW - 40            # 短冷却 30 秒已过
+        state["last_close_dir"] = 1                  # 和这笔同向（180 秒档）
+        autotrade.save_state(state)
+        with mock.patch.object(autotrade.time, "time", return_value=NOW + 1):
+            row, m_open, _ = self._tick("approve")
+        self.assertEqual(row["kind"], "skip")
+        self.assertEqual(row["answer"], "void_state")
+        self.assertIn("冷却", row["reason"])
+        self.assertTrue(row["signal_id"])
+        m_open.assert_not_called()
+
+    def test_open_failed_keeps_signal_id(self):
+        """同意之后被券商拒单——最需要能对上号的一种结局。"""
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "reason": "结构支持", "source": "llm"}), \
+             mock.patch.object(autotrade, "_await_human",
+                               return_value={"answer": "approve", "bid": 4000.0,
+                                             "ask": 4000.24, "fp": None,
+                                             "waited_sec": 3.0, "src": "human",
+                                             "late": False}), \
+             mock.patch.object(autotrade, "send_open",
+                               return_value={"ok": False, "reason": "保证金不足"}):
+            row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
+                                 rows=bars_up(), positions=[])
+        self.assertEqual(row["kind"], "open_failed")
+        self.assertTrue(row["signal_id"])
+
+
 
 class TestAssistExit(TempLedger):
     def setUp(self):

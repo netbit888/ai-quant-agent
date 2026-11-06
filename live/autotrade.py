@@ -4508,6 +4508,8 @@ def _tick_body(cfg: Cfg, login, now: int,
         if not res.get("ok"):
             row = {"ts": now, "kind": "close_failed", "ticket": pos.get("ticket"),
                    "reason": decision.get("reason"), "error": res.get("reason")}
+            if sig_id:      # 人工点过同意的平仓：让面板能把这一笔对上号
+                row["signal_id"] = sig_id
             _finish(state, row, login, ts=now)
             # 平不掉还继续每分钟调模型问一次，只会白花钱；
             # 仓位还在手上，必须停下来让人去终端处理。
@@ -4564,9 +4566,16 @@ def _tick_body(cfg: Cfg, login, now: int,
         until = _assist_deny_until(state, "entry")
         now_real = int(time.time())
         if until and now_real < until:
+            # 措辞必须对上**上一轮的真实结局**。原来这里一律写「未获批准」，
+            # 而 void_slip（点了同意、价已跑出上限）同样走这条分支——
+            # 用户明明批了，屏幕却说他没批，看着就像「点了没反应」。
+            # 2026-11-06 实盘：最后几秒点的同意，价已跑 3.38，于是被问住。
+            ans = _last_answer(state)
             row = {"ts": now, "kind": "skip", "assist": True,
-                   "reason": (f"上一条信号未获批准，{until - now_real} 秒内不再弹窗"
-                              f"（也不重复问模型）")}
+                   "reason": (f"{_DENY_HEAD.get(ans, '上一条信号未获批准')}，"
+                              f"{until - now_real} 秒内不再弹窗（也不重复问模型）")}
+            if ans:      # 留着让面板的标签和这句文案同源，旧 state 就不写空字段
+                row["answer"] = ans
             return _finish(state, row, login, ts=now)
 
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
@@ -4782,12 +4791,19 @@ def _tick_body(cfg: Cfg, login, now: int,
                "veto": "same_dir_cooldown" if same_dir else "cooldown",
                "reason": f"{'同向' if same_dir else ''}平仓后冷却中，还需 "
                          f"{left_dir} 秒，这一笔不做"}
+        # 辅助模式下这一笔是**人点过同意**之后才被冷却挡下的。挂上 signal_id，
+        # 面板才能把"点了同意"和"最后没开"这两件事对上（见 sigVerdictCheck）。
+        if sig_id:
+            row["signal_id"] = sig_id
         return _finish(state, row, login, ts=now)
 
     res = send_open(cfg, direction)
     if not res.get("ok"):
         row = {"ts": now, "kind": "open_failed", "p_up": p_up, "direction": direction,
                "reason": decision.get("reason"), "error": res.get("reason")}
+        # 同上：同意之后被券商拒掉，是最需要能对上号的一种结局。
+        if sig_id:
+            row["signal_id"] = sig_id
         _finish(state, row, login, ts=now)
         # 被券商拒绝（没开算法交易 / 保证金不足 / 休市 / 手数非法）时，
         # 下一分钟重试也只会同样被拒，还会再花一次模型调用。
@@ -5795,7 +5811,11 @@ def _log_signal(sig: dict, ans: dict, cfg: Cfg, login=None,
     的期望差，必须有这一行。
     """
     row = {
-        "ts": int(time.time()), "kind": "signal",
+        # ts 用**信号发出的时刻**（sig 构造时就定成这一轮的 now），不是写盘时刻。
+        # 这一行是在人答完之后才落的，用墙钟会把它盖到等待窗的末尾——于是一轮
+        # 120 秒的等待，流水里变成"先有结论（skip 行）、后有信号"，读起来
+        # 像时间倒流。等待多久已经由 waited_sec 记着了，不用 ts 再表达一遍。
+        "ts": int(sig.get("ts") or time.time()), "kind": "signal",
         "signal_id": sig.get("id"), "sig_kind": sig.get("kind"),
         "answer": ans.get("answer"),
         "waited_sec": round(float(ans.get("waited_sec") or 0.0), 1),
@@ -5819,6 +5839,28 @@ def _log_signal(sig: dict, ans: dict, cfg: Cfg, login=None,
         row.update(extra)
     append_log(row, login)
     return row
+
+
+# 静默期那句话的开头（见 tick 里的冷却分支）。只描述上一轮**真的发生了什么**：
+# 「未获批准」不能盖住「批准了但没能执行」——后者是价格跑掉了，不是人没点。
+_DENY_HEAD: dict[str | None, str] = {
+    "deny": "上一条信号你否决了",
+    "expired": "上一条信号无人应答、按不做处理",
+    "cancelled": "上一条信号因做单线程停止而作废",
+    "blocked": "上一条信号因已有持仓而作废",
+    "void_slip": "上一条信号已同意，但价格已朝不利方向跑出上限、作废",
+    "void_unknown": "上一条信号已同意，但读不到持仓、作废",
+    "void_state": "上一条信号已同意，但当时已不可开仓、作废",
+}
+
+
+def _last_answer(state: dict) -> str | None:
+    """上一轮人工应答的结局（deny / expired / void_slip …）。旧 state 没有就 None。"""
+    ld = state.get("last_decision")
+    if not isinstance(ld, dict):
+        return None
+    ans = ld.get("answer")
+    return str(ans) if ans else None
 
 
 def _assist_deny_until(state: dict, kind: str) -> int:

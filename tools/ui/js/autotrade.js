@@ -21,6 +21,9 @@ async function loadAutoTrade() {
     if (d && d.money_unit) AT_MONEY = d.money_unit;
     if (d && d.acct_factor) AT_FACTOR = Number(d.acct_factor) || 1;
     renderAutoTrade(d);
+    // 同意的结局要回到操作条上（弹窗那边起的头，见 sig-modal.js 的
+    // sigVerdictCheck）。挂在轮询这里 = 零额外请求。
+    if (typeof sigVerdictCheck === 'function') sigVerdictCheck(d);
   } catch (e) {
     // 静默失败：这块挂了不该把整个实盘面板拖下水
     const st = $('atState');

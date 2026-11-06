@@ -276,7 +276,18 @@ async function sigAnswer(approve) {
       loadAutoTrade();
       return;
     }
-    atSay(approve ? '<b>已同意</b>，正在按当前价执行…' : '<b>已否决</b>，这一轮不进场。', 'ok');
+    if (!approve) {
+      atSay('<b>已否决</b>，这一轮不进场。', 'ok');
+    } else {
+      // 点了同意 ≠ 进了场：后台还要过一遍复核（价格漂移 / 叠仓 / 刹车 /
+      // 同向冷却），结论最快也要下一次轮询才拿得到。这里先说"复核中"，
+      // 同时盯住流水把真结局补上——只写"正在执行"就撒手的话，遇到
+      // void_slip（价已跑、按规则作废）操作条会永远停在执行中，看着就是
+      // 卡死了。2026-11-06 实盘发生过一次，用户当场就问"是不是没成功"。
+      atSay('<b>已同意</b>，正在按当前价复核（漂移 / 叠仓 / 刹车）…', 'ok');
+      sigWatchId = sid;
+      sigWatchUntil = Date.now() + 25000;
+    }
     answeredSigId = sid;
     sigHide();
     // 立刻拉一次：等下一次 1 秒轮询也能看到，但用户点了就想马上有反馈
@@ -286,6 +297,60 @@ async function sigAnswer(approve) {
     $('sigYes').disabled = false;
     $('sigNo').disabled = false;
     atSay('<b>提交失败：</b>' + esc(String(e)), 'err');
+  }
+}
+
+/* ---- 同意的结局：盯住流水把它落到操作条上 ----
+   不另开接口、不额外发请求：面板本来就每秒拉一次 /api/autotrade，
+   这里只是在 renderAutoTrade 之后看一眼 summary.recent 里有没有
+   signal_id == 这次点同意的那条记录。四种真实结局：
+     open / close      —— 成交了（带成交价和单号）
+     skip              —— 没进场，reason 就是原因（漂移作废 / 冷却 / 已不可开仓）
+     open_failed       —— 发单被券商拒了，reason 是拒单理由
+     close_failed      —— 平仓发单失败（线程随后会自己停）
+   超时（25 秒）还没对上号，就明说"去流水里看"，不装作还在执行。 */
+let sigWatchId = null;
+let sigWatchUntil = 0;
+
+function sigVerdictCheck(a) {
+  if (!sigWatchId || !a || !a.ok) return;
+  const rows = Array.isArray(a.recent) ? a.recent : [];
+  let hit = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    // signal 行是"发出信号"本身，不是结局；answered 的 id 也不可能对不上
+    if (r && r.signal_id === sigWatchId && r.kind && r.kind !== 'signal') {
+      hit = r;
+      break;
+    }
+  }
+  if (hit) {
+    sigWatchId = null;
+    if (hit.kind === 'open') {
+      const dir = Number(hit.direction) > 0 ? '做多' : '做空';
+      const px = hit.price == null ? '' : ' ' + fmt(hit.price, 3);
+      atSay(`<b>已成交：</b>${dir}${px}，单号 ${hit.ticket}。之后由程序看仓、模型决定出场。`, 'ok');
+    } else if (hit.kind === 'close') {
+      const pnl = Number(hit.pnl);
+      const kind = Number.isFinite(pnl) && pnl > 0 ? 'ok' : 'err';
+      const pnlTxt = Number.isFinite(pnl) ? `，盈亏 ${pnl.toFixed(2)}` : '';
+      atSay(`<b>已平仓</b>${pnlTxt}。`, kind);
+    } else if (hit.kind === 'open_failed' || hit.kind === 'close_failed') {
+      // 这两种行里 reason 是**模型的原话**，券商拒单的理由在 error 上，
+      // 所以这里先取 error——用户关心的是"为什么没成"，不是模型怎么想的。
+      atSay(`<b>${hit.kind === 'open_failed' ? '发单被券商拒了' : '平仓没发出去'}：</b>`
+            + esc(hit.error || hit.reason || '见下方流水')
+            + (hit.kind === 'close_failed' ? '（做单线程已停，持仓还在）' : ''), 'err');
+    } else {
+      // 后端 reason 本身就写成「已同意，但…」，这里只补一句定性，
+      // 不重复"已同意"——否则同一句话会连着出现两遍。
+      atSay('<b>这笔没进场：</b>' + esc(hit.reason || hit.error || '见下方流水'), 'err');
+    }
+    return;
+  }
+  if (Date.now() > sigWatchUntil) {
+    sigWatchId = null;
+    atSay('<b>已提交</b>，几秒内没等到结论——直接看下方流水最新一条（开仓 / skip / 失败）。', 'err');
   }
 }
 
