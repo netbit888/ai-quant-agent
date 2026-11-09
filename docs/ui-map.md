@@ -44,7 +44,7 @@
 | `js/review.js` | 331 | `loadLive`/`renderLive` 主轮询、账户切换、账户条秒针与数据新鲜度（`paintAcctClock`） |
 | `js/autotrade.js` | 162 | `loadAutoTrade`、`renderStatusBar`、反馈面板 |
 | `js/desk-ring.js` | 275 | `renderRing`（决策环 + 8 格位）、`setLed` |
-| `js/desk-pos.js` | 158 | `renderPos`（浮盈尺、保本三态；趋势单的线叫「复核门槛」不叫止盈） |
+| `js/desk-pos.js` | 215 | `renderPos`（浮盈尺、保本三态；趋势单的线叫「复核门槛」不叫止盈；轴上限按峰值阶梯放大） |
 | `js/desk-gate.js` | 133 | `renderGateLeds`（6 盏闸门灯 + 设置舱参数表） |
 | `js/desk-auto.js` | 400 | `renderAutoTrade`：做单台汇总 + 决策流表格（`#rowsAuto`）+ 冷静期标签 |
 | `js/desk-prefs.js` | 392 | 做单参数读取/回填（`atMode`/`atSymbol`/`atLots`/`applyPrefs`）、toast |

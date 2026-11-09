@@ -607,6 +607,47 @@ try {
   const rCap = String(made.rTpCap.textContent || '');
   console.log(`  震荡单仍写止盈 ${rCap === '止盈 3.25' ? '✓' : '✗'} (${rCap})`);
   if (rCap !== '止盈 3.25') failed = true;
+
+  // 过门槛之后刻度尺必须继续有信息量（2026-11-09 实盘）：浮盈 72.47、门槛 35，
+  // 原来轴上限恒为 35，填充条和峰值线双双钉在右端——赚多少、回吐多少长得一样，
+  // 用户原话"这种表现都没意义了"。轴按峰值阶梯放大后：门槛线左移、峰值线可见、
+  // 条子留得住进展。轴上限 = niceCeil(73.07 × 1.15 = 84.03) = 100。
+  api.renderAutoTrade({ ...atSample, tp_min_trend: 35.0, float_pnl: 72.47,
+                        position: { ...atSample.position, plan: 'trend', peak_pnl: 73.07 } });
+  const fw = String(made.rFill.style.width || '');
+  const pkL = String(made.rPeak.style.left || '');
+  const tpL = String(made.rTp.style.left || '');
+  const rlb = String(made.rulerLb.textContent || '');
+  const rv = String(made.rulerV.textContent || '');
+  const scaleOk = fw === '72.5%' && pkL === '73.1%' && tpL === '35.0%';
+  console.log(`  过门槛后刻度尺不被钉死 ${scaleOk ? '✓' : '✗'} (填 ${fw} / 峰 ${pkL} / 门槛 ${tpL})`);
+  if (!scaleOk) failed = true;
+  const rlbOk = rlb.includes('满格 100.00');
+  console.log(`  放大时标出满格 ${rlbOk ? '✓' : '✗'} (${rlb})`);
+  if (!rlbOk) failed = true;
+  const rvOk = rv === '已过门槛 +72.47 · 回吐 0.60';
+  console.log(`  过门槛后报回吐 ${rvOk ? '✓' : '✗'} (${rv})`);
+  if (!rvOk) failed = true;
+  // 门槛线翻到右侧：线落在左半边时标签贴左侧会压住保本触发那根线的标签
+  const tpFlipOk = String(made.rTp.style.right) === 'auto';
+  console.log(`  门槛线标签避让 ${tpFlipOk ? '✓' : '✗'} (right=${made.rTp.style.right})`);
+  if (!tpFlipOk) failed = true;
+  // 正好在峰值时不能算出"回吐 0.00"（浮点噪声会写成 0.0000000001）
+  api.renderAutoTrade({ ...atSample, tp_min_trend: 35.0, float_pnl: 73.07,
+                        position: { ...atSample.position, plan: 'trend', peak_pnl: 73.07 } });
+  const rvPeak = String(made.rulerV.textContent || '');
+  const peakLbOk = rvPeak === '已过门槛 +73.07 · 在峰值';
+  console.log(`  峰值处写「在峰值」 ${peakLbOk ? '✓' : '✗'} (${rvPeak})`);
+  if (!peakLbOk) failed = true;
+  // 没跨门槛时轴仍然等于 tp：这一档的像素表现必须与本版之前完全一致，
+  // 否则震荡单（门槛 3.25、浮盈 1.23 → 37.8%）会被顺手改掉。
+  api.renderAutoTrade(savedAt);
+  const flatTp = String(made.rTp.style.left || '');
+  const flatFill = String(made.rFill.style.width || '');
+  const flatLb = String(made.rulerLb.textContent || '');
+  const flatOk = flatTp === '100.0%' && flatFill === '37.8%' && !flatLb.includes('满格');
+  console.log(`  未过门槛时轴不变 ${flatOk ? '✓' : '✗'} (门槛 ${flatTp} / 填 ${flatFill})`);
+  if (!flatOk) failed = true;
   api.renderAutoTrade(savedAt);
 
   // 常驻状态带：三件事——在不在跑 / 有没有仓 / 现在多少。

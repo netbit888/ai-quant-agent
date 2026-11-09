@@ -1,3 +1,32 @@
+/* 刻度尺的轴上限（2026-11-09）
+ *
+ * 实盘反馈：0.05 手趋势单浮盈跑到 72.47（门槛 35.00），填充条和峰值线双双钉在
+ * 右端——过门槛之后无论再赚多少、回吐多少，那一格长得一模一样，"这种表现都没
+ * 意义了"。根因是轴上限恒等于 tp：跨过门槛是一瞬间的事，而"满格"要持续几小时。
+ *
+ * 轴必须随浮盈放大，但**不能用 peak*1.1 这种连续值**：那样填充条永远贴着右端
+ * (cur≈peak 是常态)，只是把"满格"换了个定义。改成阶梯：上限取
+ * niceCeil(峰值*1.15)，峰值涨到下一档才重排一次，两档之间条子是持续向右长的。
+ */
+const RULER_STEPS = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+function niceCeil(x) {
+  if (!(x > 0)) return 0;
+  const exp = Math.pow(10, Math.floor(Math.log10(x)));
+  const base = x / exp;
+  for (let i = 0; i < RULER_STEPS.length; i++) {
+    if (base <= RULER_STEPS[i] + 1e-9) return RULER_STEPS[i] * exp;
+  }
+  return 10 * exp;
+}
+
+/* 未过门槛时轴恒为 tp（0 → 门槛，与本版之前逐像素一致，震荡单完全不受影响）；
+ * 过了才放大，且留 15% 余量，峰值线永远到不了右端。 */
+function rulerTop(tp, hi) {
+  if (!(tp > 0)) return 0;
+  if (!(hi > tp * 1.005)) return tp;
+  return Math.max(tp, niceCeil(hi * 1.15));
+}
+
 function renderPos(a, p) {
   const nowS = serverNow(a);
   const plan = p ? (p.plan || 'range') : '';
@@ -66,14 +95,19 @@ function renderPos(a, p) {
     if (rTp) rTp.classList.add('hidden');
   } else {
     const cur = (fp == null ? 0 : fp);
+    // 轴上限：没跨门槛就是 tp，跨了才按峰值阶梯放大（见文件头 rulerTop）
+    const hi = Math.max(cur, peak == null ? 0 : peak);
+    const top = rulerTop(tp, hi) || tp;
+    const pct = v => Math.min(100, Math.max(0, (v / top) * 100));
+    const scaled = top > tp + 1e-9;
     if (rFill) {
       rFill.className = 'r-fill' + (cur < 0 ? ' neg' : '');
-      rFill.style.width = Math.min(100, Math.max(0, (cur / tp) * 100)).toFixed(1) + '%';
+      rFill.style.width = pct(cur).toFixed(1) + '%';
     }
     if (rPeak) {
       if (peak != null && peak > 0) {
         rPeak.classList.remove('hidden');
-        rPeak.style.left = Math.min(100, (peak / tp) * 100).toFixed(1) + '%';
+        rPeak.style.left = pct(peak).toFixed(1) + '%';
       } else rPeak.classList.add('hidden');
     }
     if (rBe) {
@@ -81,13 +115,15 @@ function renderPos(a, p) {
         rBe.classList.remove('hidden');
         // 未挂上时画虚线：那条线只存在于程序脑子里，不在券商端。
         rBe.className = 'r-line' + (p.be_ok ? '' : ' dash');
-        const bePct = Math.min(100, (beArm / tp) * 100);
+        const bePct = pct(beArm);
         rBe.style.left = bePct.toFixed(1) + '%';
         const cap = $('rBeCap');
         if (cap) {
-          // 线贴到右端时标签会撞上止盈标签并溢出卡片（震荡单 be_arm == tp_min
-          // 时两线完全重合）。此时只留线，数值看下方保本徽章的 SL。
-          const crowded = bePct > 70;
+          // 两条线（保本触发 / 复核门槛）在轴上离太近时标签会互相压住
+          // （震荡单 be_arm == tp_min 时两线完全重合）。此时只留线，数值看
+          // 下方保本徽章的 SL。阈值按门槛标签站在哪一侧区分，见下面 tpAlignLeft。
+          const tpPct0 = pct(tp);
+          const crowded = (tpPct0 - bePct) < (tpPct0 < 60 ? 12 : 22);
           cap.style.display = crowded ? 'none' : '';
           // **这条线是「触发线」，不是「保本价」**（2026-10-31 用户按刻度尺上的
           // 「保本 3.25」误读成「止损挂在 3.25」）。保本价恒等于开仓价，在浮盈
@@ -101,7 +137,14 @@ function renderPos(a, p) {
     }
     if (rTp) {
       rTp.classList.remove('hidden');
-      rTp.style.left = '100%';
+      // 门槛线不再恒在右端：轴放大后它落在中间，位置必须按同一个轴换算，
+      // 否则会出现"填充条已经超过门槛线"的假象（2026-11-09）。
+      const tpPct = pct(tp);
+      rTp.style.left = tpPct.toFixed(1) + '%';
+      // 标签默认贴线左侧（.end 的 right:4px）。线落到左半边时要翻到右侧，
+      // 否则会压住左边那根保本触发线的标签。
+      const tpAlignLeft = tpPct < 60;
+      rTp.style.right = tpAlignLeft ? 'auto' : '4px';
       const cap = $('rTpCap');
       if (cap) {
         // **趋势单这条线不是"到点就平"**：浮盈摸到 tp_min_trend 之后，闸门
@@ -117,11 +160,25 @@ function renderPos(a, p) {
           : `浮盈到 ${fmt(tp, 2)} 才允许平仓（低于这个数不出场）`;
       }
     }
-    if (rulerLb) rulerLb.textContent = '浮盈刻度 · 0 = 开仓价';
+    if (rulerLb) {
+      // 轴会自己放大，必须把"满格是多少"写出来，否则门槛线左移看起来像 bug。
+      rulerLb.textContent = '浮盈刻度 · 0 = 开仓价'
+        + (scaled ? ' · 满格 ' + fmt(top, 2) : '');
+    }
     if (rulerV) {
       const gap = tp - cur;
-      rulerV.textContent = gap > 0 ? '还差 ' + fmt(gap, 2) : '已过门槛 ' + money(cur);
-      rulerV.style.color = gap > 0 ? '' : 'var(--good-lit)';
+      if (gap > 0) {
+        rulerV.textContent = '还差 ' + fmt(gap, 2);
+        rulerV.style.color = '';
+      } else {
+        // 过门槛之后最有用的数字是「从峰值回吐了多少」：保本线只保证不亏，
+        // 没有任何规则锁利（trailing 被 227 笔回放否掉了），回吐全靠人看。
+        // 原来只写「已过门槛 +72.47」，隔着 3 秒一次的刷新只能靠心算。
+        const back = (peak == null ? 0 : peak) - cur;
+        rulerV.textContent = '已过门槛 ' + money(cur)
+          + (back > 0.005 ? ' · 回吐 ' + fmt(back, 2) : ' · 在峰值');
+        rulerV.style.color = 'var(--good-lit)';
+      }
     }
   }
 
