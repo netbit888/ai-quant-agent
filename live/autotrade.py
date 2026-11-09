@@ -4193,8 +4193,83 @@ def precheck(cfg: Cfg) -> dict:
     return {"ok": not issues, "errors": issues}
 
 
+def _attach_entry_sl(ex, cfg: Cfg, res: dict, direction: int) -> dict:
+    """开仓成交后，把这笔的**硬止损**挂到券商端。失败不抛异常、不影响开仓。
+
+    为什么在成交之后挂，而不是把 sl 塞进开仓请求：
+      · 塞进请求时只能用报价算，滑点会让它偏离真实成交价。偏到「离成交价
+        更近」那一侧就是白送一次被扫；偏太多还可能让券商以 10016
+        「无效止损」**把整笔开仓拒掉**——挂止损失败绝不该让开仓也失败；
+      · 成交后挂用的是真实成交价，和程序内存里 `_sl_price_for()` 用的是同
+        一个 `price_dist_of()`，两道线重合，不会出现「券商那边比程序近」。
+
+    **只挂 SL，不挂 TP。** SL 是保护，TP 是截断：2026-11-09 那笔趋势单靠
+    「没有硬止盈」多拿了 15 USC（实际 +50.03，硬 tp 7.0 只有 +35.03）。
+    挂 TP 等于把 227 笔回放标定过的「让利润跑」改回去。
+
+    重试 3 次（0.3 秒间隔）：市价单成交后 position 未必立刻出现在
+    `positions_get` 里（`modify_sl` 会返回「持仓不存在」），终端刚下完单也
+    可能正忙（busy）。这两种都只是「这一格没排上」，值得再试；方向非法这类
+    参数错重试也没用，直接放弃，交给轮询守卫。
+    """
+    if cfg.dry_run:
+        # 纸面单在券商端没有仓位，改单无从谈起；开仓请求本身仍会落盘留证。
+        return {"ok": False, "skipped": "dry_run"}
+    if not cfg.sl_usd or float(cfg.sl_usd) <= 0:
+        # sl_usd=0 是「这笔不要硬止损」的显式设定，不是漏配。
+        return {"ok": False, "skipped": "sl_disabled"}
+    ticket = int(res.get("order") or 0)
+    if ticket <= 0:
+        return {"ok": False, "skipped": "no_ticket"}
+    dist = price_dist_of(cfg, cfg.sl_usd)
+    entry = float(res.get("price") or 0.0)
+    if dist <= 0 or entry <= 0:
+        return {"ok": False, "skipped": "no_price_or_dist"}
+    # 价距必须显著大于点差，否则这条线挂在点差里面：多单的 SL 落在 bid 之上，
+    # 一开仓就是"已触发"，等于把仓位白送出去。
+    #
+    # 这不是理论担忧：`price_dist_of()` = 金额 /（合约 × 基准手数 × 账户系数），
+    # 而 `_symbol_contract()` 在 `mt5.symbol_info()` 拿不到该品种时会**静默退回
+    # 100**。同一笔 sl_usd=3.0，`XAUUSDc`（contract=1）算出来是 3.0 价距，
+    # 写错成 `XAUUSDm`（contract 退到 100）就是 0.03 —— 正好落在这 0.24 的
+    # 点差里，挂上去必被瞬间扫掉。品种代码是面板传进来的，配错一次就够了。
+    # 所以用点差当尺子把这种情形挡在挂单之前：正常 3.0 对 0.24 绰绰有余，
+    # 量级错一档则连 1.5 倍点差都不到。
+    q = _quote(cfg.symbol)
+    if q is None:
+        return {"ok": False, "skipped": "no_quote"}
+    spread = max(0.0, float(q[1]) - float(q[0]))
+    if dist < 1.5 * spread:
+        return {"ok": False, "skipped": "dist_within_spread",
+                "dist": dist, "spread": spread, "entry": entry}
+    sl = entry - (1 if direction > 0 else -1) * dist
+    last: dict = {}
+    for i in range(3):
+        try:
+            r = ex.modify_sl(ticket, sl)
+        except Exception as exc:  # noqa: BLE001
+            r = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if r.get("ok"):
+            return {"ok": True, "sl": float(r.get("price") or sl),
+                    "entry": entry, "dist": dist, "tries": i + 1}
+        last = r
+        # busy / 持仓还没出现 = 时序问题，退一步再试；其余（方向非法等）重试无益。
+        retryable = bool(r.get("busy")) or "不存在" in str(r.get("reason") or "")
+        if not retryable:
+            break
+        if i < 2:
+            time.sleep(0.3)
+    return {"ok": False, "sl": sl, "entry": entry, "dist": dist,
+            "reason": str(last.get("reason") or "改单失败"), "tries": i + 1}
+
+
 def send_open(cfg: Cfg, direction: int) -> dict:
-    """市价开仓，**不挂 SL/TP**。失败时返回 ok=False，不抛异常。"""
+    """市价开仓，成交后**把硬止损挂到券商端**（不挂 TP）。失败时 ok=False。
+
+    开仓与挂止损是两件事，成败分开报：`res["sl_attach"]` 记挂载结果，
+    `ok` 只反映开仓本身。挂不上时退回老路径（5 秒轮询守卫兜底），
+    并在 open 行留 `sl_broker=0` + `sl_err`，事后面板/统计能看出这笔是裸的。
+    """
     ex = _executor(cfg)
     try:
         if not ex.connect():
@@ -4205,6 +4280,10 @@ def send_open(cfg: Cfg, direction: int) -> dict:
             # 把 retcode 翻成人话，别让「10027」这种数字直接甩到面板上
             hint = retcode_hint(res.get("retcode"))
             res["reason"] = hint or res.get("comment") or f"retcode={res.get('retcode')}"
+            return res
+        # 成交了才谈挂止损。这一步失败不改变 ok——仓位已经真实存在，
+        # 把它报成"开仓失败"会让调用方以为没开、下一轮再开一笔。
+        res["sl_attach"] = _attach_entry_sl(ex, cfg, res, direction)
         return res
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -4401,12 +4480,22 @@ def _tick_body(cfg: Cfg, login, now: int,
         source, why = ("external",
                        "外部平仓（人工或终端操作，非程序决策）：模型没发平仓单，"
                        "仓位已不在券商端")
+        deal_reason = None if fills is None else fills["reason"]
         if pos.get("be_ok"):
-            deal_reason = None if fills is None else fills["reason"]
             if deal_reason is None or deal_reason == 4:      # 4 = DEAL_REASON_SL
                 source = "be"
                 why = (f"券商端保本止损 {float(pos.get('be_sl') or 0):.3f} 被触发"
                        f"（峰值浮盈后把 SL 抬到开仓价）")
+        elif pos.get("sl_broker") and deal_reason == 4:
+            # 2026-11-09：开仓就把硬止损挂到券商端了。这条线被打掉时，程序
+            # 下一轮才发现仓位没了——不认出来的话，一笔正常止损会被记成
+            # 「人工平仓」，进而按 external 进教训库（"别被终端消失吓出"
+            # 那种反向教训就是这么来的）。
+            # 只在 reason 明确等于 4 时认：读不到回执（None）时保守记 external，
+            # 因为「挂着止损但人手动平了」确实存在，不能默认成止损。
+            source = "sl"
+            why = (f"券商端入场止损 {float(pos.get('sl_broker') or 0):.3f} 被触发"
+                   f"（开仓时挂的硬止损，程序未发平仓单）")
         # 计数 / 清仓位 / close 行统一走 _book_close：这条路上的单子以前不带
         # peak_pnl/peak_ts/plan/atr，于是"人工平仓的单子在 ATR 统计里不存在"。
         row = _book_close(state, pos, pnl, now, source=source, reason=why)
@@ -4947,6 +5036,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         ticket = -(int(state.get("trades") or 0) + 1)
     else:
         ticket = int(res.get("order") or 0)
+    sl_att = res.get("sl_attach") or {}
     state["position"] = {
         "ticket": ticket, "direction": direction, "lots": cfg.lots,
         "price_open": price, "opened_at": now, "p_up": p_up,
@@ -4965,6 +5055,11 @@ def _tick_body(cfg: Cfg, login, now: int,
         "atr": float((feat or {}).get("atr") or 0.0),
         # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
         "signal_id": sig_id, "exec_by": exec_by,
+        # 券商端有没有这条硬止损线（2026-11-09）。0 = 没挂上，这笔只有程序
+        # 轮询守卫在管；非 0 = 券商端实际挂在哪个价。
+        # 它的第二个用途在「仓在终端消失」的判定里：reason=4 且这个字段非 0
+        # 才算止损被打，否则一律记人工平仓（见 detected 分支）。
+        "sl_broker": float(sl_att.get("sl") or 0.0) if sl_att.get("ok") else 0.0,
     }
     state["trades"] = int(state.get("trades") or 0) + 1
     state["last_open_ts"] = now
@@ -4981,7 +5076,13 @@ def _tick_body(cfg: Cfg, login, now: int,
         "feat": feat,
         "reason": decision.get("reason"), "source": decision.get("source"),
         "dry_run": cfg.dry_run,
+        # 券商端止损挂载结果。挂上了写价格，没挂上写 0 + 原因——
+        # 这两种单子在复盘时是两种东西：一种是「保护在券商那边」，
+        # 一种是「只有程序在盯」。不写清楚，亏损只能看到结果看不到保护状态。
+        "sl_broker": float(sl_att.get("sl") or 0.0) if sl_att.get("ok") else 0.0,
     }
+    if not sl_att.get("ok"):
+        row["sl_err"] = str(sl_att.get("reason") or sl_att.get("skipped") or "未知")
     if advice_code:
         # 程序不建议这笔、但模型坚持开了。留痕是为了事后分桶：
         # 「程序不建议却开了」的期望 vs「两边都同意」的期望，谁更该有判断权。
@@ -5654,6 +5755,10 @@ def _be_step(cfg: Cfg, pos: dict, float_pnl: float, now: int) -> dict | None:
         pos["be_ok"] = 1
         pos["be_sl"] = float(res.get("price") or entry)
         pos["be_ts"] = now
+        # 券商端那条线现在就是保本价，入场止损已经被它顶掉了。
+        # 同步过来是为了让 `sl_broker` 始终等于「券商端当前实际的止损价」，
+        # 面板只需读这一个字段；source 判定仍按 be_ok 优先，不受影响。
+        pos["sl_broker"] = float(pos["be_sl"])
         pos.pop("be_err", None)
         return {"ts": now, "kind": "be", "ticket": ticket,
                 "direction": pos.get("direction"), "mode": "broker",

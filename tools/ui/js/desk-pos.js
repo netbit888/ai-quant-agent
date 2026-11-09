@@ -185,12 +185,20 @@ function renderPos(a, p) {
   // ---- 保本三态徽章 ----
   const be = $('beBadge');
   if (be) {
+    // 入场止损（2026-11-09）：开仓就把硬止损挂到券商端，**和保本无关**。
+    // 保本徽章说"抬到开仓价没有"，这里补一句"入场那条线在不在"——
+    // 否则用户看到「保本未触发」会以为这笔完全没有券商端保护。
+    // be_ok 之后 sl_broker 会同步成保本价，那时不再重复显示。
+    const sbPx = p ? Number(p.sl_broker || 0) : 0;
+    const sbNote = sbPx > 0
+      ? ' · 券商端 SL ' + fmt(sbPx, 3)
+      : (p && p.sl_err ? ' · 券商端未挂（' + String(p.sl_err).slice(0, 14) + '）' : '');
     let bcls = 'off', btxt = '保本止损', bnote = '';
     if (!beCfg) {
       btxt = '保本止损已关闭'; bnote = '设置舱 → 出场闸门可开';
     } else if (p && !beFit) {
       // 规则开着，但这笔是震荡单：它根本没有这条线。
-      btxt = '震荡单 · 不挂保本'; bnote = '只给趋势单（止盈门槛 7.00 的那一档才需要）';
+      btxt = '震荡单 · 不挂保本'; bnote = '只给趋势单（止盈门槛 7.00 的那一档才需要）' + sbNote;
     } else if (!p) {
       btxt = '空仓 · 无持仓保护'; bnote = '开仓后按触发线自动挂';
     } else if (p.be_ok) {
@@ -201,10 +209,10 @@ function renderPos(a, p) {
       // 触发过但改单没成功：这段时间只有 5 秒快查在兜，用户必须知道差别。
       bcls = 'fail';
       btxt = '保本触发但没挂上';
-      bnote = '本地兜底：浮盈回 0 由程序代平' + (p.be_err ? '（' + String(p.be_err).slice(0, 18) + '）' : '');
+      bnote = '本地兜底：浮盈回 0 由程序代平' + (p.be_err ? '（' + String(p.be_err).slice(0, 18) + '）' : '') + sbNote;
     } else {
       btxt = '保本未触发';
-      bnote = '峰值 ' + (peak == null ? '—' : money(peak)) + ' / 触发线 ' + fmt(beArm, 2);
+      bnote = '峰值 ' + (peak == null ? '—' : money(peak)) + ' / 触发线 ' + fmt(beArm, 2) + sbNote;
     }
     be.className = 'be-badge ' + bcls;
     const t = $('beText'), n = $('beNote');
