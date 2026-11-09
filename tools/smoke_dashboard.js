@@ -107,10 +107,32 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions, atLots};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions, atLots, paintAcctClock};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
+
+  // 账户条的秒针（2026-11-09）：秒数要 1 秒一跳（本机时钟），
+  // 但**数据滞后必须说实话**——以前那格时间是 3 秒一次的 loadLive 顺手取的，
+  // 秒数一次跳 3，看着像卡住；改成本地心跳后，得靠滞后判定守住"没在假装实时"。
+  const clk = String(made.acctSync.textContent || '');
+  const clkOk = /^实时 · \d{2}:\d{2}:\d{2}$/.test(clk)
+    && String(made.acctSync.className) === 'badge-live';
+  console.log(`  秒针每秒走（本机时钟） ${clkOk ? '✓' : '✗'}（${clk}）`);
+  if (!clkOk) failed = true;
+  console.log(`  秒针有 1 秒心跳 ${src.includes('setInterval(paintAcctClock, 1000)') ? '✓' : '✗'}`);
+  if (!src.includes('setInterval(paintAcctClock, 1000)')) failed = true;
+  // 12 秒没拿到新数据 → 必须改口，不能继续写「实时」
+  const realNow = Date.now;
+  Date.now = () => realNow() + 12000;
+  api.paintAcctClock();
+  Date.now = realNow;
+  const lagTxt = String(made.acctSync.textContent || '');
+  const lagOk = /^滞后 \d+s$/.test(lagTxt)
+    && String(made.acctSync.className) === 'badge-off';
+  console.log(`  数据超过 8 秒不更新就说滞后 ${lagOk ? '✓' : '✗'}（${lagTxt}）`);
+  if (!lagOk) failed = true;
+  api.paintAcctClock();                 // 恢复，后面的断言仍看实时态
 
   const a = liveJson.account || {};
   const s = liveJson.stats || {};

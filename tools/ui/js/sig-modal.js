@@ -576,6 +576,18 @@ setInterval(() => {
   if (pollVisible()) loadLive();
 }, 3000);
 
+// 秒针：账户条右上那个「实时 · 时:分:秒」每秒重画（2026-11-09）。
+// 以前那格跟着 3 秒一次的 loadLive 走，秒数一次跳 3，看着就像没在动。
+// 这里只画本机时钟；**数据新鲜度另算**——超过 8 秒没拿到新数据，
+// paintAcctClock 会改口「滞后 Ns」，所以它仍然能当"面板卡死"的证据。
+// 不发请求，纯本地重绘。
+setInterval(paintAcctClock, 1000);
+// 页面在后台时上面的轮询会停（省 MT5）。切回前台立刻补一次，
+// 不然要先看到 8 秒「滞后」才恢复正常。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { loadLive(); loadAutoTrade(); }
+});
+
 setInterval(() => {
   if (pollVisible()) refreshAccounts();
 }, 20000);

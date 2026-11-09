@@ -41,7 +41,7 @@
 | `html/footer.html` | 9 | 页脚：程序名 / 版本 / 检查更新 |
 | `html/curtain.html` | 28 | 全屏提醒幕布 `#atCurtain`（在 `</script>` 之后） |
 | `js/bridge.js` | 243 | pywebview 桥、格式化工具、`drawArea`/`drawBars` 图表原语 |
-| `js/review.js` | 298 | `loadLive`/`renderLive` 主轮询、账户切换 |
+| `js/review.js` | 331 | `loadLive`/`renderLive` 主轮询、账户切换、账户条秒针与数据新鲜度（`paintAcctClock`） |
 | `js/autotrade.js` | 162 | `loadAutoTrade`、`renderStatusBar`、反馈面板 |
 | `js/desk-ring.js` | 275 | `renderRing`（决策环 + 8 格位）、`setLed` |
 | `js/desk-pos.js` | 147 | `renderPos`（浮盈尺、保本三态） |
@@ -57,7 +57,7 @@
 | `js/session-review.js` | 402 | `renderSession`：本场复盘、行为标记、备注草稿 |
 | `js/scoring.js` | 86 | 交易评分、保本表 |
 | `js/trade-quality.js` | 373 | `renderQuality`、AI 建议、`confirmApiCall` 弹窗栈 |
-| `js/sig-modal.js` | 533 | 人工确认信号弹窗、提示音/静音/置顶/标题闪烁 |
+| `js/sig-modal.js` | 609 | 人工确认信号弹窗、提示音/静音/置顶/标题闪烁、三档轮询节拍（1s/3s/20s） |
 
 ## 「我要改 X」去哪
 

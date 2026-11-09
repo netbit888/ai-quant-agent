@@ -89,9 +89,42 @@ async function refreshLive(force = false) {
   await loadLive(force);
 }
 
+// 账户条右上角那个「实时 · 时:分:秒」（2026-11-09）
+// ------------------------------------------------------------------
+// 原来这格的时间是在 renderLive 里取的墙钟，而 loadLive 每 3 秒才跑一次，
+// 所以秒数一次跳 3——盯着看就是"不实时"。更糟的是它只有一个含义：
+// 「上一次刷新在几点」。要当成"面板还活着"的证据，就必须走两次心跳：
+//   · 秒数：本地计时器每秒重画，是**本机时钟**，证明页面没卡死；
+//   · 新鲜度：记最近一次成功渲染的时刻，超过 8 秒没有新数据就改口
+//     「滞后 Ns」+ 琥珀色——这才是原来那行时间真正想防的事
+//     （进程被 MT5 卡住、接口挂了，数字停住但页面还在动）。
+// 只动秒数不动数据是**骗人的**：所以宁可多写一句滞后判定。
+let acctLiveAt = 0;          // 最近一次成功渲染 /api/live 的时刻；0 = 不在实时态
+
+function paintAcctClock() {
+  // 归档 / 未连接 / 出错这三种状态由 renderLive 自己写，别抢它的文案
+  if (!acctLiveAt) return;
+  const el = $('acctSync');
+  if (!el) return;
+  const lag = Math.round((Date.now() - acctLiveAt) / 1000);
+  if (lag > 8) {
+    el.textContent = '滞后 ' + lag + 's';
+    el.className = 'badge-off';
+    el.title = '面板已经 ' + lag + ' 秒没拿到新的账户数据（正常每 3 秒一次）。'
+      + '数字停在上一次成功刷新的那一刻，不是当前值。';
+    return;
+  }
+  const hh = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  el.textContent = '实时 · ' + hh;
+  el.className = 'badge-live';
+  el.title = '秒数每秒走一次（本机时钟）；余额/净值/持仓每 3 秒从 MT5 拉一次，'
+    + '服务端缓存也是 3 秒——数字不会有比这更细的变化。';
+}
+
 function renderLive(d) {
   curLogin = (d && d.login) || null;
   if (!d || !d.ok) {
+    acctLiveAt = 0;                  // 退出实时态：秒针别再往上写「实时」
     const raw = String((d && d.error) || '未知错误').replace(/^RuntimeError:\s*/, '');
     const noTerminal = /终端未运行|未连接/.test(raw);
     $('acctLogin').textContent = noTerminal ? 'MT5 未连接' : '读取失败';
@@ -118,14 +151,15 @@ function renderLive(d) {
   const syncEl = $('acctSync');
   syncEl.style.display = '';
   if (d.offline) {
+    acctLiveAt = 0;                  // 归档页不刷新，秒针也不该走
     syncEl.textContent = '归档 · 离线';
     syncEl.className = 'badge-off';
     $('acctNote').textContent = '这是已归档账户的历史数据（本地账本），不连 MT5、不刷新、不能生成新的 AI 复盘。';
   } else {
-    // 带上刷新时刻：否则"实时"只是个词，你没法确认它真的在动
-    const hh = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    syncEl.textContent = '实时 · ' + hh;
-    syncEl.className = 'badge-live';
+    // 记下"这次真的拿到了数据"，具体文案交给 paintAcctClock：
+    // 秒数由 1 秒一次的心跳重画，这里只负责证明心跳有东西可证明。
+    acctLiveAt = Date.now();
+    paintAcctClock();
     $('acctNote').textContent = '切换账户请在 MT5 终端里操作，这里会自动识别并归档到独立账本。';
   }
 
