@@ -2,6 +2,27 @@
    相同就跳过 innerHTML 重建（理由见下面的 rowsHtml）。 */
 let atRowsHtml = '';
 
+/* 冷静期剩余秒数（辅助模式专用）。
+ *
+ * 超时 / 否决之后有一段静默期（assist_deny_cooldown，默认 180 秒），
+ * 但两个槽位的含义完全不同，混着写会让用户以为"程序全停了"：
+ *   entry —— 不弹窗，**也不调模型**（省 token，也避免每分钟重弹一次铃声）
+ *   exit  —— 只是不弹窗，模型照问（仓位不能 3 分钟没人评估）
+ * 基准一律用 server_ts：客户端时钟偏几分钟会让倒计时凭空多出或少掉一截。
+ */
+function atCooldown(a) {
+  const raw = (a && a.assist_deny_until) || {};
+  const nowS = Number(a && a.server_ts) || (Date.now() / 1000);
+  const left = k => Math.max(0, Math.round(Number(raw[k] || 0) - nowS));
+  return { entry: left('entry'), exit: left('exit') };
+}
+
+/* 秒 → m:ss。倒计时必须带冒号格式：写"还剩 125 秒"人得自己换算。 */
+function atMmSs(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
 function renderAutoTrade(a) {
   renderStatusBar(a);
   const st = $('atState');
@@ -67,26 +88,25 @@ function renderAutoTrade(a) {
   // 该找的人不一样：前者调提示词，中间调开关，后者看事后分桶。
   const whyTag = $('atWhyTag');
   if (whyTag) {
-    let tag = '—', cls = '';
+    let tag = '—', cls = '', tip = '';
+    // 静默期文案要能对上"上一轮到底发生了什么"（否决 / 超时 / 作废）。
+    const ANS_TAG = { deny: '已否决', expired: '超时未答', cancelled: '已取消',
+                      blocked: '信号作废·已有持仓', void_slip: '价格已跑·作废',
+                      void_unknown: '读不到持仓·作废', void_state: '已不可开仓·作废' };
     if (ld) {
       // 这一轮最后没进场（否决 / 超时 / 作废）时，标签必须**盖过** act=true 的
       // 「模型开仓」。last_decision 是轮首写的，应答发生在它之后，后端会用
       // answer 打标；不认这个字段的话，同一块屏幕上会同时出现「模型开仓」
       // 和弹窗那句「已否决」——10-29 用户就是这么发现的。
-      const ANS_TAG = { deny: '已否决', expired: '超时未答', cancelled: '已取消',
-                        blocked: '信号作废·已有持仓', void_slip: '价格已跑·作废',
-                        void_unknown: '读不到持仓·作废', void_state: '已不可开仓·作废' };
       if (ld.answer) {
         tag = ANS_TAG[ld.answer] || '未进场';
         cls = 'is-deny';
-        // 「静默到 21:57」只在自己还没过期时显示。基准取 server_ts：
-        // 客户端时钟偏几分钟也不会指着一个已经过去的时间。
+        // 冷静期还没结束时把**剩余时间**接在标签后面。以前写的是「静默到 21:57」，
+        // 是个绝对时刻——人得自己减一遍才知道还要等多久，而且手边没有一眼可读的
+        // 参照点，看起来就像"这条状态已经过期了"（11-09 用户原话）。
         const nowS = Number(a.server_ts) || (Date.now() / 1000);
         const until = Number(ld.deny_until) || 0;
-        if (until > nowS) {
-          tag += ' · 静默到 ' + new Date(until * 1000)
-            .toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
-        }
+        if (a.running && until > nowS) tag += ' · 冷静期 ' + atMmSs(until - nowS);
       }
       else if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
       // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。
@@ -107,9 +127,26 @@ function renderAutoTrade(a) {
         tag = '持仓中 · ' + reaskSec + 's 复核';
       }
     }
+
+    // 冷静期盖在最后：它描述的是**当下还要等多久**，比上一轮结论更新。
+    // 以前这里只写「超时未答」，用户看到的是"过期了"，于是以为线程死了
+    // （11-09 实盘：静默 180 秒里模型一次都没被调用，那是设计如此）。
+    // `a.running` 是必要条件：线程已经停了就没有"还在等"这回事，那时显示
+    // 倒计时等于骗人——state 里的 assist_deny_until 不会被清掉。
+    const cool = atCooldown(a);
+    if (a.running && cool.entry > 0 && !a.position) {
+      tag = '冷静期 · 还剩 ' + atMmSs(cool.entry);
+      cls = 'is-cool';
+      tip = (ANS_TAG[(ld && ld.answer)] || '上一条入场信号未成') + '，按不做处理。'
+        + '冷静期内不调模型、不弹窗；倒计时结束自动恢复判断。';
+    } else if (a.running && cool.exit > 0 && a.position) {
+      tag = '持仓中 · 暂停弹窗 ' + atMmSs(cool.exit);
+      cls = 'is-cool';
+      tip = '你刚否决了平仓信号：这段时间不再弹窗，但模型仍在评估这笔持仓，硬止损照旧。';
+    }
     whyTag.textContent = tag;
     whyTag.className = 'sb-why-tag ' + cls;
-    whyTag.title = (ld && ld.advice_text) || '';
+    whyTag.title = tip || (ld && ld.advice_text) || '';
   }
 
 

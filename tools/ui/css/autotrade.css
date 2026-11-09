@@ -262,6 +262,13 @@
   /* 已否决 / 超时 / 作废：这是"人看过并拦下"，不是"规则拦下"也不是"模型不做"。
      刻意用中性灰而不是红——红色留给 is-veto，那才是程序替你做了决定。 */
   .sb-why-tag.is-deny { color: var(--muted); border-color: rgba(160,170,185,.34); background: rgba(160,170,185,.10); }
+  /* 冷静期（2026-11-09）：这是一段**正在计时**的等待，不是已经结束的结局。
+     用琥珀色区分于 is-deny 的灰（灰读起来像"翻篇了"），并锁等宽数字——
+     倒计时每秒都在变，比例数字会让整颗标签左右抖动。 */
+  .sb-why-tag.is-cool {
+    color: var(--warn); border-color: rgba(240,180,41,.35);
+    background: rgba(240,180,41,.06); font-variant-numeric: tabular-nums;
+  }
   .sb-why-text {
     min-width: 0; flex: 1 1 240px; color: var(--text); opacity: .9;
     white-space: normal; overflow-wrap: anywhere;

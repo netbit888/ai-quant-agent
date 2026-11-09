@@ -534,6 +534,52 @@ try {
   const noMarkTag = String(made.atWhyTag.textContent || '');
   console.log(`  未到过门槛不标复核 ${noMarkTag === '持仓中' ? '✓' : '✗'} (${noMarkTag})`);
   if (noMarkTag !== '持仓中') failed = true;
+
+  // 冷静期（2026-11-09）：超时 / 否决后那 180 秒，标签必须写「还要等多久」，
+  // 不能写「超时未答」这种过去式——11-09 实盘用户看到「过期」以为线程死了，
+  // 实际是设计内的静默（入场侧这段连模型都不调）。
+  const T0 = 1790000000;
+  const cdLd = { ts: T0, kind: 'entry', act: true, p_up: 0.5, direction: 1,
+                 answer: 'expired', deny_until: T0 + 125 };
+  api.renderAutoTrade({ ...atSample, position: null, server_ts: T0,
+                        assist_deny_until: { entry: T0 + 125 },
+                        assist_cfg: { deny_cooldown: 180 }, last_decision: cdLd });
+  const cdTag = String(made.atWhyTag.textContent || '');
+  const cdCls = String(made.atWhyTag.className || '');
+  const cdTip = String(made.atWhyTag.title || '');
+  const cdOk = cdTag === '冷静期 · 还剩 2:05' && cdCls.includes('is-cool')
+    && cdTip.includes('不调模型');
+  console.log(`  冷静期写成倒计时 ${cdOk ? '✓' : '✗'} (${cdTag})`);
+  if (!cdOk) failed = true;
+  // 每秒轮询就会重算：server_ts 前进 1 秒，倒计时要跟着少 1 秒。
+  api.renderAutoTrade({ ...atSample, position: null, server_ts: T0 + 1,
+                        assist_deny_until: { entry: T0 + 125 }, last_decision: cdLd });
+  const cdTick = String(made.atWhyTag.textContent || '');
+  console.log(`  冷静期逐秒递减 ${cdTick === '冷静期 · 还剩 2:04' ? '✓' : '✗'} (${cdTick})`);
+  if (cdTick !== '冷静期 · 还剩 2:04') failed = true;
+  // 到期后必须退回普通标签，不许留一个 0:00 的倒计时。
+  api.renderAutoTrade({ ...atSample, position: null, server_ts: T0 + 200,
+                        assist_deny_until: { entry: T0 + 125 }, last_decision: cdLd });
+  const cdEnd = String(made.atWhyTag.textContent || '');
+  console.log(`  冷静期结束退回标签 ${cdEnd === '超时未答' ? '✓' : '✗'} (${cdEnd})`);
+  if (cdEnd !== '超时未答') failed = true;
+  // 出场槽位含义不同：只是不弹窗，模型仍在评估。混着写会让人以为全停了。
+  api.renderAutoTrade({ ...atSample, server_ts: T0,
+                        assist_deny_until: { exit: T0 + 72 },
+                        last_decision: { ts: T0, kind: 'exit', close: false,
+                                         reason: '人工否决平仓，继续持有' } });
+  const exTag = String(made.atWhyTag.textContent || '');
+  const exTip = String(made.atWhyTag.title || '');
+  const exOk = exTag === '持仓中 · 暂停弹窗 1:12' && exTip.includes('模型仍在评估');
+  console.log(`  出场冷静期单独措辞 ${exOk ? '✓' : '✗'} (${exTag})`);
+  if (!exOk) failed = true;
+  // 线程已停：state 里的 assist_deny_until 不会被清掉，但这会儿没有"还在等"。
+  // 显示倒计时等于骗人——用户会以为过几分钟它会自己恢复。
+  api.renderAutoTrade({ ...atSample, running: false, position: null, server_ts: T0,
+                        assist_deny_until: { entry: T0 + 125 }, last_decision: cdLd });
+  const cdStop = String(made.atWhyTag.textContent || '');
+  console.log(`  停止后不显示冷静期 ${!cdStop.includes('冷静期') ? '✓' : '✗'} (${cdStop})`);
+  if (cdStop.includes('冷静期')) failed = true;
   api.renderAutoTrade(savedAt);
 
   // 峰值浮盈：持仓卡和流水行都要有。跟实际盈亏并排看才分得清

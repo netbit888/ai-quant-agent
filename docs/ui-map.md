@@ -30,7 +30,7 @@
 | `css/live.css` | 211 | 账户条、做单台一屏收口、近期质量 |
 | `css/modals.css` | 190 | 付费确认、交易溯源、应用内更新、图表最大化、人工信号弹窗 |
 | `css/score.css` | 55 | 交易评分卡 |
-| `css/autotrade.css` | 289 | AI 做单参数、卡片排版、工具条、常驻状态带 |
+| `css/autotrade.css` | 296 | AI 做单参数、卡片排版、工具条、常驻状态带 |
 | `css/overlay.css` | 132 | 全局 toast、全屏提醒幕布 |
 | `css/overrides.css` | 29 | 视觉层收敛补丁（命中区/断点/分章） |
 | `html/modals.html` | 142 | 五个弹窗 + 通用确认框 `#modalMask` |
@@ -46,7 +46,7 @@
 | `js/desk-ring.js` | 275 | `renderRing`（决策环 + 8 格位）、`setLed` |
 | `js/desk-pos.js` | 147 | `renderPos`（浮盈尺、保本三态） |
 | `js/desk-gate.js` | 133 | `renderGateLeds`（6 盏闸门灯 + 设置舱参数表） |
-| `js/desk-auto.js` | 365 | `renderAutoTrade`：做单台汇总 + 决策流表格（`#rowsAuto`）+ 复盘计数 |
+| `js/desk-auto.js` | 400 | `renderAutoTrade`：做单台汇总 + 决策流表格（`#rowsAuto`）+ 冷静期标签 |
 | `js/desk-prefs.js` | 392 | 做单参数读取/回填（`atMode`/`atSymbol`/`atLots`/`applyPrefs`）、toast |
 | `js/lessons.js` | 194 | 教训库统计、经验库包导入导出 |
 | `js/model-switch.js` | 177 | 供应商 → 模型两级下拉 |
@@ -67,6 +67,7 @@
 | 持仓面板（浮盈刻度尺、保本三态） | `js/desk-pos.js` + `css/desk.css` |
 | 6 盏闸门灯 / 设置舱参数表 | `js/desk-gate.js` |
 | 顶部常驻状态带 `#atBar` | `js/desk-auto.js`（`renderAutoTrade`）+ `css/autotrade.css` |
+| 辅助模式的冷静期倒计时（`冷静期 · 还剩 m:ss`） | `js/desk-auto.js` 的 `atCooldown()` / `atMmSs()`；数据来自 `summary().assist_deny_until` + `server_ts`，后端不另算 |
 | 决策流表格（列、跳过行开关） | `js/desk-auto.js`（`#rowsAuto`）+ `css/flow.css` |
 | 做单参数（品种/间隔/手数/纸面真实） | `js/desk-prefs.js` + `html/view-setup.html`（手数档位另有 `live/prefs.py` 的 `LOTS`，两边由 `tests/test_lot_scale.py` 钉住） |
 | 账户条 / 余额净值 | `html/view-desk.html` + `css/live.css` + `js/review.js` |
