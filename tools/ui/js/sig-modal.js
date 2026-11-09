@@ -345,6 +345,13 @@ async function sigAnswer(approve) {
 let sigWatchId = null;
 let sigWatchUntil = 0;
 
+/* 结论条的停留时长（2026-11-09）。这类消息是"你点了同意之后的结局"，
+   属于一次性回执：写出来是为了让人知道"不是卡死"，而不是让人长期盯着。
+   3 分钟 ≈ 3 个决策周期，够看到；再久就变成一条占着红框的历史残留，
+   还容易被读成"当前状态"。流水里有同样的记录（skip / open / close 行）。
+   故障类（券商拒单、平仓没发出去）**不传这个时长**——那些是待办，不是回执。 */
+const AT_VERDICT_TTL_MS = 180000;
+
 function sigVerdictCheck(a) {
   if (!sigWatchId || !a || !a.ok) return;
   const rows = Array.isArray(a.recent) ? a.recent : [];
@@ -362,12 +369,13 @@ function sigVerdictCheck(a) {
     if (hit.kind === 'open') {
       const dir = Number(hit.direction) > 0 ? '做多' : '做空';
       const px = hit.price == null ? '' : ' ' + fmt(hit.price, 3);
-      atSay(`<b>已成交：</b>${dir}${px}，单号 ${hit.ticket}。之后由程序看仓、模型决定出场。`, 'ok');
+      atSay(`<b>已成交：</b>${dir}${px}，单号 ${hit.ticket}。之后由程序看仓、模型决定出场。`,
+            'ok', AT_VERDICT_TTL_MS);
     } else if (hit.kind === 'close') {
       const pnl = Number(hit.pnl);
       const kind = Number.isFinite(pnl) && pnl > 0 ? 'ok' : 'err';
       const pnlTxt = Number.isFinite(pnl) ? `，盈亏 ${pnl.toFixed(2)}` : '';
-      atSay(`<b>已平仓</b>${pnlTxt}。`, kind);
+      atSay(`<b>已平仓</b>${pnlTxt}。`, kind, AT_VERDICT_TTL_MS);
     } else if (hit.kind === 'open_failed' || hit.kind === 'close_failed') {
       // 这两种行里 reason 是**模型的原话**，券商拒单的理由在 error 上，
       // 所以这里先取 error——用户关心的是"为什么没成"，不是模型怎么想的。
@@ -377,13 +385,15 @@ function sigVerdictCheck(a) {
     } else {
       // 后端 reason 本身就写成「已同意，但…」，这里只补一句定性，
       // 不重复"已同意"——否则同一句话会连着出现两遍。
-      atSay('<b>这笔没进场：</b>' + esc(hit.reason || hit.error || '见下方流水'), 'err');
+      atSay('<b>这笔没进场：</b>' + esc(hit.reason || hit.error || '见下方流水'), 'err',
+            AT_VERDICT_TTL_MS);
     }
     return;
   }
   if (Date.now() > sigWatchUntil) {
     sigWatchId = null;
-    atSay('<b>已提交</b>，几秒内没等到结论——直接看下方流水最新一条（开仓 / skip / 失败）。', 'err');
+    atSay('<b>已提交</b>，几秒内没等到结论——直接看下方流水最新一条（开仓 / skip / 失败）。',
+          'err', AT_VERDICT_TTL_MS);
   }
 }
 

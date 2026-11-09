@@ -204,13 +204,25 @@ function qaToast(msg, kind) {
 }
 
 /* 操作结果条。和 atNote 分开：atNote 每 15 秒被轮询覆写一次，
-   把「启动失败」写在那里等于没写——用户只会看到「点了没反应」。 */
-function atSay(msg, kind) {
+   把「启动失败」写在那里等于没写——用户只会看到「点了没反应」。
+
+   `ttlMs` 是可选的生命周期：给 0/不传 = 一直留到下一次 atSay 覆盖它。
+   **只有「已经结束的结局」才该传**（已成交 / 已平仓 / 这笔没进场 / 等了没等到），
+   这类消息是一次性回执，长期挂着会被读成"当前状态"，还占着大半个红框。
+   故障类（启动失败、券商拒单、平仓没发出去）绝不能过期——那种消息是待办，
+   自动消失等于让人错过处理时机。 */
+let atSayTimer = 0;
+function atSay(msg, kind, ttlMs) {
   const el = $('atMsg');
   if (!el) return;
+  // 先清旧定时器：否则上一条的 3 分钟到点会把**新**消息收掉。
+  if (atSayTimer) { clearTimeout(atSayTimer); atSayTimer = 0; }
   if (!msg) { el.className = 'at-msg hidden'; el.innerHTML = ''; return; }
   el.className = 'at-msg ' + (kind === 'ok' ? 'ok' : 'err');
   el.innerHTML = msg;
+  if (ttlMs > 0) {
+    atSayTimer = setTimeout(() => { atSayTimer = 0; atSay(''); }, ttlMs);
+  }
 }
 
 // 后端把 retcode 翻成了人话，这里再补一句「怎么解决」

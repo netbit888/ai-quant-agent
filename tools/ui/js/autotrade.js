@@ -151,14 +151,16 @@ function fillFeedback(a) {
   if (opens.length) {
     const o = opens[opens.length - 1];
     beepTrade(false);
-    atSay(`<b>已开仓</b> ${o.direction > 0 ? '多' : '空'} ${esc(String(o.lots || ''))} 手 @ ${fmt(o.price, 3)}`, 'ok');
+    atSay(`<b>已开仓</b> ${o.direction > 0 ? '多' : '空'} ${esc(String(o.lots || ''))} 手 @ ${fmt(o.price, 3)}`,
+          'ok', AT_VERDICT_TTL_MS);
   }
   if (closes.length) {
     beepTrade(true);
     const total = closes.reduce((s, r) => s + (Number(r.pnl) || 0), 0);
     atSay(closes.length > 1
       ? `<b>已平仓 ${closes.length} 笔</b>，合计 ${money(total)}`
-      : `<b>已平仓</b> ${closes[0].direction > 0 ? '多' : '空'}单 ${money(closes[0].pnl)}`, 'ok');
+      : `<b>已平仓</b> ${closes[0].direction > 0 ? '多' : '空'}单 ${money(closes[0].pnl)}`,
+      'ok', AT_VERDICT_TTL_MS);
   }
 }
 
