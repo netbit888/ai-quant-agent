@@ -103,7 +103,19 @@ function renderPos(a, p) {
       rTp.classList.remove('hidden');
       rTp.style.left = '100%';
       const cap = $('rTpCap');
-      if (cap) cap.textContent = '止盈 ' + fmt(tp, 2);
+      if (cap) {
+        // **趋势单这条线不是"到点就平"**：浮盈摸到 tp_min_trend 之后，闸门
+        // 只是把决定交回模型、每 tp_reask_sec 秒复核一次（见 _exit_gate 的
+        // tp_seen 分支）。写成「止盈 35.00」，人就会拿它当目标价——浮盈 65
+        // 还拿着看起来就不正常（2026-11-09 实盘用户原话："好恐怖，这拿得住"）。
+        const reask = Number(a.tp_reask_sec || 0);
+        const isTrend = plan === 'trend';
+        cap.textContent = (isTrend ? '复核门槛 ' : '止盈 ') + fmt(tp, 2);
+        cap.title = isTrend
+          ? `趋势单：浮盈到 ${fmt(tp, 2)} 不自动平仓，改为每 ${reask || 60} 秒问一次模型`
+            + '要不要平（模型说要跑就继续跑，止损由保本线兜着）'
+          : `浮盈到 ${fmt(tp, 2)} 才允许平仓（低于这个数不出场）`;
+      }
     }
     if (rulerLb) rulerLb.textContent = '浮盈刻度 · 0 = 开仓价';
     if (rulerV) {

@@ -593,6 +593,22 @@ try {
   console.log(`  流水行显示峰值 ${peakRowOk ? '✓' : '✗'}`);
   if (!peakRowOk) failed = true;
 
+  // 趋势单的止盈线其实是**复核门槛**（2026-11-09）：浮盈 65、线上写 35，
+  // 用户会拿它当目标价，于是"早就该平了却没平"看起来像失控。
+  api.renderAutoTrade({ ...atSample, tp_min_trend: 35.0, tp_reask_sec: 60,
+                        position: { ...atSample.position, plan: 'trend' } });
+  const tCap = String(made.rTpCap.textContent || '');
+  const tTip = String(made.rTpCap.title || '');
+  const tOk = tCap === '复核门槛 35.00' && tTip.includes('不自动平仓');
+  console.log(`  趋势单止盈线改名复核门槛 ${tOk ? '✓' : '✗'} (${tCap})`);
+  if (!tOk) failed = true;
+  // 震荡单维持「止盈」：那一档摸到门槛模型就给平，叫门槛没歧义。
+  api.renderAutoTrade({ ...atSample, position: { ...atSample.position, plan: 'range' } });
+  const rCap = String(made.rTpCap.textContent || '');
+  console.log(`  震荡单仍写止盈 ${rCap === '止盈 3.25' ? '✓' : '✗'} (${rCap})`);
+  if (rCap !== '止盈 3.25') failed = true;
+  api.renderAutoTrade(savedAt);
+
   // 常驻状态带：三件事——在不在跑 / 有没有仓 / 现在多少。
   // 这条是给「瞄一眼」服务的，所以任何一处写错都等于整个面板失去意义。
   const sbState = String(made.atBarState.textContent || '');
