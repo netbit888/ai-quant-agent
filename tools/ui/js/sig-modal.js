@@ -10,6 +10,7 @@
 let lastSigId = null;
 let answeredSigId = null;
 let sigRemain = 0;
+let sigCoolUntil = 0;   // 同向平仓冷却结束的本地时刻（ms）；0 = 不受冷却约束
 let sigTimer = null;
 let sigBusy = false;
 let titleTimer = null;
@@ -147,6 +148,12 @@ function sigShow(sig) {
     ? `持仓 ${long ? '多' : '空'} · 已持 ${Math.round(Number(sig.held_sec || 0) / 60)} 分钟`
     : `${long ? '做多' : '做空'} · ${sig.price == null ? '' : fmt(sig.price, 3)}`;
 
+  // 同向冷却：后端按 last_close_ts 算好剩余秒数（cool_left），这里折成本地
+  // 截止时刻，倒计时不用跟着轮询节奏走。出场信号后端恒给 0。
+  sigCoolUntil = Number(sig.cool_left) > 0
+    ? Date.now() + Number(sig.cool_left) * 1000
+    : 0;
+
   // 最终裁决：入场看 act/方向，出场就是"平"。
   // 颜色走全站方向色（--up 绿涨 / --down 红跌），和标签行、概率条同一套语义。
   const v = $('sigVerdict');
@@ -239,10 +246,36 @@ function sigHide() {
   $('sigCard').classList.remove('flash');
   flashTitle(false);
   lastSigId = null;
+  sigCoolUntil = 0;
+  const cool = $('sigCool');
+  if (cool) { cool.classList.add('hidden'); cool.textContent = ''; }
+}
+
+/* 同向平仓冷却条。
+   弹卡发生在"人同意之后那道复核"之前，所以冷却期内的同向信号照样会弹，
+   人点了同意才被程序以 void_state 拦下（后端 signal_cool_left 已算好剩余
+   秒数）。这里只负责把这件事**在点之前**说清楚。
+   冷却走完就整条隐藏：它消失即代表"现在点会正常执行"。 */
+function sigRenderCool() {
+  const el = $('sigCool');
+  if (!el) return;
+  const cool = sigCoolUntil
+    ? Math.max(0, Math.ceil((sigCoolUntil - Date.now()) / 1000))
+    : 0;
+  if (cool <= 0) {
+    if (sigCoolUntil) sigCoolUntil = 0;
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  el.classList.remove('hidden');
+  el.textContent = `同向平仓冷却中，还要 ${cool} 秒才能再进 —— `
+                 + '现在点「同意」会被程序拦下，不会成交。';
 }
 
 function sigTick() {
   if (sigRemain > 0) sigRemain -= 1;
+  sigRenderCool();
   const el = $('sigClock');
   if (!el) return;
   el.textContent = sigRemain > 0 ? `${sigRemain}s` : '已过期';
@@ -382,6 +415,13 @@ function sigPoll(a) {
   } else {
     // 同一信号：只把倒计时对齐服务端（防本地定时器漂移），不重复响铃
     if (Math.abs(remain - sigRemain) > 2) sigRemain = remain;
+    // 冷却也每秒从后端取权威值，差 2 秒以上才校一次（状态更变时立即跟上）
+    const cool = Number(sig.cool_left) || 0;
+    const local = sigCoolUntil
+      ? Math.max(0, Math.ceil((sigCoolUntil - Date.now()) / 1000)) : 0;
+    if (Math.abs(cool - local) > 2) {
+      sigCoolUntil = cool > 0 ? Date.now() + cool * 1000 : 0;
+    }
   }
 }
 

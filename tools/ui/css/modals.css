@@ -181,6 +181,15 @@
   }
   .sig-tags span.bad { color: #ffb4a8; border-color: rgba(255,107,107,.4); }
   .modal-sig .actions { flex: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  /* 冷却中的入场信号：现在点同意也会被 can_open(direction) 以 void_state
+     拦下。用金色警示（同 .cost）而不是灰色 hint —— 这是一条"这张卡现在
+     无效"的结论，不是补充说明。冷却走完后整条隐藏，不再占版面。 */
+  .modal-sig .sig-cool {
+    flex: none; margin-top: 10px; padding: 8px 11px; border-radius: var(--r-md);
+    font-size: var(--fs-2); line-height: 1.55;
+    background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.28);
+    color: var(--gold-lit);
+  }
   .modal-sig .hint { flex: none; margin-top: 8px; font-size: var(--fs-1); color: var(--dim); line-height: 1.55; }
   .link-btn {
     background: none; border: none; color: var(--accent, var(--info)); cursor: pointer;

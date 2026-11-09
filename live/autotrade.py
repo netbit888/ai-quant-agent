@@ -3866,6 +3866,49 @@ def cooldown_left(state: dict, now: int, direction: int | None, cfg: Cfg) -> int
     return max(0, cd - (now - int(last)))
 
 
+def _cool_cfg(state: dict) -> Cfg:
+    """从 state 里的 cfg 快照还原一份 Cfg，只为算冷却剩余秒数。
+
+    为什么不直接调 `cfg_from_state()`：那个会再 `load_state()` 一次，而
+    `summary()` / `pending_signal_view()` 是面板每秒轮询的接口，state 已经
+    在手上，没必要为了两个整数再读一遍盘。
+    """
+    raw = state.get("cfg")
+    if not isinstance(raw, dict):
+        return Cfg()
+    try:
+        return Cfg(**{k: v for k, v in raw.items() if k in Cfg.__dataclass_fields__})
+    except (TypeError, ValueError):
+        return Cfg()
+
+
+def signal_cool_left(state: dict, sig: dict | None, now: int | None = None) -> int:
+    """这条**入场**信号还受同向平仓冷却约束几秒（0 = 不受约束）。
+
+    为什么需要它
+    ------------
+    辅助模式的弹卡发生在「人同意之后那道复核」**之前**：`_new_signal()` →
+    落盘 → 通知面板，同向 `cooldown_same_sec` 的判定在 `send_open()` 前的
+    `can_open(direction=...)`。于是冷却期内的同向信号照样会弹，人点了同意
+    才收到 `void_state`「同向平仓后冷却中，还需 N 秒」——**让人对一张点了
+    也没用的卡做决策**。
+
+    2026-11-09 实盘：20:17 那笔趋势多单 21:11:33 平仓，21:12:11 就弹出
+    「震荡贴下沿做多」，同向冷却还剩 106 秒；人否决后以为错过一波 9 美元
+    的上涨，实际那张卡本来也执行不了。
+
+    判定只有 `cooldown_left()` 一处，这里不复制阈值。出场信号不受冷却约束
+    （平仓永远允许），所以只认 `kind == "entry"`。
+    """
+    if not sig or str(sig.get("kind") or "") != "entry":
+        return 0
+    direction = int(sig.get("direction") or 0)
+    if not direction:
+        return 0
+    ts = int(time.time()) if now is None else int(now)
+    return cooldown_left(state, ts, direction, _cool_cfg(state))
+
+
 def can_open(state: dict, now: int, has_position: bool, cfg: Cfg,
              direction: int | None = None) -> tuple[bool, str]:
     if state.get("stop_reason"):
@@ -5825,7 +5868,8 @@ def pending_signal_view(login=None) -> dict:
         "signal_suppressed": (
             None if (sig or not state.get("pending_signal"))
             else ("not_running" if not state.get("running") else "worker_dead")),
-        "signal": ({**sig, "remain_sec": max(0, int(sig.get("expires_at") or 0) - now)}
+        "signal": ({**sig, "remain_sec": max(0, int(sig.get("expires_at") or 0) - now),
+                    "cool_left": signal_cool_left(state, sig, now)}
                    if sig else None),
     }
 
@@ -7026,7 +7070,8 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "assist": assist,
         "pending_signal": (
             {**signal_now, "remain_sec": max(0, int(signal_now.get("expires_at") or 0)
-                                             - int(time.time()))}
+                                             - int(time.time())),
+             "cool_left": signal_cool_left(state, signal_now)}
             if signal_now else None),
         # 倒计时基准用服务端时钟：客户端时钟偏几分钟的话，弹窗会显示负秒数。
         "server_ts": int(time.time()),

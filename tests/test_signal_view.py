@@ -15,6 +15,7 @@ worker 在读答复——点了 approve 只是写一个没人消费的文件，�
 
 from __future__ import annotations
 
+import time
 import unittest
 from unittest import mock
 
@@ -80,6 +81,72 @@ class SummarySignalTest(_Base):
     def test_no_signal_is_just_none(self):
         s = self._call(autotrade.summary, _state(running=True, with_sig=False))
         self.assertIsNone(s["pending_signal"])
+
+    def test_carries_cool_left_for_same_direction(self):
+        """弹窗要能提前说「现在点同意也不会执行」。
+
+        2026-11-09 实盘：21:11:33 平多，21:12:11（74 秒后）弹出同向做多，
+        `cooldown_same_sec=180` 还剩 106 秒——人否决后以为错过一波上涨，
+        其实那张卡本来就会被 `can_open(direction=...)` 拦成 void_state。
+        """
+        st = _state(running=True)
+        st["cfg"].update({"cooldown_sec": 60, "cooldown_same_sec": 180})
+        st["last_close_ts"] = int(time.time()) - 74
+        st["last_close_dir"] = -1          # 与 _sig() 的做空同向
+        s = self._call(autotrade.summary, st)
+        cool = s["pending_signal"]["cool_left"]
+        self.assertGreaterEqual(cool, 100, "平仓 74 秒后同向冷却应还剩约 106 秒")
+        self.assertLessEqual(cool, 106)
+
+
+class SignalCoolLeftTest(unittest.TestCase):
+    """`signal_cool_left`：只在**入场**信号上生效，且必须与 cooldown_left 同源。
+
+    这里用的是 2026-11-09 那笔的真实时间线（平仓 1794229893，信号 tick
+    1794229967），换成相对秒数后断言，免得测试依赖绝对时钟。
+    """
+
+    def _st(self, **kw) -> dict:
+        st = {
+            "running": True, "owner": "panel",
+            "cfg": {"assist": True, "cooldown_sec": 60, "cooldown_same_sec": 180},
+            "last_close_ts": 1000, "last_close_dir": 1,
+        }
+        st.update(kw)
+        return st
+
+    @staticmethod
+    def _sig(kind: str = "entry", direction: int = 1) -> dict:
+        return {"id": "5c1f0a9b7e33", "kind": kind, "direction": direction}
+
+    def test_same_direction_counts_down_the_long_tier(self):
+        st = self._st()
+        self.assertEqual(autotrade.signal_cool_left(st, self._sig(), now=1074), 106)
+
+    def test_opposite_direction_only_waits_the_short_tier(self):
+        """反向单 60 秒就放行：74 秒后不该再提示冷却。"""
+        st = self._st()
+        self.assertEqual(
+            autotrade.signal_cool_left(st, self._sig(direction=-1), now=1074), 0)
+
+    def test_exit_signal_never_waits(self):
+        """平仓永远允许，出场信号不该背着冷却提示。"""
+        st = self._st()
+        self.assertEqual(
+            autotrade.signal_cool_left(st, self._sig(kind="exit"), now=1074), 0)
+
+    def test_no_previous_close_means_no_cooldown(self):
+        st = self._st(last_close_ts=None)
+        self.assertEqual(autotrade.signal_cool_left(st, self._sig(), now=1074), 0)
+
+    def test_expired_cooldown_is_zero(self):
+        st = self._st()
+        self.assertEqual(autotrade.signal_cool_left(st, self._sig(), now=1200), 0)
+
+    def test_missing_cfg_falls_back_to_defaults(self):
+        """旧 state 里没有 cfg 快照也不能炸：退回 Cfg 默认档（60/180）。"""
+        st = self._st(cfg=None)
+        self.assertEqual(autotrade.signal_cool_left(st, self._sig(), now=1074), 106)
 
 
 class PendingSignalViewTest(_Base):

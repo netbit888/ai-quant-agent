@@ -52,6 +52,10 @@
       </div>
     </div>
     </div>
+    <!-- 冷却提示：这张卡可能是"同向平仓冷却期内"弹出来的，此时点同意也
+         会被程序以 void_state 拦下（判定在 send_open 之前）。后端算剩余
+         秒数（cool_left），这里只负责说清楚，别让用户对废卡做决策。 -->
+    <div class="sig-cool hidden" id="sigCool"></div>
     <div class="actions">
       <button class="btn-cancel" id="sigNo">不做</button>
       <button class="btn-ok" id="sigYes">同意</button>
