@@ -1,4 +1,4 @@
-"""面板「交易参数」的记忆：品种 / 模式 / 决策间隔。
+"""面板「交易参数」的记忆：品种 / 模式 / 决策间隔 / 开仓手数。
 
 为什么单独一个文件，而不是靠 state 里的 cfg
 ------------------------------------------
@@ -27,12 +27,13 @@ from pathlib import Path
 
 from live import paths
 
-# 与模板（tools/ui/html/view-setup.html）里那四个控件的出厂状态保持一致。
+# 与模板（tools/ui/html/view-setup.html）里那五个控件的出厂状态保持一致。
 DEFAULT_PREFS = {
     "symbol": "XAUUSDm",
     "interval_sec": 60,
     "mode": "live",          # paper / live / assist
     "assist_paper": False,   # 仅 mode=assist 时有意义：勾了「纸面演练」
+    "lots": 0.01,
 }
 
 MODES = ("paper", "live", "assist")
@@ -41,6 +42,39 @@ MODES = ("paper", "live", "assist")
 # 记一个界面上不存在的值回来，`select.value = "7"` 赋不进去会变成空串——
 # 界面显示空白比记不住更糟：用户会以为参数丢了，实际是记了个没人认识的数。
 INTERVALS = (3, 5, 10, 30, 60)
+
+# 开仓手数的合法档位，同样必须和 <select id="atLots"> 的 option 一一对应。
+# 上限 0.05 是算出来的，不是拍的：出场阈值是固定金额，手数放大 N 倍，
+# 止损价距就缩到 1/N；0.05 手时 3.00 USD 止损只剩 0.60 价距，而单笔点差
+# 约 0.24，成本已占止损金额的 40%。0.10 手基本是开仓即被点差打掉。
+# 这些都是券商 round(lots, 2) 能原样接受的 0.01 整数倍，不会触发 10014。
+# 手数放大时后端会把金额阈值等比缩放（见 autotrade.money_at_lots），
+# 所以价距恒定；这个上限防的是「金额本身大到滑点和保证金吃不消」。
+LOTS = (0.01, 0.02, 0.03, 0.05)
+
+# 浮点不能直接用 `in`：0.03 从 JSON 往返后可能变成 0.029999999999999999。
+_LOT_EPS = 1e-9
+
+
+def valid_lots(value) -> bool:
+    """是不是券商能收、且界面上真有的那一档手数。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return any(abs(v - x) < _LOT_EPS for x in LOTS)
+
+
+def clean_lots(value) -> float | None:
+    """把任意输入收敛成规范档位值；不在白名单里返回 None。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    for x in LOTS:
+        if abs(v - x) < _LOT_EPS:
+            return x
+    return None
 
 
 def prefs_file() -> Path:
@@ -74,6 +108,10 @@ def _clean(raw, symbols=None) -> dict:
         iv = None
     if iv in INTERVALS:
         out["interval_sec"] = iv
+
+    lots = clean_lots(raw.get("lots"))
+    if lots is not None:
+        out["lots"] = lots
 
     mode = str(raw.get("mode") or "").strip().lower()
     if mode in MODES:
@@ -163,6 +201,16 @@ def save_prefs(data: dict, symbols=None) -> dict:
         else:
             errors.append(f"模式只接受 {'/'.join(MODES)}，收到 {data.get('mode')!r}")
 
+    if "lots" in data:
+        lots = clean_lots(data.get("lots"))
+        if lots is None:
+            errors.append(
+                f"开仓手数只接受 {'/'.join(f'{x:g}' for x in LOTS)} 手，"
+                f"收到 {data.get('lots')!r}"
+            )
+        else:
+            patch["lots"] = lots
+
     if "assist_paper" in data:
         patch["assist_paper"] = bool(data.get("assist_paper"))
 
@@ -196,6 +244,7 @@ def prefs_from_cfg(cfg) -> dict:
         "interval_sec": int(getattr(cfg, "interval_sec", DEFAULT_PREFS["interval_sec"])),
         "mode": mode,
         "assist_paper": assist_paper,
+        "lots": float(getattr(cfg, "lots", DEFAULT_PREFS["lots"])),
     }
 
 

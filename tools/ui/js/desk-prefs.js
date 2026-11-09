@@ -30,6 +30,14 @@ function atIntervalSec() {
   return Number.isFinite(v) && v >= 3 ? v : 60;
 }
 
+/* 开仓手数。兜底必须和 Cfg.lots / <select> 的 selected 一致（0.01）：
+   控件读不到却按 0.05 发单，界面和账本就会对不上，而且不报错。
+   合法档位由后端 live/prefs.py 的 LOTS 定，这里只把选中的值原样送过去。 */
+function atLots() {
+  const v = parseFloat(($('atLots') || {}).value);
+  return Number.isFinite(v) && v > 0 ? v : 0.01;
+}
+
 /* 把代价直接写在选择器旁边。
  * 周期一缩短，模型调用次数线性上涨；真实模式下点差成本也跟着上涨。
  * 这些数字不摆出来，用户只会把间隔调到 3 秒然后奇怪为什么账户在流血。 */
@@ -40,17 +48,19 @@ function updateModeHint() {
   const wrap = $('atAssistPaperWrap');
   if (wrap) wrap.style.display = atAssistMode() ? 'flex' : 'none';
   const iv = atIntervalSec();
+  const lots = atLots();
   const calls = Math.round(3600 / iv);
   // 点差成本估算：平仓后冷却 60 秒 ⇒ 最好情况下每小时 ~60 笔往返。
   // 这是**上限**不是预期——模型可以 act=false 跳过，实际笔数通常远低于此；
   // 经验库在的时候尤其如此。列上限是为了把"最坏要付多少点差"摆上台面。
   const trips = Math.min(calls, 60);
-  const perTrip = atSpreadCostUsd();
+  const perTrip = atSpreadCostUsd(lots);
   if (atAssistMode()) {
     // 辅助模式必须写清两件事：等的是你，以及**硬止损不等你**。
     // 不写后半句，用户会以为"人确认"包含"人决定什么时候止损"。
     const paper = atAssistPaper();
     el.textContent = `辅助${paper ? '·演练' : ''} · ${atSymbolLabel()} · 每 ${iv} 秒判断 · `
+      + `${lots} 手 · `
       + `开/平仓前弹窗等你点（入场 90 秒 / 出场 120 秒，超时按默认处理）· `
       + `硬止损与持仓上限由程序直接执行${paper ? ' · 不发真单' : ''}`;
     el.className = paper ? 'mini' : 'mini red';
@@ -58,11 +68,11 @@ function updateModeHint() {
     // × AT_FACTOR：perTrip 是美元，界面统一按账户货币显示。
     const total = perTrip == null ? '未知'
       : fmt(trips * perTrip * AT_FACTOR, 2) + ' ' + AT_MONEY + '/小时（上限）';
-    el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次调用/小时，`
+    el.textContent = `真实 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · ${lots} 手 · 约 ${calls} 次调用/小时，`
       + `往返上限 ${trips} 笔 ≈ 点差上限 ${total}`;
     el.className = 'mini red';
   } else {
-    el.textContent = `纸面 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · 约 ${calls} 次模型调用/小时`;
+    el.textContent = `纸面 · ${atSymbolLabel()} · 每 ${iv} 秒判断 · ${lots} 手 · 约 ${calls} 次模型调用/小时`;
     el.className = 'mini';
   }
 }
@@ -87,7 +97,11 @@ function atSymbolLabel() {
 function atSpreadCostUsd(lots) {
   const spec = atSymbolSpecs[atSymbol()];
   if (!spec || spec.spread == null || spec.point == null || spec.contract == null) return null;
-  return spec.spread * spec.point * (lots || 0.01) * spec.contract;
+  // 手数变了，点差成本线性变。旧版这里写死 0.01，选 0.05 手时确认弹窗
+  // 会把最坏点差低估 5 倍——那正是这个数字唯一的作用。
+  const raw = Number(lots);
+  const v = (lots == null || !Number.isFinite(raw) || raw <= 0) ? atLots() : raw;
+  return spec.spread * spec.point * v * spec.contract;
 }
 
 function fillSymbolOptions(a) {
@@ -127,6 +141,14 @@ function applyPrefs(a) {
     .some(o => o.value === iv));
   if (hasIv) ivEl.value = iv;
 
+  // 手数同样只认下拉框里真有的档位：记一个界面上没有的值回来，
+  // select 会变空白，用户以为参数丢了，实际是记了个没人认识的数。
+  const lotsEl = $('atLots');
+  const lots = String(p.lots == null ? '' : p.lots);
+  const hasLots = !!(lotsEl && lotsEl.options && Array.from(lotsEl.options)
+    .some(o => o.value === lots));
+  if (hasLots) lotsEl.value = lots;
+
   const mode = p.mode || 'live';
   const setChecked = (id, on) => { const e = $(id); if (e) e.checked = !!on; };
   // 先全部落定再 updateModeHint：三条 radio 是同一组，逐条改会让 hint 拿到
@@ -157,7 +179,7 @@ function saveAtPrefs() {
       fetch('/api/autotrade/prefs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          symbol: atSymbol(), interval_sec: atIntervalSec(),
+          symbol: atSymbol(), interval_sec: atIntervalSec(), lots: atLots(),
           mode: atMode(), assist_paper: atAssistPaper(),
         }),
       }).catch(() => {});
@@ -208,26 +230,27 @@ async function startAutoTrade() {
   const assist = mode === 'assist';
   const paper = atDryRun();
   const iv = atIntervalSec();
+  const lots = atLots();
   const calls = Math.round(3600 / iv);
   const sym = atSymbol();
-  const perTrip = atSpreadCostUsd();
+  const perTrip = atSpreadCostUsd(lots);
   let ok = false;
   try {
     ok = await confirmApiCall({
       title: assist
-        ? `AI 辅助${paper ? '（演练）' : ''}：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
-        : (live ? `真实下单：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`
-                : `纸面：${atSymbolLabel()}，每 ${iv} 秒判断一次，开始？`),
+        ? `AI 辅助${paper ? '（演练）' : ''}：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`
+        : (live ? `真实下单：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`
+                : `纸面：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`),
       desc: assist
         ? `模型出信号后弹窗等你点：入场等 90 秒（不点＝不做），`
           + `出场等 120 秒（不点＝按模型决定平仓）。`
           + `硬止损和持仓上限仍由程序直接执行，不会等你；`
           + `同意时若价格已朝不利方向跑过 0.80 美元，信号作废。`
           + (paper ? `当前是演练：同意也只记账，不发真单。`
-                   : `当前会向券商发真实市价单（0.01 手）。`)
+                   : `当前会向券商发真实市价单（${lots} 手）。`)
           + `每小时约 ${calls} 次模型调用。`
         : (live
-            ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，不挂止损止盈。`
+            ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，每笔 ${lots} 手，不挂止损止盈。`
               + `每小时约 ${calls} 次模型调用；平仓后冷却 60 秒、同向重进 180 秒，往返上限 60 笔/小时`
               + `（模型可跳过，实际通常更少），`
               + `最坏点差约 ${perTrip == null ? '未知'
@@ -252,7 +275,7 @@ async function startAutoTrade() {
     const r = await fetch('/api/autotrade/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        confirm: true, dry_run: paper, symbol: sym, lots: 0.01,
+        confirm: true, dry_run: paper, symbol: sym, lots: lots,
         interval_sec: iv,
         assist: assist,
         account: curLogin || undefined,

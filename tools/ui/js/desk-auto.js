@@ -217,6 +217,8 @@ function renderAutoTrade(a) {
   if ($('atModeAssist')) $('atModeAssist').disabled = lockMode;
   if ($('atAssistPaper')) $('atAssistPaper').disabled = lockMode;
   $('atInterval').disabled = lockMode;
+  // 手数也锁死：跑起来之后改手数，持仓还是旧手数，出场阈值却换了一套
+  if ($('atLots')) $('atLots').disabled = lockMode;
   // 品种同样锁死：跑起来之后换品种等于换了一个策略，仓位还在旧品种上
   fillSymbolOptions(a);
   if ($('atSymbol')) $('atSymbol').disabled = lockMode;
@@ -229,6 +231,10 @@ function renderAutoTrade(a) {
     // 把选择器对齐到实际在跑的那个周期，别让界面说 60 秒而实际跑 5 秒
     const runningIv = a.cfg && a.cfg.interval_sec;
     if (runningIv) $('atInterval').value = String(runningIv);
+    // 手数同样对齐到实际在跑的那一档：界面说 0.01、实际发 0.05 手，
+    // 是最贵也最难查的一类错位（点差和止损都按实际手数走）。
+    const runningLots = a.cfg && a.cfg.lots;
+    if (runningLots && $('atLots')) $('atLots').value = String(runningLots);
     updateModeHint();
     // 正在跑的这条 cfg 是最新的事实：停止之后界面就该停在它上面，
     // 不许下一秒被 prefs 改回上一场的旧选择。

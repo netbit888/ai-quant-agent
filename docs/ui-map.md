@@ -37,7 +37,7 @@
 | `html/view-desk.html` | 232 | 做单台：`#atBar` 状态带、账户条、`#live-desk` |
 | `html/view-flow.html` | 36 | 决策流页 `#live-flow` |
 | `html/view-review.html` | 167 | 复盘台 `#live-review` |
-| `html/view-setup.html` | 208 | 设置舱 `#live-setup` |
+| `html/view-setup.html` | 219 | 设置舱 `#live-setup` |
 | `html/footer.html` | 9 | 页脚：程序名 / 版本 / 检查更新 |
 | `html/curtain.html` | 28 | 全屏提醒幕布 `#atCurtain`（在 `</script>` 之后） |
 | `js/bridge.js` | 243 | pywebview 桥、格式化工具、`drawArea`/`drawBars` 图表原语 |
@@ -46,8 +46,8 @@
 | `js/desk-ring.js` | 275 | `renderRing`（决策环 + 8 格位）、`setLed` |
 | `js/desk-pos.js` | 147 | `renderPos`（浮盈尺、保本三态） |
 | `js/desk-gate.js` | 133 | `renderGateLeds`（6 盏闸门灯 + 设置舱参数表） |
-| `js/desk-auto.js` | 344 | `renderAutoTrade`：做单台汇总 + 决策流表格（`#rowsAuto`）+ 复盘计数 |
-| `js/desk-prefs.js` | 370 | 做单参数读取/回填（`atMode`/`atSymbol`/`applyPrefs`）、toast |
+| `js/desk-auto.js` | 365 | `renderAutoTrade`：做单台汇总 + 决策流表格（`#rowsAuto`）+ 复盘计数 |
+| `js/desk-prefs.js` | 392 | 做单参数读取/回填（`atMode`/`atSymbol`/`atLots`/`applyPrefs`）、toast |
 | `js/lessons.js` | 194 | 教训库统计、经验库包导入导出 |
 | `js/model-switch.js` | 177 | 供应商 → 模型两级下拉 |
 | `js/setup-wizard.js` | 101 | 首启配置向导 |
@@ -68,7 +68,7 @@
 | 6 盏闸门灯 / 设置舱参数表 | `js/desk-gate.js` |
 | 顶部常驻状态带 `#atBar` | `js/desk-auto.js`（`renderAutoTrade`）+ `css/autotrade.css` |
 | 决策流表格（列、跳过行开关） | `js/desk-auto.js`（`#rowsAuto`）+ `css/flow.css` |
-| 做单参数（品种/间隔/纸面真实） | `js/desk-prefs.js` + `html/view-setup.html` |
+| 做单参数（品种/间隔/手数/纸面真实） | `js/desk-prefs.js` + `html/view-setup.html`（手数档位另有 `live/prefs.py` 的 `LOTS`，两边由 `tests/test_lot_scale.py` 钉住） |
 | 账户条 / 余额净值 | `html/view-desk.html` + `css/live.css` + `js/review.js` |
 | 复盘台（本场复盘、行为标记） | `js/session-review.js` + `html/view-review.html` |
 | 交易评分 / 近期质量 | `js/scoring.js`、`js/trade-quality.js` |

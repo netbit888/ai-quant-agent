@@ -16,7 +16,7 @@
     /api/autotrade/signal  回答一条待确认信号（AI 辅助模式；approve 会下单）
     /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
     /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动
-    /api/autotrade/prefs   记住面板上的交易参数（品种/模式/间隔；不下单、不花钱）
+    /api/autotrade/prefs   记住面板上的交易参数（品种/模式/间隔/手数；不下单、不花钱）
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
 
 只读接口里要留意的两个：

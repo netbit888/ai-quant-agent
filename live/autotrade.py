@@ -354,6 +354,47 @@ class Cfg:
     comment: str = "aqa_ai"
 
 
+# ------------------------------------------------- 手数与金额阈值的换算
+#
+# 出场那一套数（sl_usd=3.00 / tp_min_usd=3.25 / be_arm_usd=3.25 …）是在
+# 0.01 手下标定的：当时 0.01 手 XAUUSDm = 1 盎司，1.00 价距恰好等于
+# 1.00 USD，所以「3.00 金额」和「3.00 价距」是同一个数。227 笔反事实
+# 回放扫出来的其实是**价距**，只是被写成了金额。
+#
+# 浮盈 = 价距 × 合约 × 手数 × 账户系数。手数放大 N 倍，同一个金额阈值
+# 对应的价距就缩到 1/N：0.02 手时 3.00 USD 止损只剩 1.50 价距，0.10 手
+# 只剩 0.30，而单笔点差约 0.24 —— 等于一开仓就被点差打掉，回放证据也
+# 跟着失效。所以手数可以选，但金额阈值必须等比放大，把价距钉回原处。
+#
+# 缩放**在运行时按 cfg.lots 派生**，不写回 Cfg 字段：这样 CODE_ONLY 仍然
+# 是本版代码的默认值（test_cfg_ownership 钉着），面板/CLI 两条启动路径
+# 天然一致，state 里存的那份 cfg 也永远是原始值，不会被重复缩放。
+BASE_LOTS: float = 0.01
+_SCALE_EPS = 1e-9
+
+
+def lot_scale(cfg: Cfg) -> float:
+    """当前手数相对基准手数的倍数；手数非法时按 1 处理（回退旧行为）。"""
+    try:
+        lots = float(getattr(cfg, "lots", BASE_LOTS) or 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return lots / BASE_LOTS if lots > 0 else 1.0
+
+
+def money_at_lots(cfg: Cfg, value) -> float:
+    """把「0.01 手口径」的金额阈值换算成当前手数下的等效金额。
+
+    只有账户货币金额要过这里。概率（min_edge）、秒数、价距口径的
+    assist_max_slip_usd 都不过；`max_loss_usd` 刹车也**故意不缩放**——
+    手数放大后更早触发，属于额外保护。
+    """
+    try:
+        return float(value) * lot_scale(cfg)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # --------------------------------------------------------- 谁能改这些参数
 #
 # 起因（2026-11-05）：面板的 /api/autotrade/start 手写了 14 个字段的映射，
@@ -1574,7 +1615,7 @@ reason —— 不超过 40 字的中文依据，必须引用具体数字。
 {BE_RULE}这些数字会随配置变，以本段显示的为准，不要引用你记忆里的旧值。
 所以**你被问到，就说明这笔单已经浮盈 ≥ {TP_MIN_USD} {MONEY_UNIT}**，而且还没到 {MAX_HOLD_MIN} 分钟。
 （金额单位是账户的结算货币：美元户是 USD，美分户是 USC。同一个数字在两种
-账户上的实际价值差 100 倍，所以以这里写明的单位为准，不要自己换算。）
+账户上的实际价值差 100 倍，所以以这里写明的单位为准，不要自己换算。）{LOT_RULE}
 
 【判断原则】
 - 主看 K 线结构，tick 只做辅证；两者冲突时以 K 线为准。
@@ -1677,19 +1718,24 @@ def exit_params(cfg: Cfg, plan: str | None) -> dict:
     金额单位统一是**账户结算货币**：美元户读到 3.00 就是 3 美元，
     美分户读到 3.00 就是 3 分。同一个 3.00 在美分户上正好对应小 100 倍的
     仓位（0.01 手 XAUUSDc = 0.01 盎司），价距仍然是 3.00 美元——两者等价。
+
+    返回的金额已按 `money_at_lots(cfg, …)` 等比缩放到当前手数：**这里是一切
+    出场金额的唯一出口**。手数放大 N 倍，金额也放大 N 倍，价距保持不变；
+    否则 0.02 手就会把 3.00 USD 止损压成 1.50 价距。调用方不要再自己读
+    `cfg.sl_usd` 直接比浮盈，那会绕过缩放。
     """
     if plan == "trend":
         return {
             "plan": "trend",
-            "sl_usd": float(cfg.sl_usd),
-            "tp_min_usd": (float(cfg.tp_min_trend) if cfg.tp_min_trend > 0
-                           else float(cfg.tp_min_usd)),
+            "sl_usd": money_at_lots(cfg, cfg.sl_usd),
+            "tp_min_usd": money_at_lots(
+                cfg, cfg.tp_min_trend if cfg.tp_min_trend > 0 else cfg.tp_min_usd),
             "max_hold_sec": int(cfg.max_hold_trend or cfg.max_hold_sec),
         }
     return {
         "plan": plan or "range",
-        "sl_usd": float(cfg.sl_usd),
-        "tp_min_usd": float(cfg.tp_min_usd),
+        "sl_usd": money_at_lots(cfg, cfg.sl_usd),
+        "tp_min_usd": money_at_lots(cfg, cfg.tp_min_usd),
         "max_hold_sec": int(cfg.max_hold_sec),
     }
 
@@ -2765,10 +2811,13 @@ def _sl_price_for(cfg, pos: dict) -> float:
         entry = float(pos.get("price_open") or 0.0)
         if lots <= 0 or entry <= 0:
             return 0.0
-        unit = float(_symbol_contract(cfg.symbol)) * lots * _acct_factor()
-        if unit <= 0:
+        # 价距与手数**无关**：金额阈值随手数等比放大，除回去正好相消。
+        # 所以这里既不能读 pos["lots"]（复盘回放里那笔单可能是 0.03 手开的，
+        # 而 cfg 是当前配置，两者未必同数），也不能直接读缩放后的金额——
+        # 唯一自洽的算法是用基准手数把金额换回价距。
+        dist = price_dist_of(cfg, cfg.sl_usd)
+        if dist <= 0:
             return 0.0
-        dist = abs(float(cfg.sl_usd)) / unit
         d = 1 if int(pos.get("direction") or 1) > 0 else -1
         return entry - d * dist
     except (TypeError, ValueError):
@@ -2929,9 +2978,12 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
     if theme in ("止盈太早", "止损太晚", "出场时点不对") or verdict:
         # 回撤线取「半个止盈门槛」：多拿的代价到这个量级，
         # 收益和风险就是同一枚硬币，"平太早"不能算教训。
+        # dd_limit 要和 post_bars 的 high/low 比，是**价格**不是金额：
+        # 手数放大后 tp_min_usd 的金额也放大，直接除 2 会变成一条永远碰不到的线
+        # （等于反事实校验静默失效）。
         cf = exit_counterfact(post_close, int(position.get("direction") or 1),
                               _sl_price_for(cfg, position), exit_price,
-                              dd_limit=float(cfg.tp_min_usd or 0.0) / 2.0)
+                              dd_limit=price_dist_of(cfg, cfg.tp_min_usd or 0.0) / 2.0)
     if verdict == VERDICT_EARLY and cf:
         verdict = VERDICT_OK
         theme = "离场正确"
@@ -3740,7 +3792,7 @@ def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
     # 券商端 SL 被抬到开仓价，之后回落到开仓价就成交了——不问模型。
     # 不告诉它，它会把这个平仓读成"结构走完了"，而实际上是"回到起点"。
     # 只给趋势单（规则本身见 _be_applies）；震荡单不适用，关掉也整行不出现。
-    be_arm = float(getattr(cfg, "be_arm_usd", 0.0) or 0.0)
+    be_arm = money_at_lots(cfg, getattr(cfg, "be_arm_usd", 0.0) or 0.0)
     if plan == "trend" and bool(getattr(cfg, "be_at_entry", False)) and be_arm > 0:
         be_rule = (f"- 趋势单浮盈到过 {be_arm:g} {money_label(_acct_currency())}："
                    "系统会把券商端止损抬到开仓价，之后价格回落到开仓价会直接平掉"
@@ -3748,6 +3800,24 @@ def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
     else:
         be_rule = ""
     out = out.replace("{BE_RULE}", be_rule)
+    # 手数一变，上面的止损/止盈金额也等比变，但模型看的是价格 K 线。
+    # 只给金额不说价距，它会把「浮亏 9.00 才止损」读成一段更远的行情——
+    # 实际上价距仍是 3.00。0.01 手时不注入任何文字，保持原提示词逐字不变。
+    scale = lot_scale(cfg)
+    if abs(scale - 1.0) > _SCALE_EPS:
+        # 价距要用 price_dist_of 换（合约 × 基准手数 × 账户系数），不能拿金额
+        # 除以倍数：那只在 0.01 手 XAUUSDm（1 盎司）这种 1:1 的口径下成立，
+        # 换到美分户就是把「3.00 美元」当成「3.00 美分」报给模型。
+        sl_dist = price_dist_of(cfg, cfg.sl_usd)
+        # ep 里的金额已经是缩放后的，价距不变，除回去就是这一档的价距
+        tp_dist = price_dist_of(cfg, ep["tp_min_usd"]) / scale
+        lot_rule = (
+            f"\n- 本场开仓 {float(cfg.lots):g} 手：浮盈亏金额随手数等比放大，"
+            f"上面的止损 / 止盈金额对应的价格距离仍分别是 "
+            f"{sl_dist:g} / {tp_dist:g}；判断结构看价格，不要拿金额换算。")
+    else:
+        lot_rule = ""
+    out = out.replace("{LOT_RULE}", lot_rule)
     # 贴上沿做多的分位门槛（= 1 - zone_edge）。写成 100-... 而不是硬编码 65：
     # 面板上一改 zone_edge，system 里那句话就必须跟着变，否则又是"说一套做一套"。
     out = out.replace("{ZONE_UP}",
@@ -3937,6 +4007,23 @@ def _acct_factor() -> float:
         factor = 1.0
     _ACCT_F.update(factor=factor, ts=now)
     return factor
+
+
+def price_dist_of(cfg: Cfg, value) -> float:
+    """把「0.01 手口径」的金额阈值换成**价格距离**（同一账户货币下的价差）。
+
+    浮盈 = 价距 × 合约 × 手数 × 账户系数；而金额阈值随手数等比放大，
+    两个手数一乘一除正好相消。所以价距**与手数无关**，用基准手数算一次就够：
+    227 笔反事实回放标定的 `sl_usd=3.00` 本质是 3.00 的价距，只是当时
+    0.01 手 XAUUSDm 恰好 1 盎司，金额和价距是同一个数。
+    """
+    try:
+        unit = float(_symbol_contract(cfg.symbol)) * BASE_LOTS * _acct_factor()
+        if unit <= 0:
+            return 0.0
+        return abs(float(value)) / unit
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _quote(symbol: str) -> tuple[float, float] | None:
@@ -4960,7 +5047,7 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
 
     # tp_min_usd=0：回退到旧的最短持仓保护
     # 豁免线同样是账户结算货币，与浮盈亏同单位，直接比。
-    guard = abs(cfg.min_hold_exempt_usd)
+    guard = abs(money_at_lots(cfg, cfg.min_hold_exempt_usd))
     if cfg.min_hold_sec > 0 and held_sec < cfg.min_hold_sec and float_pnl > -guard:
         return {"close": False, "source": "min_hold",
                 "reason": (f"最短持仓中：已 {held_sec}s / 需 {cfg.min_hold_sec}s，"
@@ -5122,6 +5209,16 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         )
     if cfg.lots <= 0:
         issues.append("手数必须大于 0")
+    else:
+        # 手数必须落在界面那几档里。券商那边是 round(lots, 2)：0.013 会被
+        # 静默改成 0.01（界面说 0.013、实际 0.01），0.001 直接报 10014。
+        # 白名单和 prefs / 模板同源，API 直接 POST 也绕不过去。
+        from live import prefs
+
+        if not prefs.valid_lots(cfg.lots):
+            issues.append(
+                f"开仓手数只接受 {'/'.join(f'{x:g}' for x in prefs.LOTS)} 手，"
+                f"收到 {cfg.lots}")
     # 同向冷却比反向还短 = 这台机器专门鼓励同向重进，与它存在的理由相反。
     # 相等是允许的（等于回到单一冷却，行为可控）。
     if cfg.cooldown_same_sec < cfg.cooldown_sec:
@@ -5307,7 +5404,7 @@ def _stale_hit(cfg: Cfg, pos: dict | None, float_pnl: float, now: int) -> bool:
     except (TypeError, ValueError):
         return False
 
-    min_peak = float(getattr(cfg, "stale_min_peak", 0.0) or 0.0)
+    min_peak = money_at_lots(cfg, getattr(cfg, "stale_min_peak", 0.0) or 0.0)
     if peak_ts <= 0 or peak <= 0 or peak < min_peak:
         return False
 
@@ -5446,7 +5543,7 @@ def _be_step(cfg: Cfg, pos: dict, float_pnl: float, now: int) -> dict | None:
         return None
     if not _be_applies(pos):
         return None
-    arm = float(getattr(cfg, "be_arm_usd", 0.0) or 0.0)
+    arm = money_at_lots(cfg, getattr(cfg, "be_arm_usd", 0.0) or 0.0)
     if arm <= 0:
         return None
     # 已经挂上（be_ok）或纸面已处理（be_mode=paper）就不再进
@@ -5569,8 +5666,11 @@ def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
     """
     if fp is None:
         fp = _realized_pnl(cfg, pos, bid, ask)
-    if cfg.sl_usd > 0 and fp <= -abs(cfg.sl_usd):
-        return f"浮亏 {fp:+.2f} 触及 -{abs(cfg.sl_usd):.2f}"
+    # 止损线同样走 exit_params：快查是 5 秒一次的真闸门，不能和 60 秒决策轮
+    # 用两套不同的数（一处缩放、一处不缩放 = 手数一大就提前止损）。
+    sl = float(exit_params(cfg, pos.get("plan"))["sl_usd"] or 0.0)
+    if sl > 0 and fp <= -abs(sl):
+        return f"浮亏 {fp:+.2f} 触及 -{abs(sl):.2f}"
     if _be_local_hit(cfg, pos, fp):
         return f"浮盈 {fp:+.2f} 回到 0（保本线，券商端未挂上，程序代平）"
     return ""
@@ -6073,7 +6173,7 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
     # 配置（interval_sec=3）里一个默认的 5 秒快查把节奏搅乱。
     guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
     near = min(float(getattr(cfg, "guard_near_sec", 0.0) or 0.0), guard)
-    band = float(getattr(cfg, "tp_wake_band", 0.0) or 0.0)
+    band = money_at_lots(cfg, getattr(cfg, "tp_wake_band", 0.0) or 0.0)
 
     # 无仓 / 平仓轮 / 刚停：不需要快查，睡满一整轮（也省掉每格的报价读取）
     pos = load_state(login).get("position") if guard > 0 else None
@@ -6753,6 +6853,10 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     }
     # 旧 state 里没有新加的字段，缺的时候要回退到当前默认值
     _defaults = Cfg()
+    # 面板上摆的必须是**实际生效值**：手数放大时金额阈值等比放大，直接把
+    # 存档里的原始值（3.00）摆出来，用户会拿它去对 0.03 手那场的账。
+    # 这里只借一个 Cfg 壳算缩放，不改存档、不写回 state。
+    _view_cfg = Cfg(lots=saved_cfg.get("lots", _defaults.lots))
 
     # 今日口径：按平仓行的本地日期算。**不能拿 state["pnl"] 冒充「今日」**——
     # 那个数是本进程累计，点一次「重置战绩」就归零，跨午夜也不会归零。
@@ -6846,8 +6950,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 新出场规则的阈值，面板上要能看见，否则用户不知道规则已经变了。
         # 旧 state 里的 cfg 没有这两个字段（那会儿还不存在），
         # 所以缺了就回退到 Cfg 的当前默认值，而不是显示 None。
-        "sl_usd": saved_cfg.get("sl_usd", _defaults.sl_usd),
-        "tp_min_usd": saved_cfg.get("tp_min_usd", _defaults.tp_min_usd),
+        "sl_usd": money_at_lots(_view_cfg, saved_cfg.get("sl_usd", _defaults.sl_usd)),
+        "tp_min_usd": money_at_lots(_view_cfg,
+                                    saved_cfg.get("tp_min_usd", _defaults.tp_min_usd)),
         # 金额单位（USD / USC）。上面这些阈值是**账户结算货币**的数字，
         # 面板必须把它贴在数字旁边：美分户的 3.00 是 3 分，不标出来
         # 会和美元户的 3.00 长得一模一样，差 100 倍也看不出来。
@@ -6859,7 +6964,8 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "max_hold_sec": saved_cfg.get("max_hold_sec", _defaults.max_hold_sec),
         # 趋势打法（2026-10-28 分 regime）。这三个字段旧 state 里没有，
         # 回退到当前默认值；面板持仓行按 position.plan 选用哪套显示。
-        "tp_min_trend": saved_cfg.get("tp_min_trend", _defaults.tp_min_trend),
+        "tp_min_trend": money_at_lots(_view_cfg,
+                                      saved_cfg.get("tp_min_trend", _defaults.tp_min_trend)),
         "max_hold_trend": saved_cfg.get("max_hold_trend", _defaults.max_hold_trend),
         "trend_follow": bool(saved_cfg.get("trend_follow", _defaults.trend_follow)),
         # 止损快查间隔。0 = 关（每 interval_sec 才看一次止损）。面板要显示，
@@ -6868,7 +6974,8 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 自适应近档 + tp 穿越唤醒。同理：面板不显示，用户就不知道
         # 「浮盈到 3.25 会被 2 秒内交模型」这件事开着还是关着。
         "guard_near_sec": saved_cfg.get("guard_near_sec", _defaults.guard_near_sec),
-        "tp_wake_band": saved_cfg.get("tp_wake_band", _defaults.tp_wake_band),
+        "tp_wake_band": money_at_lots(_view_cfg,
+                                      saved_cfg.get("tp_wake_band", _defaults.tp_wake_band)),
         "tp_wake": saved_cfg.get("tp_wake", _defaults.tp_wake),
         # 到过门槛后的复核节拍（2026-10-29）。必须上面板：这笔单到底是
         # 「到过门槛、每分钟问一次」还是「没到门槛、不问」，用户得能对上账，
@@ -6881,12 +6988,14 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "stale_sec": saved_cfg.get("stale_sec", _defaults.stale_sec),
         "stale_frac": saved_cfg.get("stale_frac", _defaults.stale_frac),
         "stale_reask_sec": saved_cfg.get("stale_reask_sec", _defaults.stale_reask_sec),
-        "stale_min_peak": saved_cfg.get("stale_min_peak", _defaults.stale_min_peak),
+        "stale_min_peak": money_at_lots(_view_cfg,
+                                        saved_cfg.get("stale_min_peak", _defaults.stale_min_peak)),
         # 保本止损（2026-10-29）。面板必须能看见"这条线开着还是关着、触发线
         # 是多少"——挂的是券商端的单，页面上不写出来，用户没法判断自己看到的
         # 持仓到底有没有保护。持仓行另外会读 position.be_ok / be_sl 显示实际状态。
         "be_at_entry": bool(saved_cfg.get("be_at_entry", _defaults.be_at_entry)),
-        "be_arm_usd": saved_cfg.get("be_arm_usd", _defaults.be_arm_usd),
+        "be_arm_usd": money_at_lots(_view_cfg,
+                                    saved_cfg.get("be_arm_usd", _defaults.be_arm_usd)),
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：
@@ -7069,7 +7178,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="AI 实时做单（默认真实下单；加 --paper 只记账）")
     parser.add_argument("--symbol", default="XAUUSDm")
-    parser.add_argument("--lots", type=float, default=0.01)
+    parser.add_argument("--lots", type=float, default=0.01,
+                        help="开仓手数（只接受 0.01/0.02/0.03/0.05；出场金额阈值会等比缩放）")
     parser.add_argument("--interval", type=int, default=Cfg.interval_sec,
                         help="决策间隔秒数（最小 3，模型单次约 2.6 秒）")
     parser.add_argument("--cooldown", type=int, default=Cfg.cooldown_sec,

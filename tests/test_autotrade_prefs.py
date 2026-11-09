@@ -68,12 +68,14 @@ class PrefsFileCase(unittest.TestCase):
         prefs.prefs_file().write_text(json.dumps({
             "symbol": "EURUSD",        # 不在白名单
             "interval_sec": 7,         # 不是下拉框里的档位
+            "lots": 0.013,             # 不是下拉框里的档位
             "mode": "assist",
             "assist_paper": True,
         }), encoding="utf-8")
         got = prefs.load_prefs(SYMBOLS)
         self.assertEqual(got["symbol"], prefs.DEFAULT_PREFS["symbol"])
         self.assertEqual(got["interval_sec"], prefs.DEFAULT_PREFS["interval_sec"])
+        self.assertEqual(got["lots"], prefs.DEFAULT_PREFS["lots"])
         self.assertEqual(got["mode"], "assist")
         self.assertTrue(got["assist_paper"])
 
@@ -82,7 +84,7 @@ class PrefsFileCase(unittest.TestCase):
     def test_save_roundtrip(self):
         res = prefs.save_prefs({
             "symbol": "XAUUSDc", "interval_sec": 30,
-            "mode": "assist", "assist_paper": True,
+            "mode": "assist", "assist_paper": True, "lots": 0.03,
         }, symbols=SYMBOLS)
         self.assertTrue(res["ok"], res)
         got = prefs.load_prefs(SYMBOLS)
@@ -90,6 +92,7 @@ class PrefsFileCase(unittest.TestCase):
         self.assertEqual(got["interval_sec"], 30)
         self.assertEqual(got["mode"], "assist")
         self.assertTrue(got["assist_paper"])
+        self.assertAlmostEqual(got["lots"], 0.03)
         self.assertIn("updated_at", got)
 
     def test_partial_update_keeps_other_fields(self):
@@ -114,6 +117,20 @@ class PrefsFileCase(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertTrue(res["errors"])
         self.assertEqual(prefs.load_prefs(SYMBOLS)["interval_sec"], 60)
+
+    def test_reject_lots_outside_options(self):
+        """手数不在下拉框档位里 → 拒绝，且不污染已有值。
+
+        0.013 尤其危险：券商 round(0.013, 2) 会静默变成 0.01，
+        界面说 0.013、账本按 0.01 走，还不报错。
+        """
+        prefs.save_prefs({"lots": 0.02}, symbols=SYMBOLS)
+        for bad in (0.013, 0.1, "一手", None):
+            with self.subTest(bad=bad):
+                res = prefs.save_prefs({"lots": bad}, symbols=SYMBOLS)
+                self.assertFalse(res["ok"])
+                self.assertTrue(res["errors"])
+                self.assertAlmostEqual(prefs.load_prefs(SYMBOLS)["lots"], 0.02)
 
     def test_reject_symbol_outside_whitelist(self):
         """没测过 point/contract 的品种不能记下来：启动时必然被 validate_cfg 拒。"""
@@ -161,16 +178,23 @@ class PrefsFileCase(unittest.TestCase):
             self.assertEqual(got["symbol"], "XAUUSDc")
             self.assertEqual(got["interval_sec"], 30)
 
+    def test_prefs_from_cfg_carries_lots(self):
+        """启动成功时按实际 cfg 回写——手数漏了，下次打开会偷偷变回 0.01。"""
+        got = prefs.prefs_from_cfg(autotrade.Cfg(lots=0.05))
+        self.assertAlmostEqual(got["lots"], 0.05)
+
     def test_summary_exposes_prefs(self):
         """/api/autotrade 的响应里必须带上 prefs，否则前端无从回填。"""
         prefs.save_prefs({"symbol": "XAUUSDc", "mode": "assist",
-                          "interval_sec": 30, "assist_paper": True},
+                          "interval_sec": 30, "assist_paper": True,
+                          "lots": 0.03},
                          symbols=SYMBOLS)
         d = autotrade.summary()
         self.assertIn("prefs", d)
         self.assertEqual(d["prefs"]["mode"], "assist")
         self.assertEqual(d["prefs"]["symbol"], "XAUUSDc")
         self.assertEqual(d["prefs"]["interval_sec"], 30)
+        self.assertAlmostEqual(d["prefs"]["lots"], 0.03)
 
     # ------------------------------------------------- 老用户的一次性迁移
 

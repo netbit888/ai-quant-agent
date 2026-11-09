@@ -107,7 +107,7 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions, atLots};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -217,7 +217,7 @@ try {
     // 停滞唤醒（2026-10-29）：默认开、180 秒。面板必须把它画出来，
     // 否则「面板显示 3.25、实际还多一条放行规则」又是两套口径。
     stale_wake: true, stale_sec: 180,
-    max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60 },
+    max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60, lots: 0.03 },
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
@@ -314,6 +314,26 @@ try {
   const costOk = btcCost != null && Math.abs(btcCost - 0.064) < 1e-9;
   console.log(`  BTC 点差成本按品种计算 ${costOk ? '✓' : '✗'}（${btcCost}）`);
   if (!costOk) failed = true;
+  // 手数（2026-11-09）：界面上说几手，就必须发几手。三件事都要对上——
+  // 运行中锁住、对齐到实际在跑的那一档、点差估算按这一档算。
+  // 少了任何一条，界面说 0.01 而实际发 0.03 手，止损金额也差 3 倍。
+  console.log(`  运行中锁定手数 ${made.atLots.disabled === true ? '✓' : '✗'}`);
+  if (made.atLots.disabled !== true) failed = true;
+  console.log(`  对齐到实际手数 ${made.atLots.value === '0.03' ? '✓' : '✗'}（${made.atLots.value}）`);
+  if (made.atLots.value !== '0.03') failed = true;
+  const bigCost = api.atSpreadCostUsd(0.03);
+  const costScales = bigCost != null && Math.abs(bigCost - 0.064 * 3) < 1e-9;
+  console.log(`  点差成本随手数放大 ${costScales ? '✓' : '✗'}（${bigCost}）`);
+  if (!costScales) failed = true;
+  const lotsHint = String(made.atModeHint.textContent || '');
+  console.log(`  提示条写明手数 ${lotsHint.includes('0.03 手') ? '✓' : '✗'}（${lotsHint}）`);
+  if (!lotsHint.includes('0.03 手')) failed = true;
+  // 兜底：控件被摘掉时不能按 0 手发单（0 手 = 券商直接拒），必须回落到 0.01
+  const keepLots = made.atLots.value;
+  made.atLots.value = '';
+  console.log(`  读不到控件时回落 0.01 ${api.atLots() === 0.01 ? '✓' : '✗'}（${api.atLots()}）`);
+  if (api.atLots() !== 0.01) failed = true;
+  made.atLots.value = keepLots;
   if (made.rowsAuto.innerHTML.includes('undefined') || made.rowsAuto.innerHTML.includes('NaN')) {
     console.log('  ✗ AI 做单表出现 undefined / NaN');
     failed = true;
@@ -422,6 +442,18 @@ try {
     && gGuard.includes('5') && gHold.includes('60');
   console.log(`  出场闸门胶囊 ${gateOk ? '✓' : '✗'} (止损 ${gSl} / 快查 ${gGuard} / 止盈 ${gTp} / 上限 ${gHold})`);
   if (!gateOk) failed = true;
+
+  // 金额必须带货币单位（2026-11-09）：手数可选后这格会变（0.01 手 −3.00、
+  // 0.05 手 −15.00），而美分户的 15.00 是 15 分。只写数字时「−15.00」
+  // 会被读成 15 美元——差 100 倍，而且看起来完全正常。
+  const unitOk = gSl.includes('USD') && gTp.includes('USD');
+  api.renderAutoTrade({ ...atSample, money_unit: 'USC' });
+  const centSl = String(made.atGateSlV.textContent || '');
+  const centTp = String(made.atGateTpV.textContent || '');
+  const centOk = centSl.includes('USC') && centTp.includes('USC');
+  api.renderAutoTrade(atSample);
+  console.log(`  金额带货币单位 ${unitOk && centOk ? '✓' : '✗'}（USD: ${gSl} / USC: ${centSl} / ${centTp}）`);
+  if (!(unitOk && centOk)) failed = true;
 
   // 停滞唤醒胶囊：180 秒 → 「每 3 分钟」。它不改阈值，但改变了「模型什么时候
   // 能看到这笔单」，属于必须可见的那一类规则。

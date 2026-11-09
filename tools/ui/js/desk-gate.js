@@ -86,11 +86,15 @@ function renderGateLeds(a, p) {
   }
 
   // ---- 设置舱那张参数表：显示实际生效值，0 一律写「关闭」----
+  // 金额一律带货币单位（2026-11-09）：手数可选之后这几格会变（0.01 手 −3.00、
+  // 0.05 手 −15.00），而美分户的 15.00 是 15 分不是 15 美元。只写数字时
+  // 「−15.00」会被读成美元，差 100 倍；单位必须和数字一起出现。
+  const mu = a.money_unit || 'USD';
   const put = (id, txt, on) => {
     const e = $(id);
     if (e) e.textContent = txt;
   };
-  put('atGateSlV', sl > 0 ? '−' + fmt(sl, 2) : '关闭');
+  put('atGateSlV', sl > 0 ? '−' + fmt(sl, 2) + ' ' + mu : '关闭');
   if ($('atGateSl')) $('atGateSl').className = 'at-gate sl' + (sl > 0 ? '' : ' off');
   put('atGateGuardV', guardOn ? '每 ' + fmt(guard, 0) + ' 秒' : '关闭');
   if ($('atGateGuard')) $('atGateGuard').className = 'at-gate guard' + (guardOn ? '' : ' off');
@@ -101,9 +105,9 @@ function renderGateLeds(a, p) {
     : ((p && Number(p.price_open || 0) > 0) ? Number(p.price_open) : 0);
   put('atGateBeV', !beCfg ? '关闭'
     : (beFit
-        ? '触发 ' + fmt(beArm, 2) + ' → SL ' + (beSlNow > 0 ? fmt(beSlNow, 3) : '开仓价')
+        ? '触发 ' + fmt(beArm, 2) + ' ' + mu + ' → SL ' + (beSlNow > 0 ? fmt(beSlNow, 3) : '开仓价')
         // 规则开着、当前这笔是震荡单：写清楚是「不适用」，不是「关闭」。
-        : '触发 ' + fmt(beArm, 2) + ' · 仅趋势单'));
+        : '触发 ' + fmt(beArm, 2) + ' ' + mu + ' · 仅趋势单'));
   if ($('atGateBe')) {
     $('atGateBe').className = 'at-gate be' + (beCfg ? '' : ' off');
     $('atGateBe').title = '趋势单浮盈摸到 ' + fmt(beArm, 2) + ' 就把券商端硬止损抬到'
@@ -111,7 +115,7 @@ function renderGateLeds(a, p) {
       + '挂在券商那边，进程崩了、面板关了都还有效，成交就在开仓价上——'
       + '轮询式止损实测超调 13%。挂不上时由 5 秒快查在浮盈回到 0 时代平';
   }
-  put('atGateTpV', tp > 0 ? fmt(tp, 2) : '关闭');
+  put('atGateTpV', tp > 0 ? fmt(tp, 2) + ' ' + mu : '关闭');
   if ($('atGateTp')) $('atGateTp').className = 'at-gate tp' + (tp > 0 ? '' : ' off');
   const staleSec = Number(a.stale_sec || 0);
   put('atGateStaleV', staleOn ? '每 ' + fmt(Math.round(staleSec / 60), 0) + ' 分钟' : '关闭');
@@ -121,7 +125,7 @@ function renderGateLeds(a, p) {
   // 趋势单那套参数单独列出来：不写的话「震荡单 3.25 / 趋势单 7.0」这件事
   // 只能靠记忆，而持仓面板显示的永远是当前这一笔的那一档。
   put('atGateTpTrend', Number(a.tp_min_trend || 0) > 0
-      ? '趋势单 ' + fmt(a.tp_min_trend, 2) : '趋势单已关闭');
+      ? '趋势单 ' + fmt(a.tp_min_trend, 2) + ' ' + mu : '趋势单已关闭');
   put('atGateHoldTrend', Number(a.max_hold_trend || 0) > 0
       ? '趋势单 ' + fmt(Math.round(Number(a.max_hold_trend) / 60), 0) + ' 分钟'
       : '趋势单已关闭');

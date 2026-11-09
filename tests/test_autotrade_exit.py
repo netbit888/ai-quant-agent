@@ -130,11 +130,16 @@ class TestExitCounterfact(unittest.TestCase):
     def test_empty_bars_safe(self):
         self.assertEqual(autotrade.exit_counterfact([], 1, 3997.0), "")
 
-    def test_sl_price_converts_usd_by_lots(self):
-        """sl_usd 是美元，必须按手数换成价格距离。
+    def test_sl_price_is_lot_invariant(self):
+        """止损的**价格距离**与手数无关：金额阈值随手数等比放大。
 
-        0.01 手黄金 1 美元价格 = 1 USD，止损 3.0 美元 → 价格距离 3.0；
-        0.05 手时同样 3.0 美元只对应 0.6 的价格距离。写死 1:1 会差 5 倍。
+        0.01 手黄金 1 美元价差 = 1 USD，止损 3.00 → 价距 3.00。
+        0.05 手时若金额仍是 3.00，价距会缩到 0.60——而单笔点差就 0.24，
+        等于开仓即被打掉，227 笔回放标定的证据也静默失效。所以 0.05 手
+        的止损金额是 15.00，价距仍是 3.00。
+
+        2026-11-09 手数可选后改的口径（原来这里断言 0.60）：回放标定的
+        本质是价距，`sl_usd` 只是当时 0.01 手 = 1 盎司下的 1:1 写法。
         """
         cfg = autotrade.Cfg(symbol="XAUUSDm", sl_usd=3.0)
         small = autotrade._sl_price_for(cfg, {"direction": 1, "lots": 0.01,
@@ -142,10 +147,14 @@ class TestExitCounterfact(unittest.TestCase):
         big = autotrade._sl_price_for(cfg, {"direction": 1, "lots": 0.05,
                                             "price_open": 4000.0})
         self.assertAlmostEqual(4000.0 - small, 3.0, places=3)
-        self.assertAlmostEqual(4000.0 - big, 0.6, places=3)
+        self.assertAlmostEqual(4000.0 - big, 3.0, places=3)
         short = autotrade._sl_price_for(cfg, {"direction": -1, "lots": 0.01,
                                               "price_open": 4000.0})
         self.assertAlmostEqual(short - 4000.0, 3.0, places=3)
+        # 金额侧确实放大了 5 倍，而且只有一个出口
+        scaled = autotrade.exit_params(
+            autotrade.Cfg(symbol="XAUUSDm", sl_usd=3.0, lots=0.05), "range")
+        self.assertAlmostEqual(scaled["sl_usd"], 15.0, places=6)
 
 
 class TestExitThemeSplit(TempLedger):
