@@ -318,6 +318,63 @@ def _version_compare(magic: int, account: str) -> list[dict]:
     return out
 
 
+def _veto_split(account: str) -> dict:
+    """「程序建议否决但仍做了」和「程序没反对」两种单，结果分开算。
+
+    `would_veto` 是 2026-10-28 那个定位的产物：模型决策、程序只给建议不拦截，
+    于是「该不该听建议」只能靠这一格事后分桶。字段从那天起就一直写进开仓行，
+    但**没有任何消费方**——三处注释都写着「事后能算期望」，实际谁都没算。
+    这个函数把消费方补上。
+
+    数据源是程序自己的流水（open/close 按 ticket 配对），不是 deals.jsonl：
+    后者只有成交事实、没有 `would_veto`。**单位也不同**——这里 `pnl` 是流水里
+    的账户货币计数，deals 那边是 USD，两者不能混进同一个均值。
+
+    样本不足时照样输出（`n` 会是 0 或 1），让调用方自己决定怎么措辞：把
+    「只有 2 笔」藏起来比报出来更危险。
+    """
+    p = paths.ACCOUNTS_DIR / str(account) / "autotrade_log.jsonl"
+    if not p.is_file():
+        return {}
+    opens: dict[int, str] = {}
+    closes: dict[int, float] = {}
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(r, dict):
+                continue
+            kind = r.get("kind")
+            if kind not in ("open", "close"):
+                continue
+            try:
+                ticket = int(r.get("ticket") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ticket <= 0:
+                continue  # 开仓失败的留痕没有 ticket，配不上任何平仓
+            if kind == "open":
+                opens[ticket] = str(r.get("would_veto") or "")
+            else:
+                try:
+                    closes[ticket] = float(r.get("pnl") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+    except OSError:
+        return {}
+    vetoed = [closes[t] for t, v in opens.items() if v and t in closes]
+    agreed = [closes[t] for t, v in opens.items() if not v and t in closes]
+    if not vetoed and not agreed:
+        return {}
+    return {"vetoed": _stats(vetoed).as_dict(),
+            "agreed": _stats(agreed).as_dict(),
+            "unit": "账户货币计数"}
+
+
 def _stage_of(s: Series) -> str:
     if s.n < SAMPLE_MIN:
         return SAMPLE_DEFICIT
@@ -344,6 +401,7 @@ class Advice:
     blockers: list[dict] = field(default_factory=list)
     lessons: list[dict] = field(default_factory=list)
     others: list[dict] = field(default_factory=list)
+    veto: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -351,6 +409,7 @@ class Advice:
             "stage_text": _STAGE_TEXT[self.stage],
             "series": self.series, "headline": self.headline, "action": self.action,
             "blockers": self.blockers, "lessons": self.lessons, "others": self.others,
+            "veto": self.veto,
         }
 
 
@@ -377,6 +436,7 @@ def build(login: str | None = None, magic: int | None = None) -> Advice:
         headline=headline, action=action,
         blockers=_blockers(account), lessons=_lesson_signal(account),
         others=_version_compare(magic, account),
+        veto=_veto_split(account),
     )
 
 
@@ -400,6 +460,19 @@ def render(a: Advice) -> str:
         for t in a.lessons:
             lines.append(f"  · {t['theme']}（{t['scope']}）{t['count']} 次，"
                          f"{t['sessions']} 个场次，趋势 {t.get('trend') or '—'}")
+    if a.veto:
+        v = a.veto.get("vetoed") or {}
+        g = a.veto.get("agreed") or {}
+        lines.append("")
+        lines.append(f"程序建议否决 vs 没反对（流水配对，单位={a.veto.get('unit') or '—'}）：")
+        for label, s in (("建议否决但仍做", v), ("程序没反对", g)):
+            if s.get("n"):
+                lines.append(f"  · {label}：{s['n']} 笔，净 {s['net']:+.2f}，"
+                             f"期望 {s['mean']:+.3f}")
+            else:
+                lines.append(f"  · {label}：0 笔")
+        if min(int(v.get("n") or 0), int(g.get("n") or 0)) < 5:
+            lines.append("  （任一组不足 5 笔，差异不构成证据——只记录，别据此开拦截）")
     if a.others:
         lines.append("")
         lines.append("对照账户（不同版本，**不合并**）：")
@@ -430,6 +503,19 @@ def _write_report(a: Advice) -> Path:
         for t in a.lessons:
             body.append(f"- {t['theme']}（{t['scope']}）：{t['count']} 次 / "
                         f"{t['sessions']} 场次，趋势 {t.get('trend') or '—'}")
+        body.append("")
+    if a.veto:
+        v = a.veto.get("vetoed") or {}
+        g = a.veto.get("agreed") or {}
+        body.append("## 程序建议否决 vs 没反对")
+        body.append(f"流水配对（open/close 按 ticket），单位：{a.veto.get('unit') or '—'}")
+        body.append("")
+        for label, s in (("建议否决但仍做", v), ("程序没反对", g)):
+            body.append(f"- {label}：{s.get('n') or 0} 笔，净 {s.get('net') or 0:+.2f}，"
+                        f"期望 {s.get('mean') or 0:+.3f}")
+        if min(int(v.get("n") or 0), int(g.get("n") or 0)) < 5:
+            body.append("")
+            body.append("任一组不足 5 笔，差异不构成证据——只记录，别据此开拦截。")
         body.append("")
     if a.others:
         body.append("## 对照账户（不同版本，不合并）")

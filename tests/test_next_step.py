@@ -177,5 +177,72 @@ class TestBuild(unittest.TestCase):
         self.assertIn("样本外", a.action)
 
 
+class TestVetoSplit(unittest.TestCase):
+    """`would_veto` 从 2026-10-28 起就在开仓行里写，但一直没人读。
+
+    这三条钉的是「读它的时候口径别错」：按 ticket 配对、开仓失败（ticket=0）
+    和未平仓的不能进桶、没有日志时返回空而不是抛异常。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self._p = mock.patch.object(N.paths, "ACCOUNTS_DIR", self.base)
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+        self._tmp.cleanup()
+
+    def _log(self, rows: list[dict]) -> None:
+        acct = self.base / "111"
+        acct.mkdir(parents=True, exist_ok=True)
+        (acct / "autotrade_log.jsonl").write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+            encoding="utf-8")
+
+    def test_buckets_split_by_would_veto(self):
+        self._log([
+            {"kind": "open", "ticket": 1, "would_veto": "top_long_ban"},
+            {"kind": "close", "ticket": 1, "pnl": 5.0},
+            {"kind": "open", "ticket": 2, "would_veto": "mtf_conflict_trend"},
+            {"kind": "close", "ticket": 2, "pnl": -1.0},
+            {"kind": "open", "ticket": 3},          # 没留痕 = 程序没反对
+            {"kind": "close", "ticket": 3, "pnl": 2.0},
+        ])
+        v = N._veto_split("111")
+        self.assertEqual(v["vetoed"]["n"], 2)
+        self.assertAlmostEqual(v["vetoed"]["mean"], 2.0)
+        self.assertAlmostEqual(v["vetoed"]["net"], 4.0)
+        self.assertEqual(v["agreed"]["n"], 1)
+        self.assertAlmostEqual(v["agreed"]["mean"], 2.0)
+
+    def test_unclosed_and_ticketless_are_skipped(self):
+        """还在持仓的、以及开仓失败（没有 ticket）的，配不上平仓，不能进桶。"""
+        self._log([
+            {"kind": "open", "ticket": 4, "would_veto": "top_long_ban"},   # 未平
+            {"kind": "open", "ticket": 0, "would_veto": "act_guard"},       # 没成交
+            {"kind": "open", "ticket": 5, "would_veto": "act_guard"},
+            {"kind": "close", "ticket": 5, "pnl": -3.0},
+        ])
+        v = N._veto_split("111")
+        self.assertEqual(v["vetoed"]["n"], 1)
+        self.assertEqual(v["agreed"]["n"], 0)
+
+    def test_missing_log_is_empty_not_crash(self):
+        self.assertEqual(N._veto_split("999"), {})
+
+    def test_render_refuses_to_call_small_sample_evidence(self):
+        a = N.Advice(account="111", magic=7, stage=N.SAMPLE_DEFICIT, series={},
+                     headline="x", action="y",
+                     veto={"vetoed": {"n": 2, "net": 4.0, "mean": 2.0},
+                           "agreed": {"n": 1, "net": 2.0, "mean": 2.0},
+                           "unit": "账户货币计数"})
+        out = N.render(a)
+        self.assertIn("建议否决但仍做", out)
+        self.assertIn("不足 5 笔", out)
+        self.assertIn("别据此开拦截", out)
+
+
 if __name__ == "__main__":
     unittest.main()
