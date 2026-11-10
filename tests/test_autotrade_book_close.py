@@ -102,6 +102,20 @@ class TestBookCloseShape(unittest.TestCase):
                                     source="llm", reason="x")
         self.assertEqual(row["held_sec"], 120)
 
+    def test_exit_source_is_stamped_on_position(self):
+        """平仓来源必须落回 pos：`queue_review` 靠它决定教训归出场端还是两端。
+
+        2026-11-10 那笔就漏在这里：券商端保本止损触发，source 算成了 "be"，
+        但没人写回 pos，复盘拿到的 exit_source 是空 → scope 停在 exit、
+        src 为空 → 「这个位置当初就不该开」永远进不了入场提示词。
+        """
+        for src in SOURCES:
+            with self.subTest(source=src):
+                pos = _pos()
+                autotrade._book_close(autotrade._empty_state(), pos, 0.0, NOW,
+                                      source=src, reason="x")
+                self.assertEqual(pos["exit_source"], src)
+
     def test_dry_run_follows_position_unless_overridden(self):
         state = autotrade._empty_state()
         row = autotrade._book_close(state, _pos(dry_run=True), 1.0, NOW,
@@ -174,6 +188,22 @@ class TestPathsUseIt(TempLedger):
         self.assertEqual(row["kind"], "close")
         self.assertEqual(row["source"], "sl")
         self.assertEqual(autotrade.load_state()["sl_closes"], 1)
+
+    def test_be_close_queues_review_with_source(self):
+        """保本止损在终端被打掉 → 复盘队列里要带着 exit_source="be"。"""
+        state = autotrade._empty_state()
+        state["position"] = _pos(ticket=98, be_ok=True, be_sl=4000.0,
+                                 opened_at=NOW - 60)
+        autotrade.save_state(state)
+
+        row = autotrade.tick(autotrade.Cfg(review=True), now=NOW,
+                             quote=(4005.0, 4005.24), rows=bars_up(),
+                             positions=[])
+        self.assertEqual(row["kind"], "close")
+        self.assertEqual(row["source"], "be")
+        pend = autotrade.load_state()["pending_reviews"]
+        self.assertEqual(len(pend), 1)
+        self.assertEqual(pend[0]["exit_source"], "be")
 
 
 if __name__ == "__main__":

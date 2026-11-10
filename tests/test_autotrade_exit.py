@@ -674,6 +674,51 @@ class TestAskReview(unittest.TestCase):
         self.assertEqual(res["theme"], "追破位/假突破")
         self.assertEqual(res["scope"], "entry")
 
+    def test_exit_lesson_regime_follows_plan(self):
+        """出场类教训的 regime 跟 plan 走，不跟平仓那一刻的行情走。
+
+        2026-11-10 22:38 那笔趋势空单：开仓 pos=0.03 追空、回抽 3.8 ATR，
+        保本止损把 +50 打成 0；平仓前 15 根在 4033~4046 来回，regime_of 判
+        range，于是「be 别贴开仓价」被归进震荡域——而震荡单本来就是 3.25
+        的窄门槛、贴着走才对，这条教训喂给它是负作用。
+        """
+        flat = [bar(4000 + (0.1 if i % 2 else -0.1), 4000.8, 3999.2,
+                    4000.0 + (0.1 if i % 2 else -0.1), NOW + i * 60)
+                for i in range(60)]
+        reply = ('{"scope": "exit", "theme": "止盈太早", '
+                 '"lesson": "抬 SL 别贴开仓价，留足 ATR"}')
+
+        def run(pos):
+            with mock.patch.object(autotrade, "_bars", return_value=flat), \
+                 mock.patch("agent.llm.chat_ex", return_value=(reply, {})):
+                return autotrade.ask_review(autotrade.Cfg(review=True), pos,
+                                            4005.0, 5.0, NOW, NOW + 20 * 60)
+
+        trend_pos = dict(self._pos(), plan="trend")
+        res = run(trend_pos)
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["scope"], "exit")
+        # 前提：这批 K 线本身判 range（否则这条测试证明不了任何事）
+        self.assertEqual(res["regime"], "trend")
+        # 对照组：没有 plan（旧 state）才退回按行情算
+        self.assertNotEqual(run(self._pos())["regime"], "trend")
+
+    def test_entry_lesson_regime_ignores_plan(self):
+        """入场类教训仍按开仓时的行情归域：那时还没有 plan 可言。"""
+        flat = [bar(4000 + (0.1 if i % 2 else -0.1), 4000.8, 3999.2,
+                    4000.0 + (0.1 if i % 2 else -0.1), NOW + i * 60)
+                for i in range(60)]
+        pos = dict(self._pos(), plan="trend")
+        with mock.patch.object(autotrade, "_bars", return_value=flat), \
+             mock.patch("agent.llm.chat_ex",
+                        return_value=('{"scope": "entry", "theme": "进场时点不对", '
+                                      '"lesson": "在区间底部追空"}', {})):
+            res = autotrade.ask_review(autotrade.Cfg(review=True), pos,
+                                       4005.0, 5.0, NOW, NOW + 20 * 60)
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["scope"], "entry")
+        self.assertEqual(res["regime"], "range")
+
 
 class TestAskReviewCounterfact(TempLedger):
     """模型说"平太早"，但平后行情先回到止损线 → 改判「离场正确」。

@@ -719,11 +719,17 @@ def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
     本函数**不管**的（各路径语义不同，留在调用点）：
       - 成交价与 pnl 怎么算（要 bid/ask，读不到报价时清仓路径按 0 记）
       - `be_sl`、`via`、`signal_id`/`exec_by`/`slip`、`error` 这些路径专属字段
-      - 复盘排队（`queue_review`），以及 `pos["exit_reason"]/exit_source`
+      - 复盘排队（`queue_review`），以及 `pos["exit_reason"]`
 
     `source` 决定计数分桶：硬止损 = 入场方向错了；保本止损 = 方向对过但没吃到。
     混在一起就再也分不开「入场不行」和「出场没拿够」。
     """
+    # 平仓发起方落到 pos 上，`queue_review` 靠它决定这条教训归出场端还是两端
+    # （见 `_FORCED_EXIT_SOURCES`）。2026-11-10 那笔券商端保本止损：仓位在终端
+    # 消失那条路算出了 source="be" 却没写回 pos，复盘拿到的 exit_source 是空，
+    # scope 停在 exit、src 为空——「这个位置当初就不该开」永远进不了入场提示词。
+    # 放在这里而不是各调用点：路一共有三条，漏一条就静默归错域。
+    pos["exit_source"] = source or ""
     held = (int(held_sec) if held_sec is not None
             else int(now) - int(pos.get("opened_at") or now))
     state["closed"] = int(state.get("closed") or 0) + 1
@@ -3002,10 +3008,25 @@ def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
     elif forced in _FORCED_EXIT_SOURCES:
         src = forced
 
+    # 出场类教训的 regime 跟 plan 走，不用 regime_of(pre_close)。
+    # regime_of 回答的是「平仓那一刻面对什么行情」，而这条教训真正绑定的是
+    # 「这笔按哪套出场参数管」（trend: tp 7.0 / 3h；range: tp 3.25 / 1h）——
+    # 两套参数下同一个动作的结论可以相反，混进同一域会互相抵消。
+    # 实例（2026-11-10 22:38 那笔趋势空单）：开仓时 pos=0.03 追空、回抽走到
+    # 3.8 ATR，保本止损把 +50 打成 0；平仓前 15 根在 4033~4046 来回，
+    # regime_of 判 range，"be 别贴开仓价"于是进了震荡域——而下一次震荡单
+    # 读到它只会更糟（震荡单本来就用 3.25 的窄门槛，贴着走是对的）。
+    # 入场类（scope=entry）不改：开仓那一刻还没有 plan，行情本身就是 regime。
+    plan = str(position.get("plan") or "")
+    if scope in ("exit", "both") and plan in ("trend", "range", "mid"):
+        reg = plan
+    else:
+        reg = regime_of(pre_close)
+
     return {"ok": True, "lesson": parsed["lesson"], "theme": theme,
             "scope": scope, "bars": len(window),
             "verdict": verdict, "counterfact": cf, "lesson_extra": lesson_extra,
-            "regime": regime_of(pre_close), "src": src}
+            "regime": reg, "src": src}
 
 
 def _norm_lesson(text: str) -> str:
