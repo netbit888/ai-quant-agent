@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -71,6 +72,31 @@ class Cfg:
     # 决策节奏。用户 10-26 明确要求默认 60 秒：3 秒那个档位一轮决策约 2.6 秒，
     # 等于不间断连打模型，一天上万次调用，而且平仓后冷却根本插不进去。
     interval_sec: int = 60
+    # 决策唤醒对齐 K 线收盘（2026-11-10）。唤醒点 = 下一个 interval 网格 + 这一秒数。
+    # **0 = 关闭，回到 `started + interval_sec` 的自由跑表。**
+    #
+    # 起因：唤醒点算的是 `started + interval_sec`，而 started 是上一轮**实际**
+    # 返回的时刻。三样东西会把这个基准搬到任意一秒，且搬完之后没有任何东西把它
+    # 拉回来：尾段那记「不足 1 秒也保底睡 1 秒」、快查的提前唤醒（止损/保本/tp/
+    # 停滞，跳到事件发生的那一秒）、辅助模式下从 tick 结束才开始计时。
+    # 实测按会话切开：段内相位标准差中位 15.5~15.9 秒，93%/100% 的会话段都在
+    # 漂——不是"每次重启随机一次"，是**每一轮都在走**。
+    #
+    # 为什么这是 bug 不是风格：visible_bars 的最后一根就是**正在长的那根**，而
+    # clv / upper_wick / body / streak / pos / er 全拿它算。开盘 5 秒看到「上影
+    # 62%」，收盘可能变成实体 80%；而「插针顶不做」是提示词里的硬规则（代码不拦），
+    # 于是这条否决变成了掷骰子，且流水里查不出来——feat 里没有「当时那根还没长完」
+    # 的痕迹。对齐之后，「60 秒一轮」精确等于「新增 1 根已收 K 线」。
+    #
+    # 为什么不给面板：这不是策略参数，是时钟管道。3 秒 = 等券商把这一根落定，
+    # 没有可调余地（调大只是把决策推离收盘更远，调小等于在边界上抢跑）。
+    # 唯一的口径变化：冷却短于一个周期时（如 cooldown=30），原来 +1 秒就醒，
+    # 现在被推到下一根收盘——那次「提前看一眼」读的是半根 bar，本来也没有价值。
+    #
+    # 代价（明码标价）：决策永远落在每分钟同一秒。若券商在整分钟边界扩点差，
+    # 会系统性撞在最差时刻；settle 就是为了避开边界那一瞬。要验证就量 60 秒
+    # 周期内点差的相位分布，别靠感觉。
+    align_settle_sec: float = 3.0
     # 平仓冷却按方向分两档（2026-10-29 改）。原来是单一 30 秒，正好落在
     # 「冷却+1 秒」的唤醒点上，等于每笔平仓后把模型推回同一个方向问一次。
     # 10-22 起 331 笔里「同向 ≤60 秒重进」102 笔、均值 -0.50 USD/笔
@@ -433,6 +459,8 @@ CODE_ONLY: tuple[str, ...] = (
     "min_hold_sec", "min_hold_exempt_usd", "min_edge",
     "sl_usd", "tp_min_usd", "max_hold_sec",
     "guard_sec", "guard_near_sec", "tp_wake_band", "tp_wake", "tp_reask_sec",
+    # 时钟管道，不是策略参数（见 Cfg.align_settle_sec）
+    "align_settle_sec",
     "stale_wake", "stale_sec", "stale_frac", "stale_reask_sec", "stale_min_peak",
     "zone_edge", "trend_follow", "tp_min_trend", "max_hold_trend",
     "trend_span_atr_max",
@@ -5372,6 +5400,11 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         issues.append(
             "决策间隔不能小于 3 秒（模型单次调用约 2.6 秒，再快只会堆积请求）"
         )
+    # 对齐偏移不能是负数：负偏移等于"在 K 线收盘之前判"，正是这个开关要消掉的
+    # 东西。上界不设——settle 接近一个周期时 _wait_deadline 会夹到半个周期，
+    # 夹住的结果仍是"每根 K 线判一次"，只是相位不同，不至于失效。
+    if float(getattr(cfg, "align_settle_sec", 0.0) or 0.0) < 0:
+        issues.append(f"收盘对齐偏移不能为负（{cfg.align_settle_sec:g} 秒）")
     if cfg.lots <= 0:
         issues.append("手数必须大于 0")
     else:
@@ -5485,6 +5518,31 @@ def validate_cfg(cfg: Cfg) -> list[str]:
         if cfg.assist_deny_cooldown < 0:
             issues.append("否决冷却不能是负数")
     return issues
+
+
+def _wait_deadline(started: float, wait: float, cfg: Cfg) -> float:
+    """这一轮跑完，等到**哪个时刻**再决策（不是"等多久"）。
+
+    只在 `align_settle_sec > 0` 时对齐：返回「≥ started+wait 的最近 K 线网格点」，
+    网格点 = `k × interval_sec + align_settle_sec`。
+
+    为什么换成"时刻"表述（2026-11-10）：间隔是相对量，基准一旦被搬走（尾段保底
+    那 1 秒、快查提前唤醒、辅助模式从 tick 结束才计时），相对量就永远搬不回来。
+    实测段内相位标准差中位 15.5~15.9 秒。换成绝对时刻之后，慢一轮只是**吃掉**
+    这一轮的空闲，不会把下一次的采样点往后推——漂移无处累积。
+
+    为什么不向下取整：唤醒点必须 ≥ started+wait，那是冷却/周期写下的下界，
+    早醒等于绕过它。代价是首轮最多多等一个周期（相位不对时），此后稳定在网格上。
+    """
+    iv = float(cfg.interval_sec or 0)
+    settle = float(getattr(cfg, "align_settle_sec", 0.0) or 0.0)
+    if iv <= 0 or settle <= 0:
+        return started + wait
+    # 周期配得比 2×settle 还小（interval_sec=3 那种）时按半个周期算：
+    # settle 接近甚至超过一个周期，网格就没有意义了，但也不该让配置直接失效。
+    settle = min(settle, iv / 2.0)
+    k = math.ceil((started + wait - settle) / iv - 1e-9)
+    return k * iv + settle
 
 
 def next_wait_sec(row: dict, cfg: Cfg) -> float:
@@ -6332,13 +6390,13 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
     就等于给同一件事留两个实现，迟早对不上账。这里只负责**把最坏 60 秒的
     无人看守缩到一格**，剩下的原样交给下一轮。
     """
-    deadline = started + next_wait_sec(row, cfg)
+    deadline = _wait_deadline(started, next_wait_sec(row, cfg), cfg)
     # 辅助模式下 tick 可能被人等拖长（入场 90 秒 / 出场 120 秒），deadline
     # 在 tick 结束时早就过期了，下面会退化成"睡 1 秒再问一次模型"——刚问完人
     # 立刻又问，既费 token 又会在冷却生效前反复落 skip 行。这种情况下从
     # **现在**重新计时。非辅助模式不受影响（tick 本身就 < 1 秒）。
     if getattr(cfg, "assist", False) and time.time() - started > 1.0:
-        deadline = time.time() + next_wait_sec(row, cfg)
+        deadline = _wait_deadline(time.time(), next_wait_sec(row, cfg), cfg)
     # 夹一道：配得比决策间隔大就等于没开，不如直接退回旧行为，别让短周期
     # 配置（interval_sec=3）里一个默认的 5 秒快查把节奏搅乱。
     guard = min(float(getattr(cfg, "guard_sec", 0.0) or 0.0), float(cfg.interval_sec))
@@ -6414,7 +6472,9 @@ def run(cfg: Cfg, login=None) -> None:
     mode = "纸面（不发单）" if cfg.dry_run else "真实下单"
     if cfg.assist:
         mode = f"AI 辅助（{mode}）"
-    print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策 | "
+    align = (f"（对齐 K 线收盘，+{cfg.align_settle_sec:g} 秒）"
+             if cfg.align_settle_sec > 0 else "（自由跑表，不对齐收盘）")
+    print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策{align} | "
           f"平仓后冷却 {cfg.cooldown_sec} 秒（同向 {cfg.cooldown_same_sec} 秒）| 不挂 SL/TP | {mode}")
     if cfg.assist:
         print("⚠ 辅助模式在命令行里没有面板可点：所有信号都会超时 → "

@@ -26,6 +26,12 @@ class TestGuardFastCheck(TempLedger):
     快查只做一件事：提前结束等待，让下一轮 tick() 走老路去平仓。
     """
 
+    # 本类测的是**快查循环自己的节奏**（几秒一格、要不要提前返回），跟收盘对齐
+    # 无关。对齐会把唤醒点推到"相位 40 秒之后的下一格"= 83 秒，于是每一条时序
+    # 断言都变成"对齐在不在"的复合命题。所以这里统一关掉；对齐单独测
+    # （tests/test_bar_align.py）。
+    ALIGN_OFF = {"align_settle_sec": 0}
+
     class _Clock:
         """假时钟。sleep 推进时间，这样测「等了多久」不用真等。"""
 
@@ -91,7 +97,8 @@ class TestGuardFastCheck(TempLedger):
 
     def test_no_stop_still_waits_the_full_round(self):
         self._position()
-        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0)
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
+                            **self.ALIGN_OFF)
         clock = self._Clock()
         with mock.patch.object(autotrade.time, "time", clock.time):
             autotrade._wait_next(
@@ -116,7 +123,8 @@ class TestGuardFastCheck(TempLedger):
         """平仓轮在冷却结束点唤醒，那时候手上已经没有仓了——
         不需要读报价做止损快查，纯等。"""
         self._position()
-        cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=30, guard_sec=5)
+        cfg = autotrade.Cfg(interval_sec=60, cooldown_sec=30, guard_sec=5,
+                            **self.ALIGN_OFF)
         clock = self._Clock()
         calls: list[str] = []
         with mock.patch.object(autotrade.time, "time", clock.time):
@@ -128,7 +136,7 @@ class TestGuardFastCheck(TempLedger):
 
     def test_guard_zero_falls_back_to_plain_sleep(self):
         self._position()
-        cfg = autotrade.Cfg(interval_sec=60, guard_sec=0)
+        cfg = autotrade.Cfg(interval_sec=60, guard_sec=0, **self.ALIGN_OFF)
         clock = self._Clock()
         calls: list[str] = []
         with mock.patch.object(autotrade.time, "time", clock.time):
@@ -205,7 +213,7 @@ class TestGuardFastCheck(TempLedger):
         """tp_wake=False = 快查只记录峰值和止损，出场节奏完全回到老行为。"""
         self._position()
         cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
-                            tp_min_usd=3.25, tp_wake=False)
+                            tp_min_usd=3.25, tp_wake=False, **self.ALIGN_OFF)
         clock = self._Clock()
         with mock.patch.object(autotrade.time, "time", clock.time):
             autotrade._wait_next(
@@ -252,7 +260,7 @@ class TestGuardFastCheck(TempLedger):
         """tp_wake_band=0 关闭近档：整轮都按远档 5 秒粗看。"""
         self._position()
         cfg = autotrade.Cfg(interval_sec=60, guard_sec=5, sl_usd=3.0,
-                            tp_min_usd=3.25, tp_wake_band=0)
+                            tp_min_usd=3.25, tp_wake_band=0, **self.ALIGN_OFF)
         clock = self._Clock()
         with mock.patch.object(autotrade.time, "time", clock.time):
             autotrade._wait_next(
