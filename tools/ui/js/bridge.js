@@ -67,6 +67,87 @@ function tipEl() {
   return chartTipEl;
 }
 
+/* ==================== 坐标轴（area / bars 共用） ====================
+ * 老口径是「Y 轴从 0 起算到最大值」。余额这种绝对水平（1490~1520）于是被压成
+ * 一条贴顶的直线，整幅图 99% 的面积是空的——波动读不出来，图就白画了。
+ *
+ * 现在按窗口内实际高低点定窗口，只有零线**确实贴着数据**时才保留 0：
+ *   - 跨零的曲线（累计盈亏、滚动期望）→ 0 是读数基准，必须留；
+ *   - 从 0 起算的累计曲线 → 0 本来就在数据里；
+ *   - 远离 0 的绝对水平（余额、权益）→ 丢掉 0，让波动铺满整幅。
+ * 三档都由数据自己决定，不在调用点手工指定；实在要覆盖就传 opt.zero。
+ */
+function axisDomain(values, opt) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) {
+    if (typeof v !== 'number' || !isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  // 全平（只有一笔、或数值完全不动）：给一个人工跨度，否则除零
+  if (hi - lo < 1e-12) {
+    const d = Math.abs(hi) > 1e-9 ? Math.abs(hi) * 0.02 : 1;
+    lo -= d; hi += d;
+  }
+  const rawSpan = hi - lo;
+  // 0 与数据最近一端的距离 ≤ 跨度 1/4 → 零线还看得见，保留它（有基准更好读）
+  const zero = (opt && opt.zero != null) ? !!opt.zero
+    : (lo <= 0 && hi >= 0) || Math.min(Math.abs(lo), Math.abs(hi)) <= rawSpan * 0.25;
+  if (zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  const pad = (hi - lo) * 0.12;   // 上下留白：曲线不贴边
+  return { lo: lo - pad, hi: hi + pad, zero };
+}
+
+// 刻度步长取 1/2/2.5/5×10^k——整齐且跨度不夸张（10→1.5k 那种四等分均值
+// 落在窄区间里会印出 1490/1500 都变成 "1.5k" 的废标签）
+function axisStep(lo, hi, intervals) {
+  const raw = (hi - lo) / Math.max(1, intervals);
+  if (!(raw > 1e-12)) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return m * mag;
+}
+
+// 步长需要几位小数：2.5 → 1 位，0.25 → 2 位，20 → 0 位
+function axisDecimals(step) {
+  for (let d = 0; d <= 6; d++) {
+    const s = step * Math.pow(10, d);
+    if (Math.abs(s - Math.round(s)) < 1e-9 * Math.max(1, Math.abs(s))) return d;
+  }
+  return 6;
+}
+
+function axisLabel(v, step) {
+  const clean = Math.abs(v) < step * 1e-6 ? 0 : v;
+  // 千位左右不用 k：1490 印成 "1.5k" 就看不出 10 美元的差别了
+  if (step >= 1000) {
+    const k = clean / 1000;
+    return k.toFixed(axisDecimals(step / 1000)) + 'k';
+  }
+  return clean.toFixed(axisDecimals(step));
+}
+
+function axisTicks(dom, step) {
+  const out = [];
+  const from = Math.ceil(dom.lo / step - 1e-9), to = Math.floor(dom.hi / step + 1e-9);
+  for (let i = from; i <= to; i++) out.push(i * step);   // 用乘法不用累加，避免浮点漂移
+  return out;
+}
+
+// 步长 + 落在窗口内的刻度。跨度刚好卡在两档之间时只会剩 1~2 根参考线，
+// 那就细分一档——150px 高的图上只有两条线等于没画。
+function axisScale(dom, intervals) {
+  let step = axisStep(dom.lo, dom.hi, intervals);
+  let ticks = axisTicks(dom, step);
+  if (ticks.length < 3) {
+    step = axisStep(dom.lo, dom.hi, intervals * 2);
+    ticks = axisTicks(dom, step);
+  }
+  return { step, ticks };
+}
+
 function drawArea(svgId, values, colorClass, color, opt) {
   CHART_REG[svgId] = { kind: 'area', args: [values, colorClass, color, opt] };
   const svg = $(svgId);
@@ -83,11 +164,12 @@ function drawArea(svgId, values, colorClass, color, opt) {
     : [{ values, colorClass, color, area: true, ts: hasEnh ? opt.ts : null }];
   const primary = series.find(s => s.primary) || series[series.length - 1];
 
-  // Y 轴范围取所有系列的并集，仍含 0（与老口径一致）
-  let max = 0, min = 0;
-  for (const s of series) for (const v of s.values) { if (v > max) max = v; if (v < min) min = v; }
-  const span = (max - min) || 1;
-  const y = v => H - padB - ((v - min) / span) * (H - padT - padB);
+  // Y 轴范围取所有系列的并集，但不再强制含 0（见 axisDomain）
+  const dom = axisDomain(series.reduce((a, s) => a.concat(s.values), []), opt);
+  const span = dom.hi - dom.lo;
+  const y = v => H - padB - ((v - dom.lo) / span) * (H - padT - padB);
+  // 面积填充/零线的基线：0 在窗口外时落到绘图区边缘，不让路径拖出画布
+  const yBase = Math.max(padT, Math.min(H - padB, y(0)));
 
   // X 映射：系列带 ts（且首尾可分）时按时间对齐——20 笔线和 100 笔线点数不同、
   // 终点都是最近一笔，按索引映射会把两条线的日期对错位；时间映射才能纵向对齐。
@@ -104,14 +186,18 @@ function drawArea(svgId, values, colorClass, color, opt) {
   const xOfTs = t => padL + (t - tsMin) / (tsMax - tsMin) * (W - padL - padR);
   const xAt = (s, i) => (timeMode && s.ts) ? xOfTs(s.ts[i]) : xIdx(i, s.values.length);
 
-  for (let g = 0; g <= 3; g++) {
-    const val = min + span * g / 3;
+  // 网格：刻度落在整齐值上；刻度数量跟高度走（小图 4 格，最大化后最多 8 格），
+  // 但窗口本身只由数据决定——同一份数据在大小图上形状必须一致。
+  const intervals = H >= 320 ? Math.min(8, Math.round((H - padT - padB) / 70)) : 4;
+  const ax = axisScale(dom, intervals);
+  for (const val of ax.ticks) {
     svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(val), y2: y(val), class: 'grid-line' }));
     const t = svgEl('text', { x: 4, y: y(val) + 3, class: 'lbl' });
-    t.textContent = Math.abs(val) >= 1000 ? (val / 1000).toFixed(1) + 'k' : val.toFixed(val % 1 ? 1 : 0);
+    t.textContent = axisLabel(val, ax.step);
     svg.appendChild(t);
   }
-  svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(0), y2: y(0), class: 'zero-line' }));
+  // 零线只在 0 真在窗口里时画；否则它会跑到画布外（余额这类图根本没有 0）
+  if (dom.zero) svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: yBase, y2: yBase, class: 'zero-line' }));
 
   for (const s of series) {
     if (!s.values.length) continue;
@@ -119,8 +205,7 @@ function drawArea(svgId, values, colorClass, color, opt) {
     if (s.area) {
       const gid = ensureGradient(svg, s.color, .22);
       const line = s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-      const y0 = y(0);
-      const area = `${line} L${x(s.values.length - 1).toFixed(1)},${y0.toFixed(1)} L${x(0).toFixed(1)},${y0.toFixed(1)} Z`;
+      const area = `${line} L${x(s.values.length - 1).toFixed(1)},${yBase.toFixed(1)} L${x(0).toFixed(1)},${yBase.toFixed(1)} Z`;
       svg.appendChild(svgEl('path', { d: area, fill: `url(#${gid})`, stroke: 'none' }));
     }
     const lp = s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
@@ -201,18 +286,26 @@ function drawBars(svgId, labels, values, opt) {
   svg.innerHTML = '';
   if (!values.length) return;
 
-  const max = Math.max(...values, 0), min = Math.min(...values, 0);
-  const span = (max - min) || 1;
-  const y = v => H - padB - ((v - min) / span) * (H - padT - padB);
+  // 柱长 = 数值大小，零基线**不能**丢（截断的柱图是骗人的），所以这里不做
+  // 「丢掉零」那套；但刻度要走整齐值，且只在有柱子那一侧留白——否则最高的
+  // 柱子永远贴着顶边，读不出还有多少余量。
+  let blo = Math.min(...values, 0), bhi = Math.max(...values, 0);
+  if (bhi - blo < 1e-12) bhi = blo + 1;
+  const bpad = (bhi - blo) * 0.08;
+  if (bhi > 0) bhi += bpad;
+  if (blo < 0) blo -= bpad;
+  const bspan = bhi - blo;
+  const y = v => H - padB - ((v - blo) / bspan) * (H - padT - padB);
   const y0 = y(0);
   const slot = (W - padL - padR) / values.length;
   const bw = Math.min(slot * 0.6, 40);
 
-  for (let g = 0; g <= 3; g++) {
-    const val = min + span * g / 3;
+  const bint = H >= 320 ? Math.min(8, Math.round((H - padT - padB) / 70)) : 4;
+  const bax = axisScale({ lo: blo, hi: bhi }, bint);
+  for (const val of bax.ticks) {
     svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(val), y2: y(val), class: 'grid-line' }));
     const t = svgEl('text', { x: 4, y: y(val) + 3, class: 'lbl' });
-    t.textContent = Math.abs(val) >= 1000 ? (val / 1000).toFixed(1) + 'k' : val.toFixed(0);
+    t.textContent = axisLabel(val, bax.step);
     svg.appendChild(t);
   }
   svg.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y0, y2: y0, class: 'zero-line' }));
