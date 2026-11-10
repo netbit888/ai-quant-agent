@@ -3593,6 +3593,12 @@ def queue_review(state: dict, cfg: Cfg, pos: dict, exit_price: float,
         "exit_reason": pos.get("exit_reason"),
         # 平仓发起方。复盘要拿它决定这条教训归出场端还是两端都看。
         "exit_source": pos.get("exit_source") or "",
+        # 开仓时锁定的打法。`ask_review` 靠它决定出場教训归哪个 regime 域
+        # （trend 与 range 是两套出场参数，同一动作结论可以相反）。
+        # 2026-11-10 补：原来这里不带 plan，于是只有"决策轮当场复盘"能拿到它，
+        # 走补跑队列的那些笔永远落到 `regime_of(pre_close)`——平仓后行情怎么走
+        # 就归到哪个域，和这笔当初按哪套参数管无关。
+        "plan": pos.get("plan") or "",
         "opened_at": pos.get("opened_at"),
         "closed_at": int(closed_at),
         "exit_price": float(exit_price),
@@ -3624,6 +3630,10 @@ def process_due_reviews(cfg: Cfg, now: int, login=None) -> list[dict]:
                "entry_reason": item.get("entry_reason"),
                "exit_reason": item.get("exit_reason"),
                "exit_source": item.get("exit_source") or "",
+               # 必须把 plan 带进去：`ask_review` 用它给出场教训定域。
+               # 少了这一个字段，补跑出来的复盘会被 `regime_of(pre_close)` 接管，
+               # 和决策轮当场复盘的同一种单归到不同域——两条路必须同口径。
+               "plan": item.get("plan") or "",
                "opened_at": item.get("opened_at")}
         row = _do_review(cfg, pos, float(item.get("exit_price") or 0.0),
                          float(item.get("pnl") or 0.0),

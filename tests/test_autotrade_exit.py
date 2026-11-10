@@ -318,6 +318,43 @@ class TestReviewQueue(TempLedger):
         self.assertEqual(done[0]["closed_at"], NOW)
         self.assertEqual(autotrade.load_state()["pending_reviews"], [])
 
+    def test_queue_review_carries_plan(self):
+        """排队时必须存 plan：一场交易按哪套出场参数管，是它复盘定域的唯一依据。"""
+        state = autotrade.queue_review(
+            autotrade._empty_state(), autotrade.Cfg(review=True),
+            {"ticket": 78, "direction": -1, "lots": 0.05, "price_open": 4040.0,
+             "plan": "trend", "exit_source": "be", "opened_at": NOW},
+            4040.0, 0.0, NOW)
+        self.assertEqual(state["pending_reviews"][0]["plan"], "trend")
+        self.assertEqual(state["pending_reviews"][0]["exit_source"], "be")
+
+    def test_due_review_passes_plan_to_review(self):
+        """补跑路径也要把 plan 交给 ask_review。
+
+        2026-11-10 补的缺口：`queue_review` 不存 plan、`process_due_reviews`
+        也不传，于是只有「决策轮当场复盘」能按 plan 定域，走补跑队列的笔一律
+        落到 `regime_of(pre_close)`。同一笔 trend 单当场复盘归 trend、隔 7 根
+        补跑却归平仓那刻的行情——两条路必须同口径，否则域归属取决于「用户有没有
+        在平仓后 7 分钟内点停止」这种无关变量。
+        """
+        state = autotrade._empty_state()
+        state["last_close_ts"] = NOW - 7 * 60
+        state["pending_reviews"] = [{
+            "ticket": 77, "direction": 1, "lots": 0.01, "price_open": 4000.0,
+            "entry_reason": "突破", "exit_reason": "止损", "exit_source": "sl",
+            "plan": "trend",
+            "opened_at": NOW - 9 * 60, "closed_at": NOW - 7 * 60,
+            "exit_price": 3997.0, "pnl": -15.0,
+        }]
+        autotrade.save_state(state)
+        fake = mock.Mock(return_value={"ok": True, "lesson": "x", "bars": 15,
+                                       "regime": "trend"})
+        with mock.patch.object(autotrade, "ask_review", fake):
+            autotrade.process_due_reviews(autotrade.Cfg(dry_run=True), NOW)
+        passed = fake.call_args[0][1]        # ask_review(cfg, position, ...)
+        self.assertEqual(passed.get("plan"), "trend")
+        self.assertEqual(passed.get("exit_source"), "sl")
+
     def test_tick_processes_due_review_and_still_trades(self):
         """到期复盘跑掉的同时这一轮照常判断行情——复盘不能挡住交易。"""
         state = autotrade._empty_state()
