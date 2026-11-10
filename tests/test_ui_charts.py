@@ -1,13 +1,17 @@
-"""图表坐标轴自适应的回归测试（node 跑 bridge.js，不需要浏览器、不需要面板）。
+"""图表渲染的回归测试（node 跑 bridge.js，不需要浏览器、不需要面板）。
 
-背景：老口径 Y 轴恒从 0 起算到最大值，于是「余额 1455~1476」这种绝对水平被压成
-一条贴顶的直线，整幅图 99% 是空白——用户看到的就是一张没有信息量的图。
+背景一：老口径 Y 轴恒从 0 起算到最大值，于是「余额 1455~1476」这种绝对水平被
+压成一条贴顶的直线，整幅图 99% 是空白——用户看到的就是一张没有信息量的图。
 现在窗口按数据实际高低点定，只有零线确实贴着数据时才保留 0。
+
+背景二：柱图只有轴刻度，读单根柱子的值必须先悬停。现在柱顶直接印数值，精度
+按槽宽定一次（14 根柱子时 2 位小数放不下就整体降 1 位），相邻两格不许叠字。
 
 这里钉住三件事：
   1. 远离 0 的数据不再含 0，且数据占到画布 70% 以上的高度（这正是原来的 bug）；
   2. 跨零 / 从 0 起算的曲线仍然保留零线（读数基准不能丢）；
-  3. 刻度标签落在整齐值上、互不重复，窄区间不许印成一片 "1.5k"。
+  3. 刻度标签落在整齐值上、互不重复，窄区间不许印成一片 "1.5k"；
+  4. 每根柱子都带符号数值，正柱标在上方、负柱标在下方，且不出画布。
 """
 
 import json
@@ -59,6 +63,23 @@ function span(values, opt) {
   return { lo: d.lo, hi: d.hi, zero: d.zero, fill: (hi - lo) / (d.hi - d.lo) };
 }
 
+// 柱图：数值标签（.bar-val）+ 柱体外框，按绘制顺序一一对应
+function paintBars(id, labels, values, opt) {
+  drawBars(id, labels, values, opt || {});
+  const svg = made[id];
+  const vals = svg.children.filter(c => c.tag === 'text' && /bar-val/.test(String(c.attrs.class || '')));
+  const rects = svg.children.filter(c => c.tag === 'rect');
+  return {
+    n: vals.length,
+    texts: vals.map(c => c.textContent),
+    x: vals.map(c => Number(c.attrs.x)),
+    y: vals.map(c => Number(c.attrs.y)),
+    rects: rects.map(c => ({ y: Number(c.attrs.y), h: Number(c.attrs.height) })),
+    H: (opt && opt.H) || 156,
+    padT: 14, padB: 24,
+  };
+}
+
 const out = {};
 const bal = [1455.8, 1456.2, 1455.1, 1456.8, 1476.4, 1464.6];
 const cross = [-0.3, 0.5, 0.1];
@@ -83,6 +104,14 @@ out.bars = {
     .map(c => ({ y: parseFloat(c.attrs.y), h: parseFloat(c.attrs.height) })),
   H: 156, padT: 14, padB: 24,
 };
+
+// 柱顶数值：疏（6 根，位置宽松）与密（14 根，槽只有 40px）两档，外加最大化
+const sparse = paintBars('cSparse', ['a', 'b', 'c', 'd', 'e', 'f'],
+                         [2.40, 0.60, -0.80, 1.20, 19.30, -12.90]);
+const many = paintBars('cMany', ['1','2','3','4','5','6','7','8','9','10','11','12','13','14'],
+                       [2.4, -3.1, 0.0, 5.8, -12.9, 0.6, 1.2, -0.8, 19.3, -4.4, 7.05, 0.0, -2.2, 3.6]);
+const barBig = paintBars('cBig', ['a', 'b', 'c'], [12.0, -8.0, 3.0], { W: 1240, H: 600 });
+out.barVals = { sparse: sparse, many: many, big: barBig };
 
 console.log(JSON.stringify(out));
 """
@@ -175,6 +204,63 @@ class ChartAxisTest(unittest.TestCase):
 
     def test_domain_can_be_forced(self):
         self.assertLessEqual(self.r["forced"]["lo"], 0)
+
+    # ---- 柱顶数值 ----
+
+    def test_every_bar_carries_its_value(self):
+        """每根柱子都要有一个数值标签，一个不多一个不少。"""
+        for name in ("sparse", "many", "big"):
+            b = self.r["barVals"][name]
+            self.assertEqual(b["n"], len(b["rects"]), name + " 的柱子与标签数量不一致")
+            self.assertTrue(all(t.strip() for t in b["texts"]), name + " 有空标签")
+
+    def test_value_labels_are_signed(self):
+        """正数带 +、负数带 -，看图不用先看颜色。"""
+        texts = self.r["barVals"]["sparse"]["texts"]
+        self.assertEqual(texts, ["+2.40", "+0.60", "-0.80", "+1.20", "+19.30", "-12.90"])
+
+    def test_decimal_places_consistent_within_one_chart(self):
+        """同一张图里小数位必须一致，否则 +27.4 和 +0.85 看着像两种量纲。"""
+        for name in ("sparse", "many", "big"):
+            texts = self.r["barVals"][name]["texts"]
+            decs = {len(t.split(".")[1]) if "." in t else 0 for t in texts}
+            self.assertEqual(len(decs), 1, name + " 小数位不统一：" + str(texts))
+
+    def test_dense_chart_drops_a_decimal_instead_of_overlapping(self):
+        """14 根柱子时槽只有 40px，2 位小数放不下 → 整体降到 1 位，不是叠字。"""
+        many = self.r["barVals"]["many"]
+        decs = {len(t.split(".")[1]) if "." in t else 0 for t in many["texts"]}
+        self.assertEqual(decs, {1}, many["texts"])
+        # 预算：11px 等宽字宽 6.8px，标签宽度不许超过槽宽的 94%
+        slot = (620 - 48 - 14) / 14
+        for t in many["texts"]:
+            self.assertLessEqual(len(t) * 6.8, slot * 0.94, "放不下却没降精度：" + t)
+
+    def test_positive_above_negative_below(self):
+        """正柱标在柱顶上方、负柱标在柱底下方——数字不能被柱子压住。"""
+        for name in ("sparse", "many", "big"):
+            b = self.r["barVals"][name]
+            for i, (t, r) in enumerate(zip(b["texts"], b["rects"])):
+                top, bottom = r["y"], r["y"] + r["h"]
+                if t.startswith("-"):
+                    self.assertGreater(b["y"][i], bottom - 1, f"{name}[{i}] 负值标签没在柱底下方")
+                else:
+                    self.assertLess(b["y"][i], top + 1, f"{name}[{i}] 正值标签没在柱顶上方")
+
+    def test_labels_stay_inside_the_canvas(self):
+        """贴边的柱子（最高/最低）标签要夹在画布内，不掉进日期行。"""
+        for name in ("sparse", "many", "big"):
+            b = self.r["barVals"][name]
+            for t, y in zip(b["texts"], b["y"]):
+                self.assertGreaterEqual(y, b["padT"] - 6, f"{name} 标签越出顶部：{t}")
+                self.assertLessEqual(y, b["H"] - b["padB"] + 12, f"{name} 标签压到日期行：{t}")
+
+    def test_value_labels_follow_the_bars_when_maximized(self):
+        """最大化弹层重放同一份 args，标签要跟着变大的柱子走，位置关系不变。"""
+        b = self.r["barVals"]["big"]
+        self.assertEqual(b["n"], 3)
+        smallest = min(r["h"] for r in b["rects"])
+        self.assertGreater(smallest, 20, "大图里最短的柱子也该有可见高度")
 
 
 if __name__ == "__main__":

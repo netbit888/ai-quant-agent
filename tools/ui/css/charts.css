@@ -14,6 +14,11 @@
   .line-bad { fill: none; stroke: var(--bad); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255,77,79,.55)); }
   .pt { fill: #0b111a; stroke: var(--info); stroke-width: 1.6; }
   .lbl { fill: var(--dim); font-size: var(--fs-1); font-family: var(--mono); }
+  /* 柱顶数值：和柱子同语义，但提亮一档——11px 直接用 --up/--down 在深底上太沉。
+     等宽字体保证 +27.4 与 -15.0 的位宽一致，竖排看下来不会左右跳。 */
+  .bar-val { fill: var(--dim); font-size: var(--fs-1); font-family: var(--mono); }
+  .bar-val.up { fill: var(--good-lit); }
+  .bar-val.down { fill: var(--bad-lit); }
   /* 对照线：低权重灰蓝细虚线，视觉权重必须压不过主线 */
   .line-ghost { fill: none; stroke: #7f93a8; stroke-width: 1.3; stroke-dasharray: 6 4; opacity: .85; }
   /* 全量 hover 的竖向参考线 */

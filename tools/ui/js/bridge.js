@@ -277,6 +277,12 @@ function drawArea(svgId, values, colorClass, color, opt) {
   }
 }
 
+// 带符号的柱顶数值。d = 小数位，由槽宽统一决定（同一张图里小数位必须一致，
+// 否则一行 +27.4 一行 +0.85 看着像两种量纲）。
+function barText(v, d) {
+  return (v > 0 ? '+' : '') + v.toFixed(d);
+}
+
 function drawBars(svgId, labels, values, opt) {
   CHART_REG[svgId] = { kind: 'bars', args: [labels, values, opt] };
   const svg = $(svgId);
@@ -299,6 +305,13 @@ function drawBars(svgId, labels, values, opt) {
   const y0 = y(0);
   const slot = (W - padL - padR) / values.length;
   const bw = Math.min(slot * 0.6, 40);
+
+  // 柱顶数值：一眼能读，不必悬停。精度先按槽宽定一次——14 根柱子时槽只有
+  // 40px，2 位小数放不下就整体降到 1 位，绝不出现相邻两格数字叠在一起。
+  // 6.8px = 11px 等宽字体的字宽估算（--fs-1），只用来看放不放得下。
+  const CHW = 6.8, budget = slot * 0.94;
+  let vdec = 2;
+  while (vdec > 0 && Math.max(...values.map(v => barText(v, vdec).length)) * CHW > budget) vdec--;
 
   const bint = H >= 320 ? Math.min(8, Math.round((H - padT - padB) / 70)) : 4;
   const bax = axisScale({ lo: blo, hi: bhi }, bint);
@@ -330,6 +343,17 @@ function drawBars(svgId, labels, values, opt) {
     const t = svgEl('text', { x: cx, y: H - 6, class: 'lbl', 'text-anchor': 'middle' });
     t.textContent = labels[i];
     svg.appendChild(t);
+
+    // 正柱标在柱顶上方、负柱标在柱底下方；贴边时夹进绘图区，
+    // 不许压住上面那根柱子，也不许掉进日期行。
+    const up = v >= 0;
+    const vy = up ? Math.max(padT + 2, Math.min(yv, y0) - 5)
+                  : Math.min(H - padB + 9, Math.max(yv, y0) + 12);
+    const vt = svgEl('text', {
+      x: cx, y: vy, class: 'bar-val ' + (up ? 'up' : 'down'), 'text-anchor': 'middle'
+    });
+    vt.textContent = barText(v, vdec);
+    svg.appendChild(vt);
   });
 }
 
