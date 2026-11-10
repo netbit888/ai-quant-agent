@@ -230,6 +230,49 @@ function drawArea(svgId, values, colorClass, color, opt) {
     }
   }
 
+  // 极值标注：只标最高点与最低点——峰谷在哪、差多少，一眼可读，不必逐个悬停。
+  // 不标每个点：点数一多就是一片数字，反而盖住曲线本身（柱图能全标是因为柱数有限）。
+  if (primary.values.length > 1) {
+    const pv = primary.values;
+    let iHi = -1, iLo = -1;
+    for (let i = 0; i < pv.length; i++) {
+      const v = pv[i];
+      if (typeof v !== 'number' || !isFinite(v)) continue;
+      if (iHi < 0 || v > pv[iHi]) iHi = i;
+      if (iLo < 0 || v < pv[iLo]) iLo = i;
+    }
+    // 全平（高低落在同一个点上）没有峰谷可言，标两个相同的数字只会误导
+    if (iHi >= 0 && iLo >= 0 && Math.abs(pv[iHi] - pv[iLo]) > 1e-9) {
+      // 精度跟轴走但至少 2 位：轴步长 20 时 1 位会把 1503.8 和 1503.2 都印成 1504
+      const dec = Math.min(4, Math.max(2, axisDecimals(ax.step)));
+      const label = v => Math.abs(v) >= 1e5 ? axisLabel(v, ax.step) : v.toFixed(dec);
+      const mk = (idx, up) => {
+        const v = pv[idx], txt = label(v);
+        const half = txt.length * 6.8 / 2 + 2;
+        // 首/末点贴在绘图区边缘，直接居中会压到左侧刻度或右侧留白上。
+        // 留 10px 缓冲：极值点常常正好是首点，贴太近会和 Y 轴刻度读成同一行数字
+        const cx = Math.max(padL + half + 10, Math.min(W - padR - half - 10, xAt(primary, idx)));
+        const cy = y(v);
+        // 高点标在点上方、低点标在下方；那一侧真放不下才翻面。
+        // 上界用画布顶（10）而不是 padT：axisDomain 只留 12% 的白，约 12px，
+        // 放不下「点上 8px + 11px 字」，一律翻面就会把峰顶数字压到曲线上。
+        // 下界要给底部日期行让位（时间模式下日期字在 H-6）。
+        const bottom = timeMode ? H - padB - 2 : H - 12;
+        let ly = up ? cy - 8 : cy + 14;
+        if (up && ly < 10) ly = cy + 14;
+        if (!up && ly > bottom) ly = cy - 8;
+        ly = Math.max(10, Math.min(bottom, ly));
+        return { txt, cx, ly, half };
+      };
+      const hi = mk(iHi, true), lo = mk(iLo, false);
+      for (const m of [hi, lo]) {
+        const t = svgEl('text', { x: m.cx, y: m.ly, class: 'ext-val', 'text-anchor': 'middle' });
+        t.textContent = m.txt;
+        svg.appendChild(t);
+      }
+    }
+  }
+
   // 全量 hover：透明 rect 盖住绘图区（必须最后 append 保证在顶层），
   // mousemove 反查最近点 → 竖向参考线 + fixed 定位浮窗。
   // 浮窗不进 svg：preserveAspectRatio="none" 会拉伸 svg 内的文字。

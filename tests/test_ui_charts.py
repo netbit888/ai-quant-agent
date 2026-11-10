@@ -63,6 +63,24 @@ function span(values, opt) {
   return { lo: d.lo, hi: d.hi, zero: d.zero, fill: (hi - lo) / (d.hi - d.lo) };
 }
 
+// 折线图的峰谷标注：只取 .ext-val 的两个文本，连同画布尺寸一起给出，
+// 调用方据此判断「标签在点的上方还是下方、有没有出画布」
+function paintExt(id, values, opt) {
+  drawArea(id, values, 'line-up', '#2ecc71', opt || {});
+  const svg = made[id];
+  const W = (opt && opt.W) || 620, H = (opt && opt.H) || 156;
+  const padL = 44, padR = 14, padT = 14, padB = 20;
+  const dom = axisDomain(values, opt || {});
+  const yOf = v => H - padB - ((v - dom.lo) / (dom.hi - dom.lo)) * (H - padT - padB);
+  const ext = svg.children
+    .filter(c => c.tag === 'text' && /ext-val/.test(String(c.attrs.class || '')))
+    .map(c => ({ t: c.textContent, x: Number(c.attrs.x), y: Number(c.attrs.y) }));
+  return {
+    ext, W, H, padL, padR, padT, padB,
+    hiY: yOf(Math.max.apply(null, values)), loY: yOf(Math.min.apply(null, values)),
+  };
+}
+
 // 柱图：数值标签（.bar-val）+ 柱体外框，按绘制顺序一一对应
 function paintBars(id, labels, values, opt) {
   drawBars(id, labels, values, opt || {});
@@ -112,6 +130,16 @@ const many = paintBars('cMany', ['1','2','3','4','5','6','7','8','9','10','11','
                        [2.4, -3.1, 0.0, 5.8, -12.9, 0.6, 1.2, -0.8, 19.3, -4.4, 7.05, 0.0, -2.2, 3.6]);
 const barBig = paintBars('cBig', ['a', 'b', 'c'], [12.0, -8.0, 3.0], { W: 1240, H: 600 });
 out.barVals = { sparse: sparse, many: many, big: barBig };
+
+// 峰谷标注：正常曲线、全平、单点、跨零、时间模式、最大化
+out.ext = {
+  bal: paintExt('cExtBal', bal),
+  flat: paintExt('cExtFlat', flat),
+  one: paintExt('cExtOne', [1500]),
+  cross: paintExt('cExtCross', cross),
+  ts: paintExt('cExtTs', [1, 2, 3], { ts: [1794300000, 1794303600, 1794307200] }),
+  big: paintExt('cExtBig', [12.5, -8.0, 3.2], { W: 1240, H: 600 }),
+};
 
 console.log(JSON.stringify(out));
 """
@@ -261,6 +289,49 @@ class ChartAxisTest(unittest.TestCase):
         self.assertEqual(b["n"], 3)
         smallest = min(r["h"] for r in b["rects"])
         self.assertGreater(smallest, 20, "大图里最短的柱子也该有可见高度")
+
+    # ---- 折线图的峰谷数值 ----
+
+    def test_only_the_two_extremes_are_labelled(self):
+        """只标最高、最低两点；点数一多就全标会糊成一片。"""
+        e = self.r["ext"]["bal"]
+        self.assertEqual(sorted(x["t"] for x in e["ext"]), ["1455.10", "1476.40"])
+
+    def test_high_label_above_point_low_label_below(self):
+        """峰标在点上方、谷标在点下方，数字不压曲线。"""
+        e = self.r["ext"]["bal"]
+        hi, lo = sorted(e["ext"], key=lambda x: x["y"])   # 按位置认峰谷，不依赖绘制顺序
+        self.assertLess(hi["y"], e["hiY"], "最高点的数字没在点上方")
+        self.assertGreater(lo["y"], e["loY"], "最低点的数字没在点下方")
+
+    def test_no_labels_when_there_are_no_extremes(self):
+        """全平（高低同一个点）和单点都没有峰谷可言，标两个相同的数只会误导。"""
+        self.assertEqual(self.r["ext"]["flat"]["ext"], [])
+        self.assertEqual(self.r["ext"]["one"]["ext"], [])
+
+    def test_extreme_labels_stay_inside_the_canvas(self):
+        """首/末点常常正好是极值，标签必须夹在绘图区内，不许压到刻度或日期行。"""
+        for name, e in self.r["ext"].items():
+            if not e["ext"]:
+                continue
+            for x in e["ext"]:
+                self.assertGreaterEqual(x["x"], e["padL"], f"{name} 标签压到 Y 轴刻度：{x}")
+                self.assertLessEqual(x["x"], e["W"] - e["padR"], f"{name} 标签越出右边：{x}")
+                self.assertGreaterEqual(x["y"], 9, f"{name} 标签越出顶部：{x}")
+                self.assertLessEqual(x["y"], e["H"] - 2, f"{name} 标签越出底部：{x}")
+
+    def test_extreme_labels_use_two_decimals(self):
+        """小数位固定 2 位（金额/R 都是这个粒度）；轴步长 20 时也不许退成整数。"""
+        for name in ("bal", "cross", "big"):
+            for x in self.r["ext"][name]["ext"]:
+                self.assertIn(".", x["t"], f"{name} 的极值没带小数：{x}")
+                self.assertEqual(len(x["t"].split(".")[1]), 2, f"{name}：{x}")
+
+    def test_ts_mode_keeps_low_label_off_the_date_row(self):
+        """时间模式下底部有日期行，谷值标签要给那一行让位。"""
+        e = self.r["ext"]["ts"]
+        low = e["ext"][0]
+        self.assertLessEqual(low["y"], e["H"] - e["padB"] - 2, "谷值标签压到底部日期行")
 
 
 if __name__ == "__main__":
