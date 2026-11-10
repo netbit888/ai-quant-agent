@@ -489,10 +489,10 @@ class TestTick(TempLedger):
         state = autotrade.load_state()
         self.assertEqual(state["trades"], 1)
         self.assertEqual(state["position"]["ticket"], 555)
-        # 不挂止盈止损：position 里不该出现任何 sl/tp 字段
+        # SL 由 `_attach_entry_sl` 单独挂到券商端（只挂 SL 不挂 TP），
+        # 程序内存里的 position 不重复存一份——两处各存一份迟早对不上。
         self.assertNotIn("sl", state["position"])
         self.assertNotIn("tp", state["position"])
-
     def test_low_probability_goes_short(self):
         with mock.patch.object(autotrade, "ask_entry",
                               return_value={"p_up": 0.3, "reason": "破位", "source": "llm"}), \

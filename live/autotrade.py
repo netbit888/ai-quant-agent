@@ -6474,8 +6474,12 @@ def run(cfg: Cfg, login=None) -> None:
         mode = f"AI 辅助（{mode}）"
     align = (f"（对齐 K 线收盘，+{cfg.align_settle_sec:g} 秒）"
              if cfg.align_settle_sec > 0 else "（自由跑表，不对齐收盘）")
+    # 「不挂 SL/TP」是 _attach_entry_sl 之前的说法。现在开仓成交后会往券商端挂
+    # 硬止损（只不挂 TP），启动横幅不该还在骗人——sl_usd=0 才是真的不挂。
+    sl_txt = (f"券商端 SL {cfg.sl_usd:g} USD / 不挂 TP"
+              if cfg.sl_usd and float(cfg.sl_usd) > 0 else "不挂 SL（sl_usd=0）/ 不挂 TP")
     print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策{align} | "
-          f"平仓后冷却 {cfg.cooldown_sec} 秒（同向 {cfg.cooldown_same_sec} 秒）| 不挂 SL/TP | {mode}")
+          f"平仓后冷却 {cfg.cooldown_sec} 秒（同向 {cfg.cooldown_same_sec} 秒）| {sl_txt} | {mode}")
     if cfg.assist:
         print("⚠ 辅助模式在命令行里没有面板可点：所有信号都会超时 → "
               "入场一律不做、出场按模型决定平。要人点请用面板。")

@@ -1649,10 +1649,16 @@ def _native_fallback_quit() -> None:
         _schedule_window_quit(0.1)
         return
     f = float(p.get("float_pnl") or 0)
+    # 早先这里写「本策略不挂止盈止损」——错了。开仓成交后 _attach_entry_sl 会把
+    # 硬止损挂到券商端（只不挂 TP），所以「选否」并不等于裸奔。但挂载失败的那笔
+    # 确实没有，两种情形要分开说，别让用户照着一个过期前提做决定。
+    bare = int(p.get("bare_count") or 0)
+    prot = ("券商端止损仍在生效，只是不挂止盈"
+            if not bare else f"其中 {bare} 笔没有券商端止损")
     yes = desktop.message_box(
         f"账户上还有 {n} 笔持仓，浮动盈亏 {f:+.2f} USD。\n\n"
         "「是」= 先市价平掉所有仓位再退出\n"
-        "「否」= 强制退出，仓位会留在券商那边（本策略不挂止盈止损）",
+        f"「否」= 强制退出，仓位会留在券商那边（{prot}，之后没人看着）",
         style=desktop.MB_YESNO | desktop.MB_ICONWARNING,
     )
     _shutdown(flatten=bool(yes))
@@ -1687,7 +1693,13 @@ def _quit_preview() -> dict:
     initialize() 会白等 60 秒，点个退出按钮卡一分钟。
     """
     out = {"ok": True, "positions": [], "count": 0, "float_pnl": 0.0,
-           "running": False, "dry_run": None, "mt5": False, "error": None}
+           "running": False, "dry_run": None, "mt5": False, "error": None,
+           # 有几笔**没有**券商端止损。退出确认要说真话：早先这里写死
+           # 「本策略不挂止盈止损」，而 send_open 现在的 _attach_entry_sl 每笔
+           # 都往券商端挂 SL（只不挂 TP）。用户据此判断「选否=裸奔」，实际
+           # 还有一条保护位在券商那边；反过来挂载失败的那笔也确实是裸的，
+           # 得让他知道是哪一种。默认 0 = 不制造假警报。
+           "bare_count": 0, "sl_count": 0}
     try:
         from live import autotrade
 
@@ -1700,8 +1712,12 @@ def _quit_preview() -> dict:
         from live.journal import open_positions
 
         pos = open_positions(allow_launch=False)
+        # positions_get 的 sl 是 0.0 表示没挂。挂载失败的笔在 open 行留
+        # sl_broker=0（见 _attach_entry_sl），这里按券商端实际状态数，不按日志。
+        with_sl = sum(1 for p in pos if float(p.get("sl") or 0) > 0)
         out.update(mt5=True, positions=pos, count=len(pos),
-                   float_pnl=round(sum(float(p.get("profit") or 0) for p in pos), 2))
+                   float_pnl=round(sum(float(p.get("profit") or 0) for p in pos), 2),
+                   sl_count=with_sl, bare_count=len(pos) - with_sl)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out

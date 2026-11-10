@@ -36,8 +36,18 @@ async function quitApp() {
   const f = Number(p.float_pnl || 0);
   $('quitDesc').textContent =
     `账户上有 ${p.count} 笔持仓，浮动盈亏 ${f >= 0 ? '+' : ''}${f.toFixed(2)} ${AT_MONEY}。`;
+  // 原来的文案是「这套策略不挂止盈止损」——过期了。开仓成交后 _attach_entry_sl
+  // 会把硬止损挂到券商端（只不挂 TP），所以「强制退出」不等于让仓位裸奔。
+  // 但挂载失败的那笔确实没有，两种情形必须分开说：用户是拿这句话决定要不要
+  // 先平仓的，说错方向比不说更糟。bare_count 缺失（老后端）时退回中性表述。
+  const bare = Number(p.bare_count || 0);
+  const unknown = (p.bare_count === undefined || p.bare_count === null);
   $('quitCost').textContent = p.dry_run === false
-    ? '强制退出会把仓位留在券商那边——这套策略不挂止盈止损，没人看着。'
+    ? (unknown
+        ? '强制退出会把仓位留在券商那边——券商端止损（若已挂上）仍然有效，但没有止盈，退出后没人看着。'
+        : bare > 0
+          ? `强制退出会把仓位留在券商那边——其中 ${bare} 笔没有券商端止损，退出后没人看着。`
+          : '强制退出会把仓位留在券商那边——券商端止损仍在生效（不挂止盈），但退出后没人看着。')
     : '纸面仓位只存在本地，强制退出等于直接丢弃。';
   $('quitForce').disabled = false;
   $('quitFlatten').disabled = false;
