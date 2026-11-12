@@ -108,6 +108,8 @@ function renderTradeDetail(d) {
         // 保本止损（2026-10-29）：券商端那条线打的，成交价应在开仓价附近。
         : res.exit_source === 'be' ? '保本止损（券商端 SL）'
         : res.exit_source === 'be_local' ? '保本止损（程序代平）'
+        // 券商端硬止盈（2026-11-11）：震荡单开仓就挂的那条线，触价即走。
+        : res.exit_source === 'tp' ? '止盈（券商端 TP）'
         : esc(res.exit_source || '—'))
     + `</div></div>`;
 

@@ -432,6 +432,93 @@ class Executor:
         return {"ok": ok, "retcode": rc,
                 "comment": getattr(result, "comment", None), "price": price}
 
+    def modify_protect(self, ticket: int, sl: float, tp: float | None = None) -> dict:
+        """一次 SLTP 请求同时挂上止损（和止盈），用于**开仓后的保护线**。
+
+        为什么是一条请求而不是两条（2026-11-12 实盘打回）
+        ----------------------------------------------
+        第一版是"先 modify_sl 再 modify_tp"两发。实盘当场被打回：
+        09:08:08 同一秒里 order_send(开仓)=10009、modify_sl=10009、
+        modify_tp=**10024 Too many trade requests**。这个账户（Exness）每秒
+        只放两个交易请求，第三个一律拒。两发不是"多一次往返"，在这个券商上
+        是**必然失败的第三条腿**——TP 一次都没挂上过。
+        合成一条 `TRADE_ACTION_SLTP`：请求数回到「开仓 + 改单」两条，和
+        2026-11-09 以来一直稳定的挂止损模式完全一致。
+
+        为什么不干脆塞进开仓请求的 `tp` 字段：滑点让预填价偏离真实成交价，
+        偏到近的一侧就是白送一次被扫；更糟的是这条线一旦被券商判非法
+        （10016），**整笔开仓都会被拒**。成交后按真实成交价发 SLTP 没有这个
+        问题。`_attach_entry_sl` 里有同样的推导。
+
+        `tp=None` 时保持持仓原有的 tp（保本止损那条路用不到这个函数，
+        它有自己的 modify_sl）。**sl=0 的含义是「没有止损」**，所以这个函数
+        一律要求调用方把 SL 给全，不接受"顺手清掉止损"的用法。
+
+        两条铁律同 modify_sl：读持仓与发请求成对（中间插别的调用 ticket 会串）；
+        拿不到锁返回 busy 不排队。
+        """
+        self._ensure_symbol()
+        positions = mt5lock.call_quick(mt5.positions_get, ticket=ticket,
+                                       timeout=0.5, default=None)
+        if positions is None:
+            return {"ok": False, "busy": True, "reason": "终端忙，这一格改单作废"}
+        if not positions:
+            return {"ok": False, "reason": "持仓不存在"}
+        pos = positions[0]
+        info = mt5lock.call_quick(mt5.symbol_info, pos.symbol, timeout=0.5)
+        tick = mt5lock.call_quick(mt5.symbol_info_tick, pos.symbol, timeout=0.5)
+        if tick is None:
+            return {"ok": False, "busy": True, "reason": "拿不到报价，这一格改单作废"}
+
+        digits = int(getattr(info, "digits", 3) or 3) if info is not None else 3
+        price_sl = round(float(sl), digits)
+        price_tp = round(float(tp), digits) if tp else 0.0
+        is_buy = pos.type == mt5.POSITION_TYPE_BUY
+        # 方向自检（同 modify_sl）：挂到错侧的线必被 10016 拒，本地先拦。
+        # 顺带解释为什么 TP 也要拦：开仓后几秒内价格就跑到 3.25 之外的概率
+        # 很低，真发生了也只是这一笔没有硬止盈，退回程序轮询。
+        if is_buy:
+            if price_sl >= tick.bid:
+                return {"ok": False, "skipped": "sl_wrong_side",
+                        "reason": "止损价不低于现价"}
+            if price_tp and price_tp <= tick.bid:
+                return {"ok": False, "skipped": "tp_reached",
+                        "reason": "止盈价不高于现价（价格已经到线）"}
+        else:
+            if price_sl <= tick.ask:
+                return {"ok": False, "skipped": "sl_wrong_side",
+                        "reason": "止损价不高于现价"}
+            if price_tp and price_tp >= tick.ask:
+                return {"ok": False, "skipped": "tp_reached",
+                        "reason": "止盈价不低于现价（价格已经到线）"}
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": pos.symbol,
+            "sl": price_sl,
+            # tp=None 时原样带回持仓上的 tp：SLTP 请求里 tp=0 的含义是
+            # 「没有止盈」，漏传会把已有的止盈清掉。
+            "tp": price_tp or float(getattr(pos, "tp", 0.0) or 0.0),
+            "magic": self.cfg.magic,
+        }
+        if self.cfg.dry_run:
+            self._record("dry_run_modify_protect", request)
+            return {"ok": True, "dry_run": True, "request": request,
+                    "price": price_sl, "tp": float(request["tp"])}
+
+        result = mt5lock.call_quick(mt5.order_send, request, timeout=1.0)
+        if result is None:
+            return {"ok": False, "busy": True, "reason": "终端忙，这一格改单作废"}
+        rc = getattr(result, "retcode", None)
+        ok = rc == mt5.TRADE_RETCODE_DONE
+        self._record("sltp_modify_sent" if ok else "sltp_modify_failed",
+                     {"ticket": ticket, "sl": price_sl, "tp": request["tp"],
+                      "retcode": rc, "comment": getattr(result, "comment", None)})
+        return {"ok": ok, "retcode": rc,
+                "comment": getattr(result, "comment", None),
+                "price": price_sl, "tp": float(request["tp"])}
+
     # ---------------------------------------------------------- 记录
 
     def _record(self, kind: str, payload: dict) -> None:

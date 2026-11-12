@@ -304,7 +304,7 @@ function renderAutoTrade(a) {
   // 两条理由合成一列的两行，各自带 title 全文。
   const SRC = {
     llm: '模型', fallback: '规则兜底', external: '终端外平仓', panel: '面板',
-    sl: '硬止损', be: '券商保本', be_local: '程序保本',
+    sl: '硬止损', be: '券商保本', be_local: '程序保本', tp: '券商止盈',
   };
   const badgeCls = k => (k === 'open' ? 'open'
     : k === 'close' ? 'close'

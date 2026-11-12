@@ -190,9 +190,14 @@ function renderPos(a, p) {
     // 否则用户看到「保本未触发」会以为这笔完全没有券商端保护。
     // be_ok 之后 sl_broker 会同步成保本价，那时不再重复显示。
     const sbPx = p ? Number(p.sl_broker || 0) : 0;
-    const sbNote = sbPx > 0
+    // 券商端止盈（2026-11-11）：只有非趋势单有这条线（震荡单开仓即挂
+    // tp_min_usd 价距）。挂上了就把线在哪写出来——用户看到「已过门槛」时
+    // 需要知道是"到线就自动走"还是"还得等模型点头"，这两件事完全不同。
+    const tbPx = p ? Number(p.tp_broker || 0) : 0;
+    const sbNote = (sbPx > 0
       ? ' · 券商端 SL ' + fmt(sbPx, 3)
-      : (p && p.sl_err ? ' · 券商端未挂（' + String(p.sl_err).slice(0, 14) + '）' : '');
+      : (p && p.sl_err ? ' · 券商端未挂（' + String(p.sl_err).slice(0, 14) + '）' : ''))
+      + (tbPx > 0 ? ' · 券商端 TP ' + fmt(tbPx, 3) : '');
     let bcls = 'off', btxt = '保本止损', bnote = '';
     if (!beCfg) {
       btxt = '保本止损已关闭'; bnote = '设置舱 → 出场闸门可开';
