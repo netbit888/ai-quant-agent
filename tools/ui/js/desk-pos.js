@@ -75,6 +75,42 @@ function renderPos(a, p) {
     setV('posPeak', '—'); setV('posHold', '—');
   }
 
+  // ---- 脉冲浮盈（2026-11-13）----
+  // 趋势单的峰值折成「几倍 ATR」。阈值跟后端 `_mark_burst` 严格对齐：
+  // 3 倍开始记速度（t3）、5 倍算脉冲（t5，辅助模式弹窗 / 全自动抬锁利线）。
+  // 三态颜色也照这个分：灰=还没到 3 倍、黄=到过 3 倍、亮黄实心=脉冲成立。
+  //
+  // 换算只用开仓时锁定的 `atr_pnl`（1 个 ATR 折多少浮盈），**不在前端用 atr
+  // 现算**——那会和后端变成两套口径，用户看到的是同一笔单的两个数。
+  // 旧持仓没有 atr_pnl（升级前开的）：整块隐藏，宁可不显示也不猜。
+  const burstEl = $('posBurst');
+  if (burstEl) {
+    const unit = (p && p.atr_pnl) ? Number(p.atr_pnl) : 0;
+    if (!p || String(plan) !== 'trend' || !(unit > 0)) {
+      burstEl.classList.add('hidden');
+      burstEl.textContent = '';
+      burstEl.title = '';
+    } else {
+      const mult = (peak == null ? 0 : peak) / unit;
+      const t3 = (p.t3 == null) ? null : Number(p.t3);
+      const t5 = (p.t5 == null) ? null : Number(p.t5);
+      const hit = t5 != null || mult >= 5;
+      const near = !hit && (t3 != null || mult >= 3);
+      burstEl.classList.remove('hidden');
+      burstEl.className = 'pos-burst' + (hit ? ' hit' : (near ? ' near' : ''));
+      burstEl.textContent = (hit ? '脉冲 ' : '') + fmt(mult, 1) + '×ATR';
+      // 头行只放得下「几倍」，剩下的（速度、模式、锁利线在哪）进 title。
+      burstEl.title = '峰值 ' + fmt(mult, 2) + ' 倍 ATR'
+        + (t3 == null ? ' · 还没到 3 倍' : ' · 3 倍用了 ' + fmt(t3, 1) + ' 分')
+        + (t5 == null ? ' · 5 倍算脉冲' : ' · 5 倍用了 ' + fmt(t5, 1) + ' 分')
+        + '\n' + (p.assist
+          ? '辅助模式：只弹窗提醒，程序既不平仓也不抬止损'
+          : (p.lock_ok
+            ? '全自动：锁利线已挂券商端 SL ' + fmt(Number(p.lock_sl || 0), 3)
+            : '全自动：脉冲成立后把券商端 SL 抬到「峰值 − 1.5 ATR」'));
+    }
+  }
+
   // ---- 浮盈刻度尺 ----
   const rBe = $('rBe'), rTp = $('rTp'), rFill = $('rFill'), rPeak = $('rPeak');
   const rulerV = $('rulerV'), rulerLb = $('rulerLb');

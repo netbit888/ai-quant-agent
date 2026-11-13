@@ -249,6 +249,19 @@
     white-space: nowrap;
   }
   .pos-plan.trend { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
+  /* 脉冲浮盈（2026-11-13）：趋势单峰值折成几倍 ATR。三态与后端 `_mark_burst`
+     对齐——<3 倍只灰着报个数、到 3 倍转黄（速度开始被记录）、到 5 倍算脉冲。
+     只占头行右端，**不加行**：1120×720 下面板已经贴底，多一行会被截断。 */
+  .pos-burst {
+    font-size: var(--fs-1); padding: 1px 6px; border-radius: var(--r-xs);
+    border: 1px solid var(--border); color: var(--dim); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .pos-burst.near { color: var(--gold-lit); border-color: rgba(240,180,41,.32); }
+  .pos-burst.hit {
+    color: var(--gold-lit); border-color: rgba(240,180,41,.5);
+    background: rgba(240,180,41,.1); font-weight: 600;
+  }
   /* 四个数字排一行（原来 2×2 要两行 78px）。上下分栏之后面板是整幅宽度，
      再用 space-between 会把四个数拉到两个极端（中间空一米），
      改成左对齐 + 固定间距。 */

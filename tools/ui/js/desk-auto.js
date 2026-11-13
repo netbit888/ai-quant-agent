@@ -322,8 +322,19 @@ function renderAutoTrade(a) {
     const dirTxt = r.direction ? (r.direction > 0 ? '多' : '空') : '—';
     const dirCls = r.direction > 0 ? 'pos-long' : (r.direction < 0 ? 'pos-short' : '');
     const pnl = r.pnl == null ? '—' : money(r.pnl);
+    // 脉冲浮盈（2026-11-13）：平仓行带 atr_peak / t5 / burst。峰值后面挂一个
+    // ATR 倍数，脉冲成立的再加「脉冲」标记——回看流水时不用再跑
+    // tools/burst_report 才能认出哪几笔是「3 分钟走满 5 ATR」的那一类。
+    // 老单（v1.5.27 之前平的）没有这几个字段，整段自动消失。
+    const atrPeak = (r.atr_peak == null) ? null : Number(r.atr_peak);
+    const burstTag = (r.burst && atrPeak != null)
+      ? `<b class="burst-tag" title="3 分钟内走满 5 个 ATR${
+        r.t5 == null ? '' : '（用了 ' + fmt(r.t5, 1) + ' 分钟）'}">脉冲</b>`
+      : '';
     const peakLine = (r.peak_pnl == null) ? ''
-      : `<div class="mini" style="opacity:.7">峰 ${money(r.peak_pnl)}</div>`;
+      : `<div class="mini" style="opacity:.7">峰 ${money(r.peak_pnl)}`
+        + (atrPeak == null ? '' : ' · ' + fmt(atrPeak, 1) + '×')
+        + burstTag + '</div>';
     // p_up 微条：中轴 0.50，往哪边偏就往哪边填。数字保留（要能对上账本），
     // 但「偏了多少」交给条——读 0.62 再心算减 0.5 是每轮都要做一遍的负担。
     let putCell = '<span class="mini">—</span>';
