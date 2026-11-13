@@ -954,12 +954,14 @@ class TestMT5FastFail(unittest.TestCase):
     """
 
     def setUp(self):
-        from live import journal
+        # 2026-11-13 连接层从 journal 下沉到 mt5conn：状态和函数都在那边，
+        # 打桩也必须打在那边（打在 journal 上只会改名，不会生效）。
+        from live import mt5conn
 
-        self.journal = journal
-        self._saved = (journal._connected, journal._conn_failed_at)
-        journal._connected = False
-        journal._conn_failed_at = 0.0
+        self.journal = mt5conn
+        self._saved = (mt5conn._connected, mt5conn._conn_failed_at)
+        mt5conn._connected = False
+        mt5conn._conn_failed_at = 0.0
 
     def tearDown(self):
         self.journal._connected, self.journal._conn_failed_at = self._saved
@@ -1026,66 +1028,70 @@ class TestTerminalAutostart(unittest.TestCase):
     """
 
     def setUp(self):
-        from live import journal
+        # 两个对象要分清：`journal` 提供 collect()（被调用方），
+        # `mt5conn` 提供连接状态和闸门（被打桩方）。2026-11-13 之前是同一个模块，
+        # 所以这些用例里 `self.journal.X` 曾经两用。
+        from live import journal, mt5conn
 
         self.journal = journal
-        # 这个类测的就是 collect → _ensure 的启动闸门，必须用真实实现：
-        # tests/_stubs 默认把 _ensure 断链了（防测试真连终端），这里换回来。
+        self.conn = mt5conn
+        # 这个类测的就是 collect → ensure 的启动闸门，必须用真实实现：
+        # tests/_stubs 默认把 ensure 断链了（防测试真连终端），这里换回来。
         # 每个用例都 mock 了 _terminal_alive / _start_terminal / ensure_terminal，
         # 所以换回来也不会真的去 initialize。
-        self._ensure_patch = mock.patch.object(journal, "_ensure",
-                                               journal._ensure_real)
+        self._ensure_patch = mock.patch.object(mt5conn, "ensure",
+                                               mt5conn._ensure_real)
         self._ensure_patch.start()
         self.addCleanup(self._ensure_patch.stop)
         self._saved = {
-            "_connected": journal._connected,
-            "_conn_failed_at": journal._conn_failed_at,
-            "_launch_failed_at": journal._launch_failed_at,
-            "_last_launch_ok": journal._last_launch_ok,
+            "_connected": mt5conn._connected,
+            "_conn_failed_at": mt5conn._conn_failed_at,
+            "_launch_failed_at": mt5conn._launch_failed_at,
+            "_last_launch_ok": mt5conn._last_launch_ok,
         }
-        journal._connected = False
-        journal._conn_failed_at = 0.0
-        journal._launch_failed_at = 0.0
-        journal._last_launch_ok = None
+        mt5conn._connected = False
+        mt5conn._conn_failed_at = 0.0
+        mt5conn._launch_failed_at = 0.0
+        mt5conn._last_launch_ok = None
 
     def tearDown(self):
         for k, v in self._saved.items():
-            setattr(self.journal, k, v)
+            setattr(self.conn, k, v)
 
     def test_no_launch_when_terminal_already_running(self):
-        with mock.patch.object(self.journal, "_terminal_alive", return_value=True), \
-             mock.patch.object(self.journal, "_start_terminal") as start:
-            self.assertTrue(self.journal.ensure_terminal())
+        with mock.patch.object(self.conn, "_terminal_alive", return_value=True), \
+             mock.patch.object(self.conn, "_start_terminal") as start:
+            self.assertTrue(self.conn.ensure_terminal())
         start.assert_not_called()
 
     def test_start_terminal_returns_false_without_exe(self):
-        with mock.patch.object(self.journal, "terminal_path", return_value=None):
-            self.assertFalse(self.journal._start_terminal())
+        with mock.patch.object(self.conn, "terminal_path", return_value=None):
+            self.assertFalse(self.conn._start_terminal())
 
     def test_start_terminal_swallows_popen_errors(self):
-        with mock.patch.object(self.journal, "terminal_path", return_value=Path("C:/nope/terminal64.exe")), \
+        with mock.patch.object(self.conn, "terminal_path", return_value=Path("C:/nope/terminal64.exe")), \
              mock.patch("subprocess.Popen", side_effect=OSError("boom")):
-            self.assertFalse(self.journal._start_terminal())
+            self.assertFalse(self.conn._start_terminal())
 
     def test_launch_failure_is_remembered(self):
-        with mock.patch.object(self.journal, "_terminal_alive", return_value=False), \
-             mock.patch.object(self.journal, "_start_terminal", return_value=False) as start:
-            self.assertFalse(self.journal.ensure_terminal(timeout=0.1))
-            self.assertFalse(self.journal.ensure_terminal(timeout=0.1))   # 第二次直接短路
+        with mock.patch.object(self.conn, "_terminal_alive", return_value=False), \
+             mock.patch.object(self.conn, "_start_terminal", return_value=False) as start:
+            self.assertFalse(self.conn.ensure_terminal(timeout=0.1))
+            self.assertFalse(self.conn.ensure_terminal(timeout=0.1))   # 第二次直接短路
         self.assertEqual(start.call_count, 1)
 
     def test_collect_refuses_to_launch_unless_allowed(self):
         """HTTP 路径永远不许触发启动——那会阻塞，页面会假死。"""
-        with mock.patch.object(self.journal, "_terminal_alive", return_value=False), \
-             mock.patch.object(self.journal, "_start_terminal") as start:
+        with mock.patch.object(self.conn, "_terminal_alive", return_value=False), \
+             mock.patch.object(self.conn, "_start_terminal") as start:
             info = self.journal.collect(force=True)
         self.assertFalse(info["ok"])
         self.assertIn("终端未运行", info["error"])
         start.assert_not_called()
 
     def test_collect_can_launch_when_explicitly_allowed(self):
-        with mock.patch.object(self.journal, "_terminal_alive", return_value=False), \
-             mock.patch.object(self.journal, "ensure_terminal", return_value=False) as ensure:
+        with mock.patch.object(self.conn, "_terminal_alive", return_value=False), \
+             mock.patch.object(self.conn, "ensure_terminal", return_value=False) as ensure:
             info = self.journal.collect(force=True, allow_launch=True)
         ensure.assert_called_once()
         self.assertFalse(info["ok"])

@@ -7,7 +7,8 @@
 测试时重定向到临时目录）。**不走 `appdirs.data_dir()` 的硬编码**——否则
 `tests/_stubs.py` 的 `paths.set_root(tmpdir)` 不会把它也带过去。
 
-autotrade 只通过这里的 `active_file()` 拿路径（`lessons_path()` 唯一出口）。
+`live/lessons.py` 只通过这里的 `active_file()` 拿路径（那边 `lessons_path()`
+是唯一出口）。本模块**不 import 任何业务模块**，只依赖 `live.paths` 和 `live.jsonl`。
 **没有缓存**——每次决策和每秒轮询都完整读盘，所以切换包即刻生效。
 """
 
@@ -69,7 +70,7 @@ def active_id() -> str | None:
 
 
 def active_file() -> Path:
-    """`autotrade.lessons_path()` 唯一调用这里。
+    """`live.lessons.lessons_path()` 唯一调用这里。
 
     没有激活包时返回一个**不存在**的路径 `_scratch_.jsonl`：
     `lesson_rows()` 看到不存在会返回 `[]`（注入提示词时就当没经验）；
@@ -160,10 +161,10 @@ def create_empty(name: str) -> dict:
 def import_from(src_path: Path, name: str) -> dict:
     """从指定 .jsonl 文件导入成新包。
 
-    复用 `autotrade._unwrap_lesson` 拆历史遗留的 `{"answer":...}` 包裹，
+    复用 `live.jsonl.unwrap_lesson` 拆历史遗留的 `{"answer":...}` 包裹，
     dedupe 用 `(ts, ticket, lesson)` 三元组（和 `migrate_lessons` 一致）。
     """
-    from live import autotrade
+    from live.jsonl import unwrap_lesson
 
     rows = []
     seen: set = set()
@@ -185,7 +186,7 @@ def import_from(src_path: Path, name: str) -> dict:
             if not isinstance(r, dict):
                 bad += 1
                 continue
-            r["lesson"] = autotrade._unwrap_lesson(r.get("lesson") or "")
+            r["lesson"] = unwrap_lesson(r.get("lesson") or "")
             key = (r.get("ts"), r.get("ticket"), r["lesson"])
             if key in seen:
                 continue

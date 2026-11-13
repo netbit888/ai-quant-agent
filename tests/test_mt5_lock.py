@@ -132,9 +132,9 @@ class TestLockIsReentrant(unittest.TestCase):
 class TestBridgeUsesLock(_LockTestBase):
     """桥接层的取数也要走同一个入口，不能自己裸调。
 
-    `get_rates_live` 是 `from live.journal import _mt5` 拿连接的，所以在
-    `bridge` 上打补丁没用，必须补 `journal._mt5`（顺带保证这条用例
-    永远不碰真终端）。
+    `get_rates_live` 是 `from live import mt5conn` 拿连接的（2026-11-13 连接层
+    从 journal 下沉到 mt5conn），所以在 `bridge` 上打补丁没用，必须补
+    `mt5conn._mt5`（顺带保证这条用例永远不碰真终端）。
     """
 
     def test_bridge_rates_goes_through_lock(self):
@@ -151,7 +151,11 @@ class TestBridgeUsesLock(_LockTestBase):
             def last_error(self):
                 return (0, "fake")
 
-        journal._mt5 = lambda allow_launch=False: _Conn()  # type: ignore[assignment]
+        from live import mt5conn
+
+        orig_conn = mt5conn._mt5
+        self.addCleanup(setattr, mt5conn, "_mt5", orig_conn)
+        mt5conn._mt5 = lambda allow_launch=False: _Conn()  # type: ignore[assignment]
         orig_ensure = bridge.ensure_symbol
         self.addCleanup(setattr, bridge, "ensure_symbol", orig_ensure)
         bridge.ensure_symbol = lambda symbol: None        # 这条用例只看 copy_rates 入口

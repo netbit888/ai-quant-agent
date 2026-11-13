@@ -78,8 +78,8 @@ def disable_live_mt5() -> None:
 
     为什么
     ------
-    2026-10-29 实测：跑完一个 tick 级用例后 ``journal._connected`` 从 False
-    变成 True——测试真的对本机 MT5 终端调了 ``initialize``。后果有三个：
+    2026-10-29 实测：跑完一个 tick 级用例后连接状态从 False 变成 True——
+    测试真的对本机 MT5 终端调了 ``initialize``。后果有三个：
 
     1. **慢**：456 个 test_autotrade_* 用例，连着终端要 8.34s，断链后 4.27s。
        单用例 profile 显示时间全花在 ``_symbol_contract``（symbol_info）和
@@ -88,13 +88,15 @@ def disable_live_mt5() -> None:
        不一样；有 4 个用例甚至会因为读不到持仓而换一条分支直接失败。
     3. **有副作用**：连的是真实 demo 账户的连接，和正在跑的面板抢同一把锁。
 
-    做法：把 ``live.journal._ensure`` 换成一个立刻抛错的函数。所有 MT5 调用
-    都经 ``_mt5() -> _ensure()``，所以这一处就够。抛错不会让用例变红——生产
+    做法：把 ``live.mt5conn.ensure`` 换成一个立刻抛错的函数。所有 MT5 调用
+    都经 ``_mt5() -> ensure()``，所以这一处就够。（2026-11-13 连接层从
+    `journal` 下沉到 `mt5conn`，打桩点跟着搬——**只打一处**这件事没变，
+    因为 `journal._mt5` 就是 `mt5conn._mt5` 本身，不是副本。）抛错不会让用例变红——生产
     代码本来就会捕获它并走"这一轮没行情"的兜底分支，那正是没装终端时的真实
     行为，反而比"假装连上了"更贴近要验的东西（各测试自己 mock 需要的数据）。
 
     少数**专门测连接逻辑**的用例（``test_live`` 里那几个）要真实实现，改用
-    ``journal._ensure_real``——它们自己 mock 了 ``_terminal_alive`` 和
+    ``mt5conn._ensure_real``——它们自己 mock 了 ``_terminal_alive`` 和
     ``MetaTrader5.initialize``，不会真的碰网络。
 
     ``AQA_ALLOW_MT5=1`` 可以关掉断链（排查"是不是断链导致的"时用）。
@@ -103,13 +105,13 @@ def disable_live_mt5() -> None:
     逃生门一开这 8 个用例反而 AttributeError（2026-10-29 核查时发现）。
     """
     try:
-        from live import journal
+        from live import mt5conn
     except Exception:  # noqa: BLE001
         return
-    if getattr(journal, "_ensure_real", None) is not None:
+    if getattr(mt5conn, "_ensure_real", None) is not None:
         return
 
-    journal._ensure_real = journal._ensure
+    mt5conn._ensure_real = mt5conn.ensure
 
     if os.environ.get("AQA_ALLOW_MT5"):
         return
@@ -117,11 +119,11 @@ def disable_live_mt5() -> None:
     def _refuse(allow_launch: bool = False):  # noqa: ARG001
         raise RuntimeError(
             "测试环境已禁用真实 MT5 连接（tests/_stubs.disable_live_mt5）；"
-            "需要真实实现的用例请调 journal._ensure_real"
+            "需要真实实现的用例请调 mt5conn._ensure_real"
         )
 
-    journal._ensure = _refuse
-    journal._connected = False
+    mt5conn.ensure = _refuse
+    mt5conn._connected = False
 
 
 def install_missing_stubs() -> None:

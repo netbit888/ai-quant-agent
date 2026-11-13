@@ -322,6 +322,26 @@ def ma_line(rows: list[dict], digits: int = 3, period: int = MA_PERIOD) -> str:
             f" ｜ 当前收盘 {m['last']:.{d}f} {side}{rel}")
 
 
+def atr_of(rows: list[dict]) -> tuple[float, int]:
+    """给定窗口的 ATR（价格单位）与 TR 个数。**窗口就是窗口，不再截取。**
+
+    `_atr()` 面向决策：只取最后 `VISIBLE_BARS` 根（模型能看见的那一段）。
+    回放工具要的却是「入场前第 N 根为止的 N 根」，窗口由调用方划好。
+    两者共用同一份 TR 公式——以前 `tools/replay_exit.py::_atr_at` 手抄了一遍，
+    注释写着"必须和 live 一模一样"，实际靠人肉同步：改一处忘一处就是回测与
+    实盘的 k 错位，而且没有任何测试能发现。
+    """
+    if len(rows) < 2:
+        return 0.0, 0
+    trs = []
+    for i in range(1, len(rows)):
+        high = float(rows[i].get("high") or 0.0)
+        low = float(rows[i].get("low") or 0.0)
+        prev_close = float(rows[i - 1].get("close") or 0.0)
+        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    return (sum(trs) / len(trs) if trs else 0.0), len(trs)
+
+
 def _atr(rows: list[dict]) -> dict:
     """窗口内的真实波幅均值（ATR），以及归一化后的振幅。只用可见 14 根。
 
@@ -342,19 +362,13 @@ def _atr(rows: list[dict]) -> dict:
     w = visible_bars(rows)
     if len(w) < 2:
         return {"ok": False, "atr": 0.0, "n_tr": 0, "span": 0.0, "span_atr": 0.0}
-    trs = []
-    for i in range(1, len(w)):
-        high = float(w[i].get("high") or 0.0)
-        low = float(w[i].get("low") or 0.0)
-        prev_close = float(w[i - 1].get("close") or 0.0)
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    atr = sum(trs) / len(trs) if trs else 0.0
+    atr, n_tr = atr_of(w)
     highs = [float(r.get("high") or 0.0) for r in w]
     lows = [float(r.get("low") or 0.0) for r in w]
     span = (max(highs) - min(lows)) if highs else 0.0
     # 比值上限约等于根数（每根都创新高/新低才能到）。分母为 0 时给 0，不编数。
     ratio = (span / atr) if atr > 0 else 0.0
-    return {"ok": True, "atr": atr, "n_tr": len(trs), "span": span,
+    return {"ok": True, "atr": atr, "n_tr": n_tr, "span": span,
             "span_atr": ratio}
 
 

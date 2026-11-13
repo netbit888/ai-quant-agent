@@ -109,10 +109,10 @@ def get_rates_live(symbol: str, timeframe: str = "M1", count: int = 120) -> list
     下一轮报价直接拿不到，日志里只会看到「拿不到报价」——
     看起来像行情断了，实际上是自己的代码把连接掐了。
     """
-    from live.journal import _mt5  # 借用账本模块的连接保活逻辑
+    from live import mt5conn  # 连接保活：直接拿连接层，不再绕道账本模块
 
     tf = _timeframe(timeframe)
-    conn = _mt5()          # 未连接时会 initialize，已连接就复用
+    conn = mt5conn._mt5()  # 未连接时会 initialize，已连接就复用
     ensure_symbol(symbol)
     rates = mt5lock.call(conn.copy_rates_from_pos, symbol, tf, 0, count)
     if rates is None or len(rates) == 0:
@@ -140,9 +140,9 @@ def get_ticks_live(symbol: str, from_ts: int, to_ts: int) -> list[dict]:
     """
     from datetime import datetime, timezone
 
-    from live.journal import _mt5
+    from live import mt5conn
 
-    conn = _mt5()
+    conn = mt5conn._mt5()
     ensure_symbol(symbol)
     flags = getattr(conn, "COPY_TICKS_ALL", 0)
 

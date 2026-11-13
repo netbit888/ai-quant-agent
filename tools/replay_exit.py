@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+from live.ta import atr_of
+
 import argparse
 import json
 import statistics as st
@@ -125,9 +127,9 @@ def load_bars(symbol: str, ts_from: int, ts_to: int) -> list[dict]:
 def _atr_at(bars: list[dict], end_idx: int, n: int = 14) -> float:
     """入场前 n 根的真实波幅均值（**价格**单位，不是美元）。
 
-    口径必须和 live 的 `autotrade._atr` 一模一样：14 根产出 13 个 TR，
-    `TR = max(high-low, |high-prev_close|, |low-prev_close|)`，简单均值。
-    两套算法各写一份，算出来的 k 用到生产上就是错位。
+    口径**不再各写一份**：TR 公式在 `live.ta.atr_of()`，和实盘 `_atr()` 共用
+    同一个实现（2026-11-13 之前这里是手抄的，注释写着"必须一模一样"，
+    实际靠人肉同步——改一处忘一处就是回测与实盘的 k 错位，还没有测试能发现）。
 
     为什么用 K 线现算、不读日志里的 feat.atr：日志 feat 只有 30/259 笔
     （2026-10-26 21:39 才开始落盘），10-23 那 191 笔**全无**。走日志等于
@@ -140,12 +142,7 @@ def _atr_at(bars: list[dict], end_idx: int, n: int = 14) -> float:
     w = bars[lo:end_idx]
     if len(w) < 2:
         return 0.0
-    trs = []
-    for i in range(1, len(w)):
-        h, l = float(w[i]["high"]), float(w[i]["low"])
-        pc = float(w[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
+    return atr_of(w)[0]
 
 
 def replay_one(bars: list[dict], start_idx: int, price_open: float, direction: int,
