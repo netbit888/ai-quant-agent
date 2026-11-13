@@ -142,9 +142,11 @@ def usd_rate(currency: str | None) -> float:
         return 0.01
     # 未知币种静默按 1.0 会把 100 倍误差藏起来，所以留一条降级记录。
     try:
-        from live.autotrade import _degrade  # 延迟导入：autotrade 也 import 本模块
+        # 2026-11-13：`degrade()` 下沉到 live/units.py，本模块不再需要
+        # 反向导入 autotrade——journal ↔ autotrade 那条循环依赖到此消失。
+        from live.units import degrade
 
-        _degrade("currency", "", f"未识别的账户币种 {c}，按 1:1 USD 处理")
+        degrade("currency", "", f"未识别的账户币种 {c}，按 1:1 USD 处理")
     except Exception:  # noqa: BLE001
         pass
     return 1.0

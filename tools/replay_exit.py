@@ -28,8 +28,6 @@
 
 from __future__ import annotations
 
-from live.ta import atr_of
-
 import argparse
 import json
 import statistics as st
@@ -40,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from backtest.symbols import SYMBOLS  # noqa: E402
+from live.ta import atr_of  # noqa: E402
 
 DEFAULT_SYMBOL = "XAUUSDm"
 

@@ -141,5 +141,155 @@ class TestBreakChainStillArmed(unittest.TestCase):
                         "断链时也要保留真实实现，否则专门测连接的用例没法还原")
 
 
+# --------------------------------------------------------------------------
+# 第二轮搬迁（2026-11-13 下午）：storage / market / report / bootstrap / units
+#
+# 这五个模块的共同点是「都被 autotrade 重新导出」——它们之间谁依赖谁，
+# 决定了 autotrade 能不能继续缩。特别地：
+#
+#   units → storage        （降级要写流水）
+#   bootstrap → storage / market / cfg
+#   market → cfg / mt5conn / journal（读汇率与持仓）
+#   storage → cfg          （只为 `_log_signal` 的类型注解，纯层不反向）
+#
+# 方向一旦反过来（比如 storage 为了省事 `from live.market import ...`），
+# 立刻回到 autotrade 那种「谁都能调谁」的局面。
+# --------------------------------------------------------------------------
+
+FORBIDDEN_IN_NEW_LAYERS = ("live.autotrade",)
+
+
+class TestNewLayersDoNotImportAutotrade(unittest.TestCase):
+    """五个新模块谁都不许反向依赖 autotrade——那会让环立刻长回来。"""
+
+    LAYERS = ("storage.py", "market.py", "report.py", "bootstrap.py",
+              "units.py")
+
+    def test_no_autotrade_dependency(self):
+        bad = []
+        for name in self.LAYERS:
+            for ln, mod in _imports(ROOT / "live" / name):
+                if mod.startswith(FORBIDDEN_IN_NEW_LAYERS):
+                    bad.append(f"{name}:L{ln} {mod}")
+        self.assertEqual([], bad,
+                         "新层反向依赖了 autotrade：\n" + "\n".join(bad))
+
+    def test_journal_no_longer_imports_autotrade(self):
+        """**这条是整个第二轮的成果**。
+
+        `journal` 曾经为了写一行 `kind="degrade"` 的流水去
+        `from live.autotrade import _degrade`，把 import 藏在函数体里绕开
+        循环。`degrade()` 下沉到 `units.py` 之后这条边应该彻底消失——
+        如果它回来了，说明有人又在账本里直接调用交易层的函数。
+        """
+        bad = [f"L{ln} {m}" for ln, m in _imports(ROOT / "live" / "journal.py")
+               if m.startswith("live.autotrade")]
+        self.assertEqual([], bad,
+                         "journal 又开始依赖 autotrade 了（环回来了）：\n"
+                         + "\n".join(bad))
+
+
+class TestStorageLayer(unittest.TestCase):
+    def test_only_leaf_dependencies(self):
+        allowed = {"live.paths", "live.cfg"}          # cfg 是纯层，只为注解
+        bad = [f"L{ln} {m}" for ln, m in _imports(ROOT / "live" / "storage.py")
+               if m.split(".")[0] in BUSINESS
+               and not any(m == a or m.startswith(a + ".") for a in allowed)]
+        self.assertEqual([], bad,
+                         "storage 只该依赖 paths / cfg：\n" + "\n".join(bad))
+
+    def test_reexported_by_autotrade(self):
+        from live import autotrade, storage
+
+        for name in ("read_log", "load_state", "save_state", "append_log",
+                     "_empty_state", "log_path", "state_path", "_log_signal",
+                     "cache_stats", "_tail_lines"):
+            self.assertIs(getattr(autotrade, name), getattr(storage, name),
+                          f"autotrade.{name} 不是 storage 里的同一个对象")
+
+    def test_empty_state_is_the_only_schema(self):
+        """state 的键集合只有一个定义处。多一份就会缺键/多键而没人发现。"""
+        from live.storage import _empty_state
+
+        keys = set(_empty_state())
+        self.assertGreaterEqual(len(keys), 25, "state 键数异常，schema 被改过？")
+        for must in ("running", "position", "last_decision", "pending_reviews",
+                     "cfg", "owner", "pid"):
+            self.assertIn(must, keys)
+
+
+class TestMarketLayer(unittest.TestCase):
+    def test_no_autotrade_or_bootstrap(self):
+        bad = [f"L{ln} {m}" for ln, m in _imports(ROOT / "live" / "market.py")
+               if m.startswith(("live.autotrade", "live.bootstrap",
+                                "live.storage", "live.report"))]
+        self.assertEqual([], bad,
+                         "market 是取数层，不该依赖上层：\n" + "\n".join(bad))
+
+    def test_caches_are_shared_not_copied(self):
+        """缓存必须是同一个 dict。复制一份 = 两份 TTL 各算各的。"""
+        from live import autotrade, market
+
+        for name in ("_CONTRACT_CACHE", "_ACCT_CUR", "_ACCT_F"):
+            self.assertIs(getattr(autotrade, name), getattr(market, name),
+                          f"{name} 被复制了")
+
+    def test_price_dist_uses_shared_contract_cache(self):
+        """价距换算走 `_symbol_contract`，不许另写一套合约规格。"""
+        import inspect
+        from live import market
+
+        src = inspect.getsource(market.price_dist_of)
+        self.assertIn("_symbol_contract", src)
+
+
+class TestReportAndBootstrap(unittest.TestCase):
+    def test_report_is_pure(self):
+        # backtest.symbols 是静态符号表（point/contract/digits），不是实盘逻辑，
+        # 读它不构成对回测引擎的耦合。
+        allowed = {"live.cfg", "live.ta", "backtest.symbols"}
+        bad = [f"L{ln} {m}" for ln, m in _imports(ROOT / "live" / "report.py")
+               if m.split(".")[0] in BUSINESS
+               and not any(m == a or m.startswith(a + ".") for a in allowed)]
+        self.assertEqual([], bad,
+                         "report 只该依赖 cfg / ta：\n" + "\n".join(bad))
+
+    def test_symbol_options_shape(self):
+        from live.report import symbol_options
+
+        rows = symbol_options()
+        self.assertTrue(rows, "下拉框数据不能为空")
+        for r in rows:
+            for k in ("symbol", "label", "point", "contract"):
+                self.assertIn(k, r)
+
+    def test_validate_cfg_still_rejects_bad_lots(self):
+        """搬迁不许把校验弄丢：手数 0.013 必须被拒（券商会静默改成 0.01）。"""
+        from live.bootstrap import validate_cfg
+        from live.cfg import Cfg
+
+        issues = validate_cfg(Cfg(lots=0.013))
+        self.assertTrue(any("手数" in i for i in issues),
+                        f"非法手数没被拦：{issues}")
+
+
+class TestUnitsLayer(unittest.TestCase):
+    def test_units_depends_only_on_storage(self):
+        # 同上：symbols 是静态表。units 的全部运行时依赖只有 storage。
+        allowed = ("live.storage", "backtest.symbols")
+        bad = [f"L{ln} {m}" for ln, m in _imports(ROOT / "live" / "units.py")
+               if m.split(".")[0] in BUSINESS
+               and not any(m == a or m.startswith(a + ".") for a in allowed)]
+        self.assertEqual([], bad,
+                         "units 只该依赖 storage：\n" + "\n".join(bad))
+
+    def test_digits_and_px_agree(self):
+        from live import units
+
+        self.assertEqual(units.px("XAUUSDm", 4000.123456), "4000.123")
+        self.assertEqual(units.digits("XAUUSDm"), 3)
+        self.assertEqual(units.px("XAUUSDm", None), "—")
+
+
 if __name__ == "__main__":
     unittest.main()

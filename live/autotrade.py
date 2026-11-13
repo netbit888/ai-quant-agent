@@ -149,6 +149,51 @@ from live.ta import (  # noqa: F401  （重新导出：老路径 autotrade._atr 
     visible_bars,
 )
 
+from live.units import (  # noqa: F401  （重新导出：老路径 autotrade._degrade / _digits 继续可用）
+    _DEGRADE_INTERVAL,
+    _DEGRADE_SEEN,
+    degrade as _degrade,
+    digits as _digits,
+    point as _point,
+    px as _px,
+    spread_cost as _spread_cost,
+)
+
+from live.bootstrap import (  # noqa: F401  （重新导出：老路径 autotrade.validate_cfg 继续可用）
+    cfg_from_state,
+    validate_cfg,
+)
+
+from live.storage import (  # noqa: F401  （重新导出：老路径 autotrade.read_log / load_state 继续可用）
+    _empty_state,
+    _log_signal,
+    _tail_lines,
+    append_log,
+    cache_stats,
+    load_state,
+    log_path,
+    read_log,
+    save_state,
+    state_path,
+)
+from live.market import (  # noqa: F401  （重新导出：老路径 autotrade._quote / price_dist_of 继续可用）
+    _ACCT_CUR,
+    _ACCT_F,
+    _ACCT_TTL,
+    _CONTRACT_CACHE,
+    _acct_currency,
+    _acct_factor,
+    _bars,
+    _positions,
+    _quote,
+    _symbol_contract,
+    price_dist_of,
+)
+from live.report import (  # noqa: F401  （重新导出：老路径 autotrade.symbol_options 继续可用）
+    symbol_options,
+    model_vs_actual,
+)
+
 
 def _llm():
     """延迟导入：没装 openai 的机器上，纯函数单测也要能跑。"""
@@ -161,115 +206,6 @@ def _llm():
 
 
 # ------------------------------------------------------------------ 存储
-
-
-def state_path(login: int | str | None = None) -> Path:
-    return paths.account_file(paths.resolve_login(login), "autotrade_state.json")
-
-
-def log_path(login: int | str | None = None) -> Path:
-    return paths.account_file(paths.resolve_login(login), "autotrade_log.jsonl")
-
-
-def _empty_state() -> dict:
-    return {
-        "running": False,
-        "started_at": None,
-        "last_tick_ts": None,
-        "last_open_ts": None,
-        "last_close_ts": None,
-        "last_close_pnl": None,
-        # 刚平掉那笔的方向：同向重进要等更久（见 Cfg.cooldown_same_sec）。
-        # 老状态没有这个键 → 按「方向未知」处理，回落短的冷却，不会误拦。
-        "last_close_dir": None,
-        "trades": 0,       # 已开仓笔数
-        "closed": 0,       # 已平仓笔数
-        "wins": 0,
-        # 其中有多少笔是程序硬止损平的（source="sl"）。与「模型主动平」分开数，
-        # 否则命中率会被止损单污染。
-        "sl_closes": 0,
-        # 其中有多少笔是保本止损平的（source="be" / "be_local"，2026-10-29）。
-        # 和 sl_closes 分开：硬止损说明入场方向错了，保本止损说明方向对过。
-        "be_closes": 0,
-        "pnl": 0.0,
-        "position": None,
-        "stop_reason": None,
-        "last_decision": None,
-        # 等待锚点：模型说"等回踩到 X"就把 X 记下来（见 _wait_step）。
-        # 不记的话它每轮都会换一个更靠近现价的数，等于把追高改写成等待。
-        "wait": None,
-        "wait_drift": 0,
-        # 上一轮「不做」的结论 + 当时的报价（见 _remember_skip / _skip_note）。
-        # 模型没有跨轮记忆，这两个字段是喂给它的外部记忆，不是给面板看的。
-        "prev_entry": None,
-        "skip_streak": None,
-        # 出场端连续模型调用失败次数：≥3 次自动停（仓位没人管比少做一笔危险）
-        "model_errors": 0,
-        # 已平仓、但还没到复盘时机的单子。平仓后要等 7 根 K 线走完才复盘，
-        # 这段时间里系统照常做下一笔——复盘不能挡住交易。
-        "pending_reviews": [],
-        # 正在等人点的那条信号（AI 辅助模式）。面板每秒轮询 state，
-        # 拿到它就弹窗；人点完由 HTTP 线程写答复文件 + 唤醒等待者。
-        # 只在等待期间有值，结案后立即清空——所以它的存在本身就是
-        # 「现在有一个弹窗该显示」的信号。
-        "pending_signal": None,
-        # 否决 / 超时后的静默期，按信号类型分槽。入场否决后连模型调用
-        # 一起省掉（和冷却同性质）；出场否决只是不再弹窗，模型照问——
-        # 否则仓位会有 3 分钟没人评估。
-        "assist_deny_until": {},
-        "last_signal_ts": None,
-        # 谁在跑：panel = 面板线程，cli = 命令行进程。面板重启后 state 里可能
-        # 还留着 running=True，靠这两个字段判断那条记录是不是已经作废了。
-        "owner": None,
-        "pid": None,
-        # 最近一次运行的配置（含 dry_run）。面板「关闭并清仓」时线程可能已经
-        # 不在了，必须能还原「刚才到底是纸面还是真实」，否则会把真单当成
-        # 纸面单跳过，用户以为平了其实没平。
-        "cfg": None,
-    }
-
-
-def load_state(login: int | str | None = None) -> dict:
-    p = state_path(login)
-    base = _empty_state()
-    if not p.exists():
-        return base
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return base
-    if isinstance(data, dict):
-        base.update(data)
-    return base
-
-
-def save_state(state: dict, login: int | str | None = None) -> None:
-    paths.write_json(paths.resolve_login(login), "autotrade_state.json", state)
-
-
-def cfg_from_state(login: int | str | None = None) -> Cfg | None:
-    """还原上次运行的配置。没有记录返回 None。"""
-    raw = load_state(login).get("cfg")
-    if not isinstance(raw, dict):
-        return None
-    clean = {k: v for k, v in raw.items() if k in Cfg.__dataclass_fields__}
-    # 2026-10-29 冷却改成按方向分档，旧存档里只有 cooldown_sec。存档里
-    # **没有 cooldown_same_sec 且 cooldown_sec 恰好是老的默认值 30** → 当成
-    # 「没配过」，丢掉它让新默认（反向 60 / 同向 180）生效。用户自己配过的
-    # 其它值（比如 120）原样保留，不替人做决定。
-    if "cooldown_same_sec" not in clean and int(clean.get("cooldown_sec") or 0) == 30:
-        clean.pop("cooldown_sec", None)
-    try:
-        return Cfg(**clean)
-    except (TypeError, ValueError):
-        return None
-
-
-def append_log(row: dict, login: int | str | None = None) -> None:
-    p = log_path(login)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
 def _finish(state: dict, row: dict, login: int | str | None = None,
@@ -375,66 +311,6 @@ def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
         "reason": reason, "source": source,
         "dry_run": bool(dry_run) if dry_run is not None else bool(pos.get("dry_run")),
     }
-
-
-def _tail_lines(p: Path, limit: int, chunk: int = 256 * 1024) -> list[str]:
-    """从文件尾部倒着读，凑够 `limit` 行就停。返回**完整**的文本行。
-
-    为什么不用 `read_text()` 再切片
-    ------------------------------
-    流水只在手动重置时轮转，所以它只会变长。`read_log(limit=N)` 原来是
-    「全文解析 → 取后 N 条」：N 只是返回值上限，**省不了任何成本**，
-    面板每秒轮询一次，代价随文件线性涨。文件 5000 行以后，每轮都在解析
-    几年前的行。
-
-    从尾部按块读，成本只和 `limit` 有关，与文件多大无关。
-    """
-    with p.open("rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        pos = fh.tell()
-        buf = b""
-        # 多读一行再丢：块边界可能正好切在一行中间，靠"多凑一个换行"兜住。
-        while pos > 0 and buf.count(b"\n") <= limit:
-            step = min(chunk, pos)
-            pos -= step
-            fh.seek(pos)
-            buf = fh.read(step) + buf
-
-    if pos > 0:
-        # 起点在文件中间：第一段是半行，按字节切掉（不能在解码后切——
-        # 多字节汉字可能正好被切在中间，解出来是乱码，会污染那一行的 JSON）。
-        cut = buf.find(b"\n")
-        buf = buf[cut + 1:] if cut >= 0 else b""
-    return buf.decode("utf-8", "replace").splitlines()
-
-
-def read_log(login: int | str | None = None, limit: int | None = None) -> list[dict]:
-    """读决策流水。`limit` 只读尾部 N **行**（真·只读 N 行，不是读完再切）。
-
-    和旧实现的唯一语义差别：坏行（进程被杀时写了一半）会被跳过，所以返回
-    条数可能比 `limit` 少。旧实现是"全解析 → 取后 N 条"，坏行不影响条数。
-    为这一点保留 O(文件) 的代价不值得——坏行本来就说明那次写入没完成，
-    少一条比多解析十万行划算。
-    """
-    p = log_path(login)
-    if not p.exists():
-        return []
-    if limit and limit > 0:
-        lines = _tail_lines(p, int(limit))
-        # 行数可能少于 limit（文件本来就短），也可能多一行（倒读的余量）。
-        lines = lines[-int(limit):]
-    else:
-        lines = p.read_text(encoding="utf-8").splitlines()
-    out: list[dict] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
 
 
 def backfill_sl_src(login: int | str | None = None) -> dict:
@@ -1503,92 +1379,6 @@ def _fmt_bars(rows: list[dict], digits: int = 3) -> str:
     return _fmt_bar_lines(visible_bars(rows), digits)
 
 
-# 降级留痕的节流表：{(函数名, 品种): 上次记录的时间}。
-# 必须节流——MT5 掉线时每 tick 会调 _point/_digits 好几遍，不节流就是
-# 一天几千行 degrade，把真正的流水淹掉。
-_DEGRADE_SEEN: dict[tuple[str, str], float] = {}
-_DEGRADE_INTERVAL = 600.0
-
-
-def _degrade(what: str, symbol: str, info: str,
-             login: int | str | None = None) -> None:
-    """某个价格常量没算准，退回兜底值——**留个痕**。
-
-    这些兜底本身是必要的（一个陌生品种名不该让 prompt 构建崩掉），
-    但它们"安静地算错"：点值猜成 0.001 时，黄金还行、BTC 的点差会被
-    读成 640000 点塞给模型。没有痕迹的话，事后只能怀疑"模型怎么这么蠢"。
-    """
-    key = (what, symbol)
-    now = time.time()
-    last = _DEGRADE_SEEN.get(key)
-    if last is not None and now - last < _DEGRADE_INTERVAL:
-        return
-    _DEGRADE_SEEN[key] = now
-    try:
-        append_log({"ts": int(now), "kind": "degrade", "what": what,
-                    "symbol": symbol, "info": info}, login)
-    except Exception:  # noqa: BLE001
-        # 已经在降级路径上了，写不进流水也没别的办法，别把调用方拖崩
-        pass
-
-
-def _point(symbol: str) -> float:
-    try:
-        from backtest.symbols import SYMBOLS
-
-        known = (SYMBOLS.get(symbol) or {}).get("point")
-        if not known:
-            _degrade("point", symbol, "品种不在符号表里，按 0.001 兜底")
-        return float(known or 0.001)
-    except Exception as exc:  # noqa: BLE001
-        _degrade("point", symbol, f"{type(exc).__name__}: {exc}")
-        return 0.001
-
-
-def _digits(symbol: str) -> int:
-    """报价小数位。黄金 3 位、BTC 2 位——写死 3 位会让 80185.81 显示成
-    80185.810，看着像精度过剩；更有害的是 EURUSD 5 位会被砍成 3 位。"""
-    try:
-        from backtest.symbols import SYMBOLS
-
-        known = (SYMBOLS.get(symbol) or {}).get("digits")
-        if not known:
-            _degrade("digits", symbol, "品种不在符号表里，按 3 位兜底")
-        return int(known or 3)
-    except Exception as exc:  # noqa: BLE001
-        _degrade("digits", symbol, f"{type(exc).__name__}: {exc}")
-        return 3
-
-
-def _px(symbol: str, value) -> str:
-    """按品种精度格式化价格。"""
-    try:
-        return f"{float(value):.{_digits(symbol)}f}"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def _spread_cost(symbol: str, lots: float) -> float | None:
-    """这一手的点差成本（USD）。**算不出来返回 None，不返回 0.0**。
-
-    0.0 是个危险的谎：调用方拿它当"成本为零"，闸门就形同不存在，
-    所有单子一律放行。宁可让它显式拿到 None 自己决定怎么办。
-    （当前没有生产调用点，只有测试在用——正因为没人接，才更要一开始
-    就把语义定对，免得将来第一次接入就踩坑。）
-    """
-    try:
-        from backtest.symbols import spread_cost_usd
-
-        got = spread_cost_usd(symbol, lots)
-    except Exception as exc:  # noqa: BLE001
-        _degrade("spread_cost", symbol, f"{type(exc).__name__}: {exc}")
-        return None
-    if got is None:
-        _degrade("spread_cost", symbol, "spread_cost_usd 返回空值")
-        return None
-    return float(got)
-
-
 def _ticks_text(cfg: Cfg, bars: list[dict]) -> str:
     """把 tick 聚合表准备好。拿不到就返回一句说明，绝不让 prompt 缺字段。"""
     if not cfg.ticks:
@@ -2247,24 +2037,6 @@ def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
     return out
 
 
-def symbol_options() -> list[dict]:
-    """面板下拉框的数据源：只给白名单，附 point/contract 供前端显示成本。"""
-    from backtest.symbols import SYMBOLS
-
-    out = []
-    for s in TRADABLE_SYMBOLS:
-        spec = SYMBOLS.get(s) or {}
-        out.append({
-            "symbol": s,
-            "label": SYMBOL_LABELS.get(s, s),
-            "point": spec.get("point"),
-            "contract": spec.get("contract"),
-            "spread": spec.get("spread"),
-            "digits": spec.get("digits"),
-        })
-    return out
-
-
 def cooldown_left(state: dict, now: int, direction: int | None, cfg: Cfg) -> int:
     """平仓冷却还剩几秒。同向用 cooldown_same_sec，反向/方向未定用 cooldown_sec。
 
@@ -2355,156 +2127,6 @@ def can_open(state: dict, now: int, has_position: bool, cfg: Cfg,
 
 
 # ------------------------------------------------------------------ 终端读写
-
-
-def _positions(symbol: str) -> list[dict] | None:
-    """该品种的持仓。**读失败返回 None，不是空列表**。
-
-    这个区分很关键：返回 [] 表示"确实没持仓"，返回 None 表示"不知道"。
-    如果读失败也返回 []，模块会误判「刚才那笔已经平了」，然后马上再开一笔——
-    终端抖一下就能变成连续开仓。
-    """
-    try:
-        from live.journal import open_positions
-
-        rows = open_positions()
-    except Exception:  # noqa: BLE001
-        return None
-    return [p for p in rows if str(p.get("symbol")) == symbol]
-
-
-_CONTRACT_CACHE: dict[str, float] = {}
-
-
-def _symbol_contract(symbol: str) -> float:
-    hit = _CONTRACT_CACHE.get(symbol)
-    if hit:
-        return hit
-    value = 0.0
-    try:
-        from live.journal import _mt5, mt5_call
-
-        info = mt5_call(_mt5().symbol_info, symbol)
-        if info is not None and getattr(info, "trade_contract_size", 0):
-            value = float(info.trade_contract_size)
-    except Exception:  # noqa: BLE001
-        value = 0.0
-    if not value:
-        try:
-            from backtest.symbols import SYMBOLS
-
-            value = float((SYMBOLS.get(symbol) or {}).get("contract") or 100.0)
-        except Exception:  # noqa: BLE001
-            value = 100.0
-    # 同一进程内合约规格不会变，缓存住：止损价换算、金额核算每轮都要用，
-    # 每次都去碰 MT5 等于把一次 tick 读取变成两次，还得排队拿锁。
-    _CONTRACT_CACHE[symbol] = value
-    return value
-
-
-_ACCT_CUR = {"code": "", "ts": 0.0}
-_ACCT_TTL = 60.0
-
-
-def _acct_currency() -> str:
-    """当前账户的结算币种（USD / USC …）。读不到按 USD。
-
-    **必须缓存**：这个函数被每一行流水文案、每一条闸门 reason 调用，
-    而背后是一次 `account_info`——要拿 MT5 的锁。不缓存的话，一段
-    30 行的流水会变成 30 次账户查询，止损快查被自己的日志拖死。
-    账户币种在进程生命周期内不会变（换账户本来就该重启面板）。
-    """
-    now = time.time()
-    hit = _ACCT_CUR["code"]
-    if hit and now - float(_ACCT_CUR["ts"]) < _ACCT_TTL:
-        return hit
-    code = "USD"
-    try:
-        from live.journal import _mt5, mt5_call
-
-        info = mt5_call(_mt5().account_info)
-        if info is not None and getattr(info, "currency", None):
-            code = str(info.currency).upper()
-    except Exception:  # noqa: BLE001
-        code = "USD"
-    _ACCT_CUR.update(code=code, ts=now)
-    return code
-
-
-_ACCT_F = {"factor": 0.0, "ts": 0.0}
-
-
-def _acct_factor() -> float:
-    """1 USD 等于多少**账户结算货币**：美元户 1，美分户 100。
-
-    代码内部按「价差 × 合约 × 手数」算出来的钱都是美元，而 MT5 的 profit、
-    账户余额、cfg 里的阈值全是账户货币。两者只差这一个系数：
-        账户金额 = 美元金额 × _acct_factor()
-    只在需要和账户货币对齐的地方用它，不要往别处扩散。
-    """
-    now = time.time()
-    hit = _ACCT_F["factor"]
-    if hit and now - float(_ACCT_F["ts"]) < _ACCT_TTL:
-        return hit
-    factor = 1.0
-    try:
-        from live.journal import usd_rate
-
-        rate = usd_rate(_acct_currency())
-        if rate > 0:
-            factor = 1.0 / rate
-    except Exception:  # noqa: BLE001
-        factor = 1.0
-    _ACCT_F.update(factor=factor, ts=now)
-    return factor
-
-
-def price_dist_of(cfg: Cfg, value) -> float:
-    """把「0.01 手口径」的金额阈值换成**价格距离**（同一账户货币下的价差）。
-
-    浮盈 = 价距 × 合约 × 手数 × 账户系数；而金额阈值随手数等比放大，
-    两个手数一乘一除正好相消。所以价距**与手数无关**，用基准手数算一次就够：
-    227 笔反事实回放标定的 `sl_usd=3.00` 本质是 3.00 的价距，只是当时
-    0.01 手 XAUUSDm 恰好 1 盎司，金额和价距是同一个数。
-    """
-    try:
-        unit = float(_symbol_contract(cfg.symbol)) * BASE_LOTS * _acct_factor()
-        if unit <= 0:
-            return 0.0
-        return abs(float(value)) / unit
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _quote(symbol: str) -> tuple[float, float] | None:
-    # 走 journal 的连接保活，不要直接 mt5.symbol_info_tick：
-    # 没 initialize 过的话它只会返回 None，看起来像行情断了。
-    #
-    # 用 call_quick 而不是 call：这条路径同时被 tick 和 2 秒一格的止损快查
-    # 调用，而 `order_send` 可能要等券商几百毫秒。拿不到锁就当「这一轮没有
-    # 报价」——上层已经有完整处理（skip 掉这一轮），下一格再来。
-    try:
-        from live.journal import _mt5
-        from live.mt5lock import call_quick
-
-        tick = call_quick(_mt5().symbol_info_tick, symbol, timeout=0.3)
-        if tick is None:
-            return None
-        return float(tick.bid), float(tick.ask)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _bars(symbol: str, tf: str, count: int) -> list[dict]:
-    # 用 get_rates_live：不 initialize、不 shutdown。
-    # 老写法 mt5_session() 会在退出时 shutdown，把整个面板进程的连接一起关掉，
-    # 下一轮就只剩「拿不到报价」。
-    try:
-        from mt5.bridge import get_rates_live
-
-        return get_rates_live(symbol, tf, count)
-    except Exception:  # noqa: BLE001
-        return []
 
 
 def _executor(cfg: Cfg):
@@ -3958,146 +3580,6 @@ def _fmt(row: dict) -> str:
     return f"{clock} {kind} {row.get('reason') or row.get('error') or ''}"
 
 
-def validate_cfg(cfg: Cfg) -> list[str]:
-    """配置自检。返回问题列表，空 = 通过。
-
-    这里放的是**逻辑上不可能成立**的配置：与其让它跑起来后悄悄违反规则，
-    不如启动时就说清楚。
-    """
-    issues: list[str] = []
-    # 品种必须在白名单里：SYMBOLS 里没测过 point/contract/spread 的品种，
-    # 点差成本会退回 0（把「没测过」显示成「零成本」），风险直接失控。
-    if cfg.symbol not in TRADABLE_SYMBOLS:
-        issues.append(
-            f"品种 {cfg.symbol} 不在可交易白名单（{'/'.join(TRADABLE_SYMBOLS)}）："
-            "没有实测 point/contract/spread 的品种不能上真单"
-        )
-    # 3 秒是物理下限：一次模型调用实测 ~2.6 秒，再短线程就在堆请求，
-    # 上一轮没回来下一轮已经开始，决策全挤在一起。
-    if cfg.interval_sec < 3:
-        issues.append(
-            "决策间隔不能小于 3 秒（模型单次调用约 2.6 秒，再快只会堆积请求）"
-        )
-    # 对齐偏移不能是负数：负偏移等于"在 K 线收盘之前判"，正是这个开关要消掉的
-    # 东西。上界不设——settle 接近一个周期时 _wait_deadline 会夹到半个周期，
-    # 夹住的结果仍是"每根 K 线判一次"，只是相位不同，不至于失效。
-    if float(getattr(cfg, "align_settle_sec", 0.0) or 0.0) < 0:
-        issues.append(f"收盘对齐偏移不能为负（{cfg.align_settle_sec:g} 秒）")
-    if cfg.lots <= 0:
-        issues.append("手数必须大于 0")
-    else:
-        # 手数必须落在界面那几档里。券商那边是 round(lots, 2)：0.013 会被
-        # 静默改成 0.01（界面说 0.013、实际 0.01），0.001 直接报 10014。
-        # 白名单和 prefs / 模板同源，API 直接 POST 也绕不过去。
-        from live import prefs
-
-        if not prefs.valid_lots(cfg.lots):
-            issues.append(
-                f"开仓手数只接受 {'/'.join(f'{x:g}' for x in prefs.LOTS)} 手，"
-                f"收到 {cfg.lots}")
-    # 同向冷却比反向还短 = 这台机器专门鼓励同向重进，与它存在的理由相反。
-    # 相等是允许的（等于回到单一冷却，行为可控）。
-    if cfg.cooldown_same_sec < cfg.cooldown_sec:
-        issues.append(
-            f"同向冷却 {cfg.cooldown_same_sec} 秒不能短于反向冷却 {cfg.cooldown_sec} 秒"
-        )
-    # 冷却不再有「必须 <60 秒」的上限——「平仓后 1 分钟内必须重新开仓」的硬需求
-    # 已删除（它和复盘体系的报复单标记直接矛盾，且是输出量要求不是质量要求）。
-    # 冷却只是防连环单的下限，用户想配 2 分钟冷却应该允许。
-    # 止损/止盈这对参数是配套的，单独调一个只会换一种亏法：
-    #   止盈门槛 ≤ 止损 → 盈亏比还在 1 附近甚至更差，白加止损；
-    #   止损太接近点差 → 直接被点差打掉，等于每开一单就主动交一次过路费。
-    #
-    # 金额单位是**账户结算货币**：美元户 0.5 = 0.5 美元，美分户 0.5 = 0.5 分。
-    # 这条判据在两种账户下天然等价 —— 价距 = 金额 / (合约 × 手数 × 每美元折
-    # 多少账户货币)，美分户的金额小 100 倍、分母也大 100 倍，比值不变。
-    # 所以阈值不需要按币种改，只需要把单位标出来，别让人对着两个 3.00 猜。
-    if cfg.sl_usd > 0 and cfg.sl_usd < 0.5:
-        unit = money_label(_acct_currency())
-        issues.append(
-            f"止损 {cfg.sl_usd:.2f} {unit} 太小：单笔点差就 0.24 的价距，"
-            f"止损不到 0.5 {unit} 等于一开仓就被点差打掉"
-        )
-    if cfg.tp_min_usd > 0 and cfg.sl_usd > 0 and cfg.tp_min_usd <= cfg.sl_usd:
-        issues.append(
-            f"止盈门槛 {cfg.tp_min_usd:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
-            "盈亏比仍 ≤ 1，这套参数没解决必亏问题"
-        )
-    # 趋势单的止盈门槛同一套盈亏比约束。0 = 关掉宽止盈（退回 tp_min_usd），
-    # 是合法配置；但只要开了，就不能比止损还窄——趋势打法赚的本来就是
-    # 「拿够一段」和震荡单不同，门槛比止损窄等于把趋势单削成震荡单。
-    if cfg.tp_min_trend < 0:
-        issues.append(f"趋势止盈门槛不能为负（{cfg.tp_min_trend:.2f}）")
-    if cfg.tp_min_trend > 0 and cfg.sl_usd > 0 and cfg.tp_min_trend <= cfg.sl_usd:
-        issues.append(
-            f"趋势止盈门槛 {cfg.tp_min_trend:.2f} 不高于止损 {cfg.sl_usd:.2f}，"
-            "趋势单被削成盈亏比 ≤ 1 的震荡单，分 regime 就白分了"
-        )
-    if cfg.max_hold_trend < 0:
-        issues.append(f"趋势持仓上限不能为负（{cfg.max_hold_trend} 秒）")
-    # 趋势上限比震荡上限还短 = 配置矛盾：趋势单拿的波段比震荡单还短，
-    # tp_min_trend 再宽也永远等不到，等于悄悄退回震荡参数。
-    if cfg.max_hold_trend > 0 and cfg.max_hold_sec > 0 \
-            and cfg.max_hold_trend < cfg.max_hold_sec:
-        issues.append(
-            f"趋势持仓上限 {cfg.max_hold_trend}s 比震荡上限 {cfg.max_hold_sec}s 还短："
-            "宽止盈永远等不到，分 regime 形同虚设"
-        )
-    # 峰值停滞唤醒（2026-10-29）：这条规则只"放行"、不改任何阈值，所以配歪了
-    # 最坏结果是「多问几次模型」或「完全不唤醒」，不会改变亏损结构。
-    # 校验只拦语义上不可能成立的组合，不去拦"激进"。
-    if getattr(cfg, "stale_sec", 0) < 0:
-        issues.append(f"停滞唤醒窗口不能为负（{cfg.stale_sec} 秒）")
-    if not 0.0 <= float(getattr(cfg, "stale_frac", 0.0)) <= 1.0:
-        issues.append(f"停滞唤醒的浮盈比例必须落在 0~1（{cfg.stale_frac}）")
-    if getattr(cfg, "stale_reask_sec", 0) < 0:
-        issues.append(f"停滞唤醒的重问间隔不能为负（{cfg.stale_reask_sec} 秒）")
-    # 到过门槛后的复核节拍：0 是合法的「关掉」，只有负数报错。
-    if getattr(cfg, "tp_reask_sec", 0) < 0:
-        issues.append(f"到过门槛后的复核间隔不能为负（{cfg.tp_reask_sec} 秒）")
-    # 止损快查的间隔只有下限有意义：< 2 秒时 MT5 tick 读取的抖动开始比价格
-    # 变化本身大，白白空转。**上界不在这里拦**——配得比决策间隔大也不报错，
-    # _wait_next 会把它夹到 interval_sec（等于没开）。理由：这是个纯粹的
-    # 安全网参数，配歪了最坏结果是"回到旧行为"，不该让人启动不了。
-    # 0 是合法的「关掉」。
-    if getattr(cfg, "guard_sec", 0.0) and cfg.guard_sec > 0 and cfg.guard_sec < 2:
-        issues.append(
-            f"止损快查间隔 {cfg.guard_sec:.1f} 秒太短（tick 读取抖动比价差还大），最小 2 秒"
-        )
-    # 近门槛档位同样只有下限有意义，且不可能比远档还粗——粗的那档就该叫远档。
-    if getattr(cfg, "guard_near_sec", 0.0) and cfg.guard_near_sec > 0 and cfg.guard_near_sec < 2:
-        issues.append(
-            f"近门槛快查间隔 {cfg.guard_near_sec:.1f} 秒太短（同 guard_sec 口径），最小 2 秒"
-        )
-    if getattr(cfg, "guard_sec", 0.0) and getattr(cfg, "guard_near_sec", 0.0) \
-            and cfg.guard_near_sec > cfg.guard_sec:
-        issues.append(
-            f"近门槛快查间隔 {cfg.guard_near_sec:.1f} 秒不能比远档 {cfg.guard_sec:.1f} 秒还粗"
-        )
-    # 辅助模式的参数。**不校验 assist 与 dry_run 的互斥**：
-    # 「辅助 + 纸面」是合法且有用的组合（弹窗照弹、同意只记账），
-    # 用来先把流程和手感跑顺，再上真钱。
-    if cfg.assist:
-        if cfg.assist_entry_wait_sec < 5:
-            issues.append(
-                f"入场确认时限 {cfg.assist_entry_wait_sec} 秒太短：弹窗刚出现就过期，"
-                "等于替你把所有单子都否了"
-            )
-        if cfg.assist_exit_wait_sec < 5:
-            issues.append(
-                f"出场确认时限 {cfg.assist_exit_wait_sec} 秒太短：同上，"
-                "到点会自动按模型决定平仓，太短会变成「实际上没人看过」"
-            )
-        if cfg.assist_max_slip_usd <= 0:
-            issues.append(
-                f"价格漂移阈值 {cfg.assist_max_slip_usd:.2f} 必须大于 0："
-                "设 0 等于任何价格变动都作废，一单也开不出去"
-            )
-        if cfg.assist_deny_cooldown < 0:
-            issues.append("否决冷却不能是负数")
-    return issues
-
-
 def _wait_deadline(started: float, wait: float, cfg: Cfg) -> float:
     """这一轮跑完，等到**哪个时刻**再决策（不是"等多久"）。
 
@@ -5030,45 +4512,6 @@ def _new_signal(kind: str, cfg: Cfg, *, direction: int, p_up: float | None,
     }
 
 
-def _log_signal(sig: dict, ans: dict, cfg: Cfg, login=None,
-                extra: dict | None = None) -> dict:
-    """每次信号结案落一行，无论人点了什么。
-
-    为什么连"同意"也要单独记一行：open/close 行只说明"发生了成交"，
-    说明不了"人看过、等了 12 秒、点了同意"。事后想算「人点 vs 模型自己走」
-    的期望差，必须有这一行。
-    """
-    row = {
-        # ts 用**信号发出的时刻**（sig 构造时就定成这一轮的 now），不是写盘时刻。
-        # 这一行是在人答完之后才落的，用墙钟会把它盖到等待窗的末尾——于是一轮
-        # 120 秒的等待，流水里变成"先有结论（skip 行）、后有信号"，读起来
-        # 像时间倒流。等待多久已经由 waited_sec 记着了，不用 ts 再表达一遍。
-        "ts": int(sig.get("ts") or time.time()), "kind": "signal",
-        "signal_id": sig.get("id"), "sig_kind": sig.get("kind"),
-        "answer": ans.get("answer"),
-        "waited_sec": round(float(ans.get("waited_sec") or 0.0), 1),
-        "direction": sig.get("direction"), "p_up": sig.get("p_up"),
-        "prog_dir": sig.get("prog_dir"), "agree": sig.get("agree"),
-        "act": sig.get("act"), "advice": sig.get("advice"),
-        "advice_text": sig.get("advice_text"),
-        "price": sig.get("price"),
-        "bid": round(float(ans.get("bid") or sig.get("bid") or 0), 3),
-        "ask": round(float(ans.get("ask") or sig.get("ask") or 0), 3),
-        "reason": sig.get("reason"), "drv": "assist",
-        "dry_run": bool(sig.get("dry_run")),
-    }
-    if sig.get("ticket") is not None:
-        row["ticket"] = sig["ticket"]
-    if sig.get("held_sec") is not None:
-        row["held_sec"] = sig["held_sec"]
-    if ans.get("late"):
-        row["late"] = True          # 人在止损生效的同一瞬间才点，留痕
-    if extra:
-        row.update(extra)
-    append_log(row, login)
-    return row
-
-
 # 静默期那句话的开头（见 tick 里的冷却分支）。只描述上一轮**真的发生了什么**：
 # 「未获批准」不能盖住「批准了但没能执行」——后者是价格跑掉了，不是人没点。
 _DENY_HEAD: dict[str | None, str] = {
@@ -5705,41 +5148,6 @@ def reset_history(login: int | str | None = None,
             "lessons_kept": not clear_lessons, "lessons": len(lesson_rows(login))}
 
 
-def cache_stats(login: int | str | None = None) -> dict:
-    """从 api_calls.jsonl 现算前缀缓存命中率。
-
-    为什么单独算：DeepSeek 的上下文缓存是**自动**的（按前缀匹配），
-    没有 prompt_cache_key 这种参数可传。想让命中率变好，唯一办法是让
-    「每轮都不变的部分」尽量长、并放在最前面；而要判断有没有生效，
-    只能看服务端返回的 cache_hit_prompt_tokens。
-    """
-    p = paths.account_file(paths.resolve_login(login), "api_calls.jsonl")
-    hit = miss = calls = 0
-    if p.exists():
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            u = row.get("usage") or {}
-            h, m = u.get("cache_hit_tokens"), u.get("cache_miss_tokens")
-            if h is None and m is None:
-                continue
-            calls += 1
-            hit += int(h or 0)
-            miss += int(m or 0)
-    total = hit + miss
-    return {
-        "calls": calls,
-        "hit_tokens": hit,
-        "miss_tokens": miss,
-        "hit_rate": round(hit / total, 4) if total else None,
-    }
-
-
 def _prefs_snapshot(saved_cfg: dict | None = None) -> dict:
     """面板控件的上次选择。坏了就当没记过，绝不让它拖垮整个 summary。
 
@@ -5833,95 +5241,6 @@ def playbook_of(state: dict, rows: list[dict],
         "tp": tp, "max_hold_sec": hold, "interval_sec": iv,
         "ts": ts, "age_sec": age, "stale": stale,
         "trend_follow": bool(cfg.trend_follow), "anchor": regime != "trend",
-    }
-
-
-def model_vs_actual(rows: list[dict], deals: dict[int, dict],
-                    interval_sec: int = 60, symbol: str = "",
-                    limit: int = 8) -> dict:
-    """最近 N 轮：模型方向 vs 账户实际成交方向。
-
-    面板是个人复盘工具（手动做单、magic=0 常态），所以「我」这一行取账本里
-    **真实发生的开仓**，不是模型写了什么。轮次只认 skip / signal 决策行：
-    同一笔单实测会留下 4 条 p_up 相同的流水（signal/open/signal/close），
-    不合并就会把一次决策画成四格，历史序列直接失真。
-    """
-    iv = max(1, int(interval_sec or 60))
-    dec = [r for r in rows
-           if r.get("kind") in ("skip", "signal")
-           and r.get("p_up") is not None and r.get("ts")]
-    dec.sort(key=lambda r: int(r["ts"]))
-    kept: list[dict] = []
-    for r in dec:
-        ts = int(r["ts"])
-        # 半个间隔内的重复行算同一轮；signal 优先（它带 act/advice）。
-        if kept and ts - int(kept[-1]["ts"]) < iv * 0.5:
-            if r.get("kind") == "signal":
-                kept[-1] = r
-            continue
-        kept.append(r)
-    kept = kept[-limit:]
-
-    # 已实现盈亏按 position_id 归集：开仓那笔 profit=0，钱在平仓那笔上。
-    pnl_by_pos: dict = {}
-    for d in deals.values():
-        if int(d.get("entry", -1)) != 1:
-            continue
-        try:
-            val = (float(d.get("profit") or 0) + float(d.get("commission") or 0)
-                   + float(d.get("swap") or 0) + float(d.get("fee") or 0))
-        except (TypeError, ValueError):
-            continue
-        pid = d.get("position_id")
-        pnl_by_pos[pid] = pnl_by_pos.get(pid, 0.0) + val
-
-    # 一笔成交只归到「时间上最近的那一轮」，避免落在相邻两轮之间被画两次。
-    assign: dict[int, dict] = {}
-    for d in deals.values():
-        if int(d.get("entry", -1)) != 0 or float(d.get("volume") or 0) <= 0:
-            continue
-        if symbol and str(d.get("symbol") or "") != symbol:
-            continue
-        t = int(d.get("time") or 0)
-        best = None
-        for k in kept:
-            kt = int(k["ts"])
-            gap = abs(t - kt)
-            if gap <= iv and (best is None
-                              or gap < abs(t - int(best["ts"]))):
-                best = k
-        if best is not None:
-            assign[int(best["ts"])] = d
-
-    slots = []
-    for k in kept:
-        kt = int(k["ts"])
-        pu = float(k.get("p_up") or 0.5)
-        mdir = 1 if pu > 0.5 else (-1 if pu < 0.5 else 0)
-        hit = assign.get(kt)
-        adir, ticket, magic, pnl = 0, None, None, None
-        if hit is not None:
-            typ = int(hit.get("type", -1))
-            adir = 1 if typ == 0 else (-1 if typ == 1 else 0)
-            ticket = hit.get("ticket")
-            magic = int(hit.get("magic") or 0)
-            pid = hit.get("position_id")
-            if pid in pnl_by_pos:
-                pnl = round(pnl_by_pos[pid], 2)
-        slots.append({
-            "ts": kt, "p_up": pu, "model_dir": mdir, "actual_dir": adir,
-            "ticket": ticket, "magic": magic, "pnl": pnl,
-            "against": bool(adir and mdir and adir != mdir),
-        })
-
-    against = [s for s in slots if s["against"]]
-    return {
-        "slots": slots,
-        "against": len(against),
-        "net": round(sum(s["pnl"] for s in against
-                         if s["pnl"] is not None), 2),
-        "trades": sum(1 for s in slots if s["actual_dir"]),
-        "interval_sec": iv,
     }
 
 

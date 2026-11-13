@@ -59,12 +59,19 @@ class _ConcurrencySensitiveConn:
 
 class _LockTestBase(unittest.TestCase):
     def setUp(self) -> None:
-        self._orig_mt5 = journal._mt5
+        # 打桩点必须是 mt5conn：`_quote` 搬进 live/market.py 之后（2026-11-13）
+        # 取的是 `mt5conn._mt5`，打在 journal 上只是改了那个模块里的别名，
+        # 连接层读不到——测试会真的去碰终端（然后被 _stubs 断链成 None）。
+        from live import mt5conn
+
+        self._orig_mt5 = mt5conn._mt5
         self.fake = _ConcurrencySensitiveConn()
-        journal._mt5 = lambda allow_launch=False: self.fake  # type: ignore[assignment]
+        mt5conn._mt5 = lambda allow_launch=False: self.fake  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        journal._mt5 = self._orig_mt5  # type: ignore[assignment]
+        from live import mt5conn
+
+        mt5conn._mt5 = self._orig_mt5  # type: ignore[assignment]
 
 
 class TestQuoteIsSerialized(_LockTestBase):
