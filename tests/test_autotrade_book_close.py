@@ -32,6 +32,7 @@ SOURCES = ("llm", "sl", "be_local", "be", "external", "panel", "timeout")
 COMMON_KEYS = {
     "ts", "kind", "ticket", "direction", "pnl", "p_up", "hit", "held_sec",
     "peak_pnl", "peak_ts", "plan", "atr", "entry_reason",
+    "atr_peak", "t3", "t5", "burst",
     "reason", "source", "dry_run",
 }
 

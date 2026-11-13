@@ -795,6 +795,14 @@ def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
         # ATR」的统计时不用再按 ticket 反查 open 行，少一次 join 就少一处漏。
         "plan": pos.get("plan"),
         "atr": pos.get("atr"),
+        # 脉冲留痕（2026-11-13）：atr_peak = 峰值折成几倍 ATR；t3/t5 = 首次
+        # 达到 3 / 5 个 ATR 用了几分钟（None = 没到过，或旧持仓没锁 atr_pnl）；
+        # burst = 3 分钟内走满 5 ATR，即 tools/measure_burst.py 判出的那类事件。
+        # 只落盘不消费：要回答的是"这类单在我真实入场质量上是不是也吐回去"。
+        "atr_peak": _peak_atr(pos),
+        "t3": pos.get("t3"),
+        "t5": pos.get("t5"),
+        "burst": _is_burst(pos),
         # 两个理由分别存：开仓理由来自当初的进场判断，平仓理由来自这次离场
         # 判断。合成一个字段就再也分不清「为什么进」和「为什么出」，复盘直接废掉。
         "entry_reason": pos.get("entry_reason"),
@@ -5352,6 +5360,10 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 变成可统计的量——以前要靠 ticket 反查 open 行的 feat，绕且容易漏。
         # 取 0.0 表示当时算不出（bars 不足），消费方必须把它当"无数据"降级。
         "atr": float((feat or {}).get("atr") or 0.0),
+        # 1 个 ATR 折成这笔单的浮盈（账户货币）。与 atr 同理开仓锁死：
+        # 脉冲判据（_mark_burst）要用它，中途重算会让同一笔仓前后两套门槛。
+        "atr_pnl": _atr_pnl_unit(float((feat or {}).get("atr") or 0.0),
+                                 cfg.lots, cfg.symbol),
         # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
         "signal_id": sig_id, "exec_by": exec_by,
         # 券商端有没有这条硬止损线（2026-11-09）。0 = 没挂上，这笔只有程序
@@ -5890,6 +5902,83 @@ def next_wait_sec(row: dict, cfg: Cfg) -> float:
     return float(cfg.interval_sec)
 
 
+# 脉冲判据（"浮盈速度"特征）。与 tools/measure_burst.py 同源、同参数：
+#   3 根 M1 内走满 5 个 ATR 的事件，之后 10 分钟中位回吐 1.27 ATR，
+#   15 分钟内最大反向 2.33 ATR，吐回超一半浮盈的比例 50%（n=30，50 天 M1）。
+# 对照：同样 5 ATR 位移但慢速走到（15 根）的 214 个样本只有 −0.20 / 26%。
+#
+# **这里只留痕，不改行为。** n=30、正比例 37%、p≈0.10，还没到能改出场逻辑的
+# 显著度；而且快速组 15 分钟均值是 +0.39（被少数暴涨拉正）——走掉就是砍右尾。
+# 先攒够本账户的实盘样本，再决定要不要动。判据里两个条件必须同时成立：
+# 单独看速度没意义（2.5 ATR 档快慢几乎没差），单独看位移也没意义。
+_BURST_ATR = 5.0
+_BURST_WIN_MIN = 3.0
+# 观察档位：记「首次到 3 倍 / 5 倍 ATR 分别用了多久」。只记 5 倍的话，峰值
+# 只有 1~3 ATR 的单子（占多数）在统计里完全没有速度可算；两个点一起记，
+# 任何一笔都能算"从 3 ATR 走到 5 ATR 用了几分钟"，也就是真正的速度。
+_ATR_STEPS = (3.0, _BURST_ATR)
+
+
+def _atr_pnl_unit(atr: float, lots: float, symbol: str) -> float:
+    """1 个 ATR 折成这笔单的浮盈（账户结算货币）。算不出来返回 0。
+
+    与 `_pnl_at_price` 同一个换算式（价差 × 合约 × 手数 × 账户系数），
+    只是把"价差"固定成 1 个 ATR。开仓时算一次锁进 `pos["atr_pnl"]`，
+    和 `atr` 一样中途不重算——否则同一笔仓前后会被两套门槛管。
+    取 0 表示当时算不出（旧 state、bars 不足），消费方必须当"无数据"降级。
+    """
+    atr = float(atr or 0.0)
+    lots = float(lots or 0.0)
+    if atr <= 0 or lots <= 0:
+        return 0.0
+    try:
+        return round(atr * _symbol_contract(symbol) * lots * _acct_factor(), 4)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _mark_burst(pos: dict, peak: float, ts: int) -> None:
+    """记下浮盈**首次**达到各档 ATR 倍数时距开仓多少分钟（`pos["t3"]/["t5"]`）。
+
+    每档只写一次，之后峰值再创新高也不覆盖——判据关心的是"多久走满这一段"，
+    不是"峰值出现在第几分钟"。后者 `peak_ts` 已经在记，但两者不等价：先在
+    2 分钟到 5 ATR、10 分钟才创新高的单子，按 peak_ts 会被判成慢速，按 t5
+    才是它本来的样子。
+
+    平仓行写 `t3`/`t5` + `burst`（t5 <= 3 分钟）。没到过的档位留 None；
+    `atr_pnl` 缺失（旧持仓）时全部留 None，用 `atr_peak` 是否为空区分。
+    """
+    unit = float(pos.get("atr_pnl") or 0.0)
+    opened = int(pos.get("opened_at") or 0)
+    if unit <= 0 or not opened:
+        return
+    for k in _ATR_STEPS:
+        key = "t%g" % k
+        if pos.get(key) is not None:
+            continue
+        if float(peak) >= k * unit:
+            pos[key] = round((int(ts) - opened) / 60.0, 2)
+
+
+def _peak_atr(pos: dict) -> float | None:
+    """峰值浮盈折成几倍 ATR。None = 没有 atr_pnl（旧持仓 / 开仓时算不出 ATR）。
+
+    这个值和 `t5` 一起看才有意义：`atr_peak` 大而 `t5` 小 = 脉冲型到顶，
+    `atr_peak` 大而 `t5` 大 = 阶梯型磨上去的。前者是这次要验证的对象。
+    """
+    unit = float(pos.get("atr_pnl") or 0.0)
+    peak = pos.get("peak_pnl")
+    if unit <= 0 or peak is None:
+        return None
+    return round(float(peak) / unit, 2)
+
+
+def _is_burst(pos: dict) -> bool:
+    """3 分钟（≈3 根 M1）内走满 5 个 ATR。"""
+    t5 = pos.get("t5")
+    return t5 is not None and float(t5) <= _BURST_WIN_MIN
+
+
 def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
     """更新峰值浮盈。返回 True = 峰值被抬高（调用方据此决定是否写盘）。
 
@@ -5904,6 +5993,13 @@ def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
     `or` 会退回 float_pnl，把已经摸到的正峰值抹掉——所以必须判 None。
     """
     prev = pos.get("peak_pnl")
+    # 用**峰值**判定脉冲（当前浮盈可能已从高点回落）。放在早返回之前：升级
+    # 瞬间手里正拿着一笔没有 t5 的旧持仓，靠这一句补记，否则它在这份统计里
+    # 会永远被算成"没到过 5 ATR"。补记的 t5 会偏大（记的是观察时刻而非穿越
+    # 时刻），所以旧持仓那一两笔在分析时要单独排掉——`atr_peak` 有值而 t5 偏大
+    # 就是它的特征。
+    peak = float(float_pnl) if prev is None else max(float(float_pnl), float(prev))
+    _mark_burst(pos, peak, ts)
     if prev is not None and float_pnl <= float(prev):
         return False
     pos["peak_pnl"] = round(float_pnl, 2)
