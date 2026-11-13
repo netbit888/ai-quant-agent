@@ -351,6 +351,35 @@ class TestRecord(unittest.TestCase):
         # parse_version 排序保留最新 3 份；1.4.0 与 1.4.1 被裁掉
         self.assertEqual(names, ["1.4.2", "1.4.3", "1.4.4"])
 
+    def test_prune_really_removes_files_not_just_dirs(self):
+        # 2026-11-13 回归：prune 曾用 shutil.rmtree(ignore_errors=True)，
+        # 被 safe-delete 钩子按「>50 文件」整批拦下后异常被吞 —— 每版都报告
+        # 清理成功、实际一份没删，快照堆到 12 份 604MB。这里钉住「真删掉了」。
+        rc, snaps = self._run_record("1.6.0", exe_version="1.6.0")
+        self.assertEqual(rc, 0)
+        for v in ("1.6.1", "1.6.2", "1.6.3", "1.6.4"):
+            _make_tree(snaps / v, {"AIQuant.exe": b"", "x": b"1"})
+            (snaps / f"{v}.manifest.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(md, "SNAPSHOTS", snaps):
+            md._prune_snapshots()
+        # 目录、目录里的文件、配套 manifest 都得消失
+        for gone in ("1.6.0", "1.6.1"):
+            self.assertFalse((snaps / gone).exists(), gone)
+            self.assertFalse((snaps / f"{gone}.manifest.json").exists(), gone)
+        self.assertTrue((snaps / "1.6.4" / "x").is_file())
+
+    def test_rm_tree_handles_nested_dirs(self):
+        root = self.root / "victim"
+        _make_tree(
+            root,
+            {"a.txt": b"1", "sub/b.txt": b"2", "sub/deep/c.txt": b"3", "sub/deep/d": b"4"},
+        )
+        md._rm_tree(root)
+        self.assertFalse(root.exists())
+
+    def test_rm_tree_is_noop_on_missing_path(self):
+        md._rm_tree(self.root / "nope")  # 不抛就行
+
 
 class TestDelta(unittest.TestCase):
     def setUp(self):

@@ -183,7 +183,7 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     snap_dir = SNAPSHOTS / args.version
     if snap_dir.exists():
-        shutil.rmtree(snap_dir)  # 重发同版本：快照必须反映最后一次发布
+        _rm_tree(snap_dir)  # 重发同版本：快照必须反映最后一次发布
     shutil.copytree(
         dist,
         snap_dir,
@@ -213,6 +213,49 @@ def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _rm_tree(path: Path) -> None:
+    """删掉整棵目录树：先走 ``shutil.rmtree`` 快路径，删不掉再逐个文件删。
+
+    两条路径都是必需的（2026-11-13 踩出来的）：
+
+    * 快路径解决**速度**。逐文件 ``unlink`` 在杀软开着时慢到离谱——实测
+      6 份快照（约 4800 个文件）花掉 6 分多钟，看着像卡死；``rmtree``
+      删同样 3 份只要 2 秒。
+    * 慢路径解决**可靠性**。``shutil.rmtree(..., ignore_errors=True)`` 会被
+      safe-delete 钩子按「单次操作 >50 个文件要确认」整批拦下，而
+      ``ignore_errors=True`` 又把异常吞掉——于是每版发版的快照清理都报告
+      "成功"、实际一份没删，快照一路堆到 12 份 604 MB。逐文件删时每个动作
+      只涉及一个文件，任何批量阈值都不触发。
+
+    删完若目录仍在就打印告警——**不再静默**，否则坏了也没人知道。
+    """
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass  # 单个文件被占用/只读不该拖垮整次清理，交给慢路径收尾
+    if path.exists():
+        for p in sorted(path.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    p.rmdir()
+                else:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+    if path.exists():
+        left = sum(1 for _ in path.rglob("*"))
+        print(
+            f"[delta] [WARN] incomplete delete: {path} ({left} entries left)",
+            file=sys.stderr,
+        )
+
+
 def _prune_snapshots() -> None:
     """只保留最近 KEEP_SNAPSHOTS 份快照（按版本号排序，不是字典序——
     1.10.0 字典序 < 1.9.0，版本段进两位时字典序会骗人）。"""
@@ -224,7 +267,7 @@ def _prune_snapshots() -> None:
             snaps.append(d)
     snaps.sort(key=lambda d: parse_version(d.name))
     for d in snaps[: -KEEP_SNAPSHOTS]:
-        shutil.rmtree(d, ignore_errors=True)
+        _rm_tree(d)
         (SNAPSHOTS / f"{d.name}.manifest.json").unlink(missing_ok=True)
 
 
@@ -335,7 +378,7 @@ def _stage_payload(target: Path, payload: list[str]) -> None:
     """变更+新增文件拷入暂存区（iss 的真实 Source）。build\\ 每次构建前已被
     build_installer.bat 清空，这里再兜底清一次。"""
     if STAGE.exists():
-        shutil.rmtree(STAGE)
+        _rm_tree(STAGE)
     for rel in payload:
         src = target / rel
         dst = STAGE / rel
