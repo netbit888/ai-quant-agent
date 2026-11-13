@@ -197,3 +197,31 @@
   }
   .link-btn:hover { filter: brightness(1.2); }
 
+  /* ---------------- 脉冲浮盈提醒 ----------------
+     和信号弹窗的区别是**没有倒计时、没有选项**：它不是要人做决定，是要人
+     去看一眼盘。所以只有一个按钮，权重也低一档（金色描边，不是全站主色蓝）。 */
+  .modal-burst { width: min(480px, calc(100vw - 40px)); border-color: rgba(240,180,41,.45); }
+  .modal-burst h4 { color: var(--gold-lit); }
+  .burst-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px; margin: 14px 0 10px; border-radius: var(--r-md); overflow: hidden;
+    background: var(--border-hi);
+  }
+  .burst-grid .cell {
+    background: rgba(255,255,255,.025); padding: 9px 12px;
+    display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  }
+  .burst-grid .k { font-size: var(--fs-1); color: var(--dim); }
+  .burst-grid .v {
+    font-size: var(--fs-4); font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .burst-grid .v.hot { color: var(--gold-lit); }
+  .modal-burst .hint {
+    font-size: var(--fs-1); color: var(--dim); line-height: 1.6;
+  }
+  .modal-burst .actions { margin-top: 12px; }
+  .modal-burst .btn-ok {
+    background: rgba(240,180,41,.16); color: var(--gold-lit);
+    border: 1px solid rgba(240,180,41,.42); box-shadow: none;
+  }
+

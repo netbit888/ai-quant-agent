@@ -5937,13 +5937,19 @@ def _atr_pnl_unit(atr: float, lots: float, symbol: str) -> float:
         return 0.0
 
 
-def _mark_burst(pos: dict, peak: float, ts: int) -> None:
+def _mark_burst(pos: dict, peak: float, ts: int) -> bool:
     """记下浮盈**首次**达到各档 ATR 倍数时距开仓多少分钟（`pos["t3"]/["t5"]`）。
+
+    返回 True = 这一轮刚跨过 5 倍 ATR（调用方必须写盘，否则弹窗标记会丢）。
 
     每档只写一次，之后峰值再创新高也不覆盖——判据关心的是"多久走满这一段"，
     不是"峰值出现在第几分钟"。后者 `peak_ts` 已经在记，但两者不等价：先在
     2 分钟到 5 ATR、10 分钟才创新高的单子，按 peak_ts 会被判成慢速，按 t5
     才是它本来的样子。
+
+    **弹窗只给趋势单**（`burst_alert`）：震荡单有券商端硬 tp 3.25，到线就走，
+    不需要人来插手；趋势单不挂 tp，冲高回撤全靠人/模型判断，那才是要看一眼的。
+    但 t3/t5 对**所有**单都记——震荡单的脉冲是天然对照组，而且零成本。
 
     平仓行写 `t3`/`t5` + `burst`（t5 <= 3 分钟）。没到过的档位留 None；
     `atr_pnl` 缺失（旧持仓）时全部留 None，用 `atr_peak` 是否为空区分。
@@ -5951,13 +5957,30 @@ def _mark_burst(pos: dict, peak: float, ts: int) -> None:
     unit = float(pos.get("atr_pnl") or 0.0)
     opened = int(pos.get("opened_at") or 0)
     if unit <= 0 or not opened:
-        return
+        return False
+    fired = False
     for k in _ATR_STEPS:
         key = "t%g" % k
         if pos.get(key) is not None:
             continue
-        if float(peak) >= k * unit:
-            pos[key] = round((int(ts) - opened) / 60.0, 2)
+        if float(peak) < k * unit:
+            continue
+        pos[key] = round((int(ts) - opened) / 60.0, 2)
+        if k != _BURST_ATR:
+            continue
+        fired = True
+        if pos.get("plan") == "trend" and not pos.get("burst_alert"):
+            # 只放面板要显示的那几个数。**不在这里做任何交易动作**——
+            # 弹窗是提醒人看，不是替人平仓；程序平不平仓仍由 _exit_gate 决定。
+            pos["burst_alert"] = {
+                "ts": int(ts), "ticket": pos.get("ticket"),
+                "t5": pos.get("t5"), "atr_peak": round(float(peak) / unit, 2),
+                "fp": round(float(peak), 2), "atr": pos.get("atr"),
+                "lots": pos.get("lots"), "direction": pos.get("direction"),
+                "price_open": pos.get("price_open"),
+                "dry_run": bool(pos.get("dry_run")),
+            }
+    return fired
 
 
 def _peak_atr(pos: dict) -> float | None:
@@ -5980,7 +6003,11 @@ def _is_burst(pos: dict) -> bool:
 
 
 def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
-    """更新峰值浮盈。返回 True = 峰值被抬高（调用方据此决定是否写盘）。
+    """更新峰值浮盈。返回 True = **需要写盘**（调用方据此决定是否落盘）。
+
+    绝大多数情况下 True 就是"峰值被抬高了"，但有一个例外：旧持仓升级那一轮
+    峰值没涨、却补记了脉冲（`_mark_burst` 写进 `burst_alert`），这时也要写盘，
+    否则面板永远看不到那条提醒。
 
     peak_pnl 的唯一用途：**用实测数据回答「3.25 到底几次能到」**。除了值还记
     `peak_ts`（峰值出现的时刻）——「MFE 通常在持仓第几秒」对 max_hold_sec 的
@@ -5999,9 +6026,11 @@ def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
     # 时刻），所以旧持仓那一两笔在分析时要单独排掉——`atr_peak` 有值而 t5 偏大
     # 就是它的特征。
     peak = float(float_pnl) if prev is None else max(float(float_pnl), float(prev))
-    _mark_burst(pos, peak, ts)
+    fired = _mark_burst(pos, peak, ts)
     if prev is not None and float_pnl <= float(prev):
-        return False
+        # 峰值没涨，但补记了脉冲（旧持仓升级那一轮）——也得让调用方写盘，
+        # 否则刚写的 burst_alert 只活在内存里，重启就没了。
+        return fired
     pos["peak_pnl"] = round(float_pnl, 2)
     pos["peak_ts"] = int(ts)
     return True

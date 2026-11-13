@@ -143,4 +143,23 @@
   </div>
 </div>
 
+<!-- 脉冲浮盈提醒（**只趋势单**）。
+     它要提醒的事：这笔单在几分钟内走满了 5 个 ATR，而离线统计里这类事件
+     之后 10 分钟中位回吐 1.27 ATR。程序**不做任何交易动作**（趋势单本来
+     就不挂 tp，平不平仓仍由 _exit_gate 判），这里只是把人叫来看一眼。
+     独立 DOM：不能和信号弹窗（#sigMask）共用遮罩——两者可能同时存在，
+     共用会互相盖掉，而且那个弹窗停 120 秒等答复，这个只是通知。 -->
+<div class="modal-mask hidden" id="burstMask">
+  <div class="modal modal-burst" role="dialog" aria-modal="true"
+       aria-labelledby="burstTitle">
+    <h4 id="burstTitle">脉冲浮盈 · 请你看一眼</h4>
+    <div class="desc" id="burstDesc"></div>
+    <div class="burst-grid" id="burstGrid"></div>
+    <div class="hint" id="burstHint"></div>
+    <div class="actions">
+      <button class="btn-ok" id="burstOk">知道了</button>
+    </div>
+  </div>
+</div>
+
 

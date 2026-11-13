@@ -24,6 +24,9 @@ async function loadAutoTrade() {
     // 同意的结局要回到操作条上（弹窗那边起的头，见 sig-modal.js 的
     // sigVerdictCheck）。挂在轮询这里 = 零额外请求。
     if (typeof sigVerdictCheck === 'function') sigVerdictCheck(d);
+    // 脉冲浮盈提醒（趋势单）：数据本来就在 position.burst_alert 里，
+    // 同样零额外请求。见 burst-alert.js。
+    if (typeof burstCheck === 'function') burstCheck(d);
   } catch (e) {
     // 静默失败：这块挂了不该把整个实盘面板拖下水
     const st = $('atState');

@@ -105,6 +105,49 @@ class TestTrackPeakIntegration(unittest.TestCase):
         self.assertEqual(pos["peak_pnl"], 30.0)
 
 
+class TestBurstAlert(unittest.TestCase):
+    """弹窗标记只给趋势单：震荡单有券商端硬 tp，到线就走，不需要人插手。"""
+
+    def test_trend_gets_alert(self):
+        pos = _pos(plan="trend", ticket=88)
+        autotrade._mark_burst(pos, 25.0, NOW + 180)   # 5 ATR，3 分钟
+        al = pos.get("burst_alert") or {}
+        self.assertEqual(al.get("ticket"), 88)
+        self.assertEqual(al.get("t5"), 3.0)
+        self.assertEqual(al.get("atr_peak"), 5.0)     # 25 / 5.0
+        self.assertEqual(al.get("fp"), 25.0)
+        self.assertEqual(al.get("direction"), 1)
+        self.assertEqual(al.get("price_open"), 4000.0)
+
+    def test_range_records_but_does_not_alert(self):
+        """震荡单照样记 t3/t5（天然对照组），只是不弹窗。"""
+        pos = _pos(plan="range")
+        autotrade._mark_burst(pos, 25.0, NOW + 60)
+        self.assertEqual(pos["t5"], 1.0)
+        self.assertNotIn("burst_alert", pos)
+
+    def test_alert_fires_once_and_keeps_original_ts(self):
+        """弹过之后又涨到 8 ATR：不能把第二次的数覆盖上去，否则面板会重弹。"""
+        pos = _pos(plan="trend")
+        autotrade._mark_burst(pos, 25.0, NOW + 60)
+        first = dict(pos["burst_alert"])
+        autotrade._mark_burst(pos, 40.0, NOW + 600)
+        self.assertEqual(pos["burst_alert"], first)
+
+    def test_alert_uses_the_peak_that_triggered_it(self):
+        """atr_peak 必须按触发它的那个峰值算，不能读 pos 里还没写入的 peak_pnl。"""
+        pos = _pos(plan="trend", peak_pnl=1.0, peak_ts=NOW)
+        autotrade._mark_burst(pos, 37.5, NOW + 60)    # 7.5 ATR
+        self.assertEqual(pos["burst_alert"]["atr_peak"], 7.5)
+        self.assertEqual(pos["peak_pnl"], 1.0)        # 这个函数不写峰值
+
+    def test_returns_true_only_when_five_atr_crossed(self):
+        pos = _pos(plan="trend")
+        self.assertFalse(autotrade._mark_burst(pos, 15.0, NOW + 60))   # 3 ATR
+        self.assertTrue(autotrade._mark_burst(pos, 25.0, NOW + 120))   # 5 ATR
+        self.assertFalse(autotrade._mark_burst(pos, 40.0, NOW + 180))  # 已记过
+
+
 class TestCloseRowFields(unittest.TestCase):
     def test_atr_peak_and_burst_land_in_close_row(self):
         state = autotrade._empty_state()
