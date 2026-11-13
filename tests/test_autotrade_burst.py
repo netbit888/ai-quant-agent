@@ -18,6 +18,8 @@ def _pos(**over) -> dict:
         "ticket": 1, "direction": 1, "lots": 0.05, "price_open": 4000.0,
         "opened_at": NOW, "atr": 2.0, "atr_pnl": 5.0,
         "peak_pnl": None, "peak_ts": None, "plan": "trend",
+        # 辅助模式：弹窗的唯一前提（见 TestBurstAlert）。全自动的单子不弹。
+        "assist": True,
     }
     pos.update(over)
     return pos
@@ -106,7 +108,8 @@ class TestTrackPeakIntegration(unittest.TestCase):
 
 
 class TestBurstAlert(unittest.TestCase):
-    """弹窗标记只给趋势单：震荡单有券商端硬 tp，到线就走，不需要人插手。"""
+    """弹窗标记只给「趋势单 + 辅助模式」：震荡单有券商端硬 tp、到线就走；
+    全自动模式没人盯屏，弹窗纯干扰（锁利由程序自己抬，见 TestLockStep）。"""
 
     def test_trend_gets_alert(self):
         pos = _pos(plan="trend", ticket=88)
@@ -124,6 +127,20 @@ class TestBurstAlert(unittest.TestCase):
         pos = _pos(plan="range")
         autotrade._mark_burst(pos, 25.0, NOW + 60)
         self.assertEqual(pos["t5"], 1.0)
+        self.assertNotIn("burst_alert", pos)
+
+    def test_auto_mode_records_but_does_not_alert(self):
+        """全自动：记录照记（统计原料），不弹窗（没人看，纯干扰）。"""
+        pos = _pos(plan="trend", assist=False)
+        autotrade._mark_burst(pos, 25.0, NOW + 60)
+        self.assertEqual(pos["t5"], 1.0)
+        self.assertNotIn("burst_alert", pos)
+
+    def test_missing_assist_field_means_no_alert(self):
+        """升级瞬间的旧持仓没有 assist 字段：按全自动处理，宁可不弹。"""
+        pos = _pos()
+        pos.pop("assist")
+        autotrade._mark_burst(pos, 25.0, NOW + 60)
         self.assertNotIn("burst_alert", pos)
 
     def test_alert_fires_once_and_keeps_original_ts(self):

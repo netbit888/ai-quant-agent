@@ -308,6 +308,18 @@ class Cfg:
     # 锁被占、或价格已经回到开仓价以下挂不上去）。节流是为了别每 2 秒锤
     # 一次券商。**失败期间保护不缺席**：浮盈回到 0 由 _guard_hit 本地代平。
     be_retry_sec: int = 20
+    # 脉冲锁利（2026-11-13）：趋势单浮盈**首次走满 5 个 ATR** 之后，把券商端
+    # SL 从开仓价抬到「峰值 − 1.5 ATR」，峰值再抬高就跟着抬。
+    #
+    # 和 be 的区别：be 只保本（零利润），这条**保利润**。两者改的是同一条
+    # 券商 SL，取更高的位置——lock 的门槛（5 ATR）天然高于 be（3.25 USD），
+    # 所以 lock 一定在 be 之后发生并覆盖它，不需要额外仲裁。
+    #
+    # 依据 `python -m tools.burst_lock`（50 天 M1）：脉冲后按 L=1.5 抬线，
+    # 77% 会被打掉、其中只有 6% 打掉后价格又创新高；L=0.5 太紧（16% 砍错），
+    # L=3.0 太松（锁住的少一截）。**样本 n=22，属"方向明确、量级待验证"**，
+    # 关掉只需把这里设 False。
+    lock_profit: bool = True
     # ---------------------------------------------------------------
     # 入场端的两个硬闸门（2026-10-27 复盘后加）。它们**不发明新规则**，
     # 只是把提示词里早就写着、模型却会违反的两条约束交给代码执行。
@@ -471,6 +483,7 @@ CODE_ONLY: tuple[str, ...] = (
     "zone_edge", "trend_follow", "tp_min_trend", "max_hold_trend",
     "trend_span_atr_max",
     "be_at_entry", "be_arm_usd", "be_retry_sec",
+    "lock_profit",
     "assist_raise_window",
 )
 
@@ -3087,7 +3100,7 @@ def build_review_prompt(rows: list[dict], position: dict, exit_price: float,
 # 程序代平保本（be_local）、券商端硬止盈（tp，2026-11-11 起只给非趋势单）。
 # 它们的共同点是"平仓那一刻模型没有决策权"，所以复盘出来的教训不能只锁在
 # 出场端——模型真正能改的是"这一笔该不该开"。
-_FORCED_EXIT_SOURCES = ("sl", "be", "be_local", "tp")
+_FORCED_EXIT_SOURCES = ("sl", "be", "be_local", "tp", "lock", "lock_local")
 
 
 def ask_review(cfg: Cfg, position: dict, exit_price: float, pnl: float,
@@ -4823,6 +4836,14 @@ def _tick_body(cfg: Cfg, login, now: int,
         if be_row:
             append_log(be_row, login)
 
+        # 脉冲锁利（2026-11-13）：趋势单首次走满 5 ATR 之后，把券商端 SL 从
+        # 开仓价抬到「峰值 − 1.5 ATR」，并随峰值继续抬。放在 be 之后 = 覆盖
+        # be 抬过的位置（门槛天然更高）。**只改券商端那条线，不新增平仓路径**：
+        # 平不平仍由券商 SL / _exit_gate / 模型三方照旧决定。
+        lock_row = _lock_step(cfg, pos, now)
+        if lock_row:
+            append_log(lock_row, login)
+
         # plan 在开仓时锁定（见 state["position"]），出场参数跟着这笔单打法走，
         # 中途 regime 跳变不换规则——见 exit_params 的注释。
         #
@@ -4835,6 +4856,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         gate = _exit_gate(cfg, held_sec, float_pnl, pos.get("plan"),
                           stale_ready=stale,
                           be_local=_be_local_hit(cfg, pos, float_pnl),
+                          lock_local=_lock_local_hit(cfg, pos, float_pnl),
                           tp_seen=tp_seen, tp_left=tp_left)
 
         # 辅助模式的痕迹位。默认 auto：走到这里说明是程序或模型自己决定的。
@@ -5348,6 +5370,10 @@ def _tick_body(cfg: Cfg, login, now: int,
         "ticket": ticket, "direction": direction, "lots": cfg.lots,
         "price_open": price, "opened_at": now, "p_up": p_up,
         "entry_reason": decision.get("reason"), "dry_run": cfg.dry_run,
+        # 开仓时是不是辅助模式——只用来决定脉冲弹不弹（全自动模式下没人盯屏，
+        # 弹窗是干扰）。锁利本身两种模式都做，不看这个字段。记进 pos 而不是
+        # 每轮读 cfg：面板中途切模式不该影响一笔已经开出去的仓。
+        "assist": bool(cfg.assist),
         # 分歧记账：程序建议方向 + 模型是否自称同意。
         # 事后按 (prog_dir, direction) 分格算期望，谁该拥有判断权让数据判。
         "prog_dir": prog_dir, "agree": agree,
@@ -5426,22 +5452,25 @@ def _tick_body(cfg: Cfg, login, now: int,
 def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
                plan: str | None = None, stale_ready: bool = False,
                be_local: bool = False, tp_seen: bool = False,
-               tp_left: int = 0) -> dict | None:
+               tp_left: int = 0, lock_local: bool = False) -> dict | None:
     """持仓期间的**程序闸门**。返回 dict = 本轮结论已定；返回 None = 交给模型判断。
 
     顺序是致命的：**止损必须排在止盈门槛之前**。
     反过来写的话，一笔浮亏 -5 USD 的单子会因为「浮盈没到 2.50」被判成继续持有，
     止损永远不触发——参数越保守亏得越多。所以单独抽出来 + 单测钉住顺序。
 
-    现在的顺序是 **sl → be_local → timeout → stale → tp_wait**，五条各自的位置
-    都有理由：
+    现在的顺序是 **sl → lock_local → be_local → timeout → stale → tp_wait**，
+    六条各自的位置都有理由：
       · sl 最前：兜底，任何时候都不许被别的规则挡住；
-      · be_local（2026-10-29）第二：保本线的本地兜底，只在券商端没挂上时成立。
+      · lock_local（2026-11-13）第二：脉冲锁利线的本地兜底，只在券商端没挂上
+        时成立。位置比保本线高（峰值 −1.5 ATR > 0），价格往下走一定先破它，
+        所以排在 be_local 之前——反过来会被记成 be_local，分桶就废了；
+      · be_local（2026-10-29）第三：保本线的本地兜底，只在券商端没挂上时成立。
         必须排在 timeout 和 tp_wait 之前——它的触发条件是"浮盈回到 0"，
         那时候 fp 远低于门槛，落在 tp_wait 后面就永远走不到；
         也必须排在 sl 之后：浮亏 -3.5 的单子两条线同时为真，记成 sl 才是实情；
-      · timeout 第三：卡在 +2.0（没到门槛）的单子不能被无限持有，否则超短线拖成隔夜；
-      · stale 第四：**只放行、不改阈值**。峰值停滞时返回 None 把决定
+      · timeout 第四：卡在 +2.0（没到门槛）的单子不能被无限持有，否则超短线拖成隔夜；
+      · stale 第五：**只放行、不改阈值**。峰值停滞时返回 None 把决定
         交给模型，但它必须排在 tp_wait 之前——否则 fp < tp 永远走不到这里，
         "唤醒"就成了一句空话（10-28 那笔盲等 455 秒就是这么来的）；
       · tp_wait 最后：fp 没到门槛就继续持有、不调模型，省 token。
@@ -5449,8 +5478,9 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
         时改走 tp_recheck，最多静默 tp_reask_sec 秒。否则一笔摸到 7.39 又掉回
         6.08 的趋势单会被 tp_wait 永久闭嘴，而它比任何时候都更需要判断。
 
-    `stale_ready` / `be_local` 都由调用方判好再传进来，本函数**不碰时间、
-    也不读 pos**——否则那 20 条钉顺序的单测全得跟着传 timestamp 和整笔仓位。
+    `stale_ready` / `be_local` / `lock_local` 都由调用方判好再传进来，本函数
+    **不碰时间、也不读 pos**——否则那些钉顺序的单测全得跟着传 timestamp 和
+    整笔仓位。
 
     `plan` 决定这一笔按哪套参数走（见 exit_params）：趋势单的止盈门槛是
     tp_min_trend（默认 7.0）、持仓上限 max_hold_trend（默认 3 小时）；震荡单
@@ -5467,6 +5497,16 @@ def _exit_gate(cfg: Cfg, held_sec: int, float_pnl: float,
     if ep["sl_usd"] > 0 and float_pnl <= -abs(ep["sl_usd"]):
         return {"close": True, "source": "sl",
                 "reason": (f"硬止损：浮亏 {float_pnl:+.2f} 触及 -{abs(ep['sl_usd']):.2f}")
+                }
+
+    # 锁利线兜底（2026-11-13）：脉冲后该挂的锁利线没挂上（多半是价格已经
+    # 回落到目标线下方，券商直接拒 10016），现在浮盈跌破锁定值——程序代平。
+    # **必须排在 be_local 之前**：锁利线的位置更高（峰值 −1.5 ATR），价格往下
+    # 走一定先破它；排在后面的话，fp 一路掉到 0 才会触发，锁利等于没做。
+    if lock_local:
+        return {"close": True, "source": "lock_local",
+                "reason": (f"脉冲锁利线：浮盈 {float_pnl:+.2f} 跌破锁定值，"
+                           "券商端没挂上，程序代平")
                 }
 
     # 保本线兜底（2026-10-29）：峰值到过 be_arm_usd、但券商端那条 SL 没挂上，
@@ -5557,6 +5597,12 @@ def _gone_source(pos: dict, deal_reason: int | None) -> tuple[str, str]:
     if deal_reason == 5 and pos.get("tp_broker"):
         return "tp", (f"券商端硬止盈 {float(pos.get('tp_broker') or 0):.3f} 成交"
                       f"（震荡单开仓时挂的止盈，程序未发平仓单）")
+    # lock 判在 be 之前：锁利线一定在 be 之后挂、位置更高，两者都置了 sl_broker。
+    # 先判 be 的话，锁利单会被记成保本单——那正是"按 source 分桶算期望"要避免的
+    # 混淆（be 的期望是 0 附近，lock 的期望必须单独看才知道这条规则值不值）。
+    if pos.get("lock_ok") and (deal_reason is None or deal_reason == 4):
+        return "lock", (f"券商端脉冲锁利 {float(pos.get('lock_sl') or 0):.3f} 被触发"
+                        f"（峰值后把 SL 抬到峰值 −{_LOCK_L:g} ATR）")
     if pos.get("be_ok") and (deal_reason is None or deal_reason == 4):
         return "be", (f"券商端保本止损 {float(pos.get('be_sl') or 0):.3f} 被触发"
                       f"（峰值浮盈后把 SL 抬到开仓价）")
@@ -5691,6 +5737,10 @@ def _fmt(row: dict) -> str:
         return f"{clock} 持有 {row.get('reason') or ''}"
     if kind == "be":
         return (f"{clock} 保本止损 #{row.get('ticket')} "
+                f"SL→{float(row.get('sl') or 0):.3f} [{row.get('mode')}] "
+                f"{row.get('reason') or ''}")
+    if kind == "lock":
+        return (f"{clock} 脉冲锁利 #{row.get('ticket')} "
                 f"SL→{float(row.get('sl') or 0):.3f} [{row.get('mode')}] "
                 f"{row.get('reason') or ''}")
     if kind == "be_fail":
@@ -5918,6 +5968,29 @@ _BURST_WIN_MIN = 3.0
 # 任何一笔都能算"从 3 ATR 走到 5 ATR 用了几分钟"，也就是真正的速度。
 _ATR_STEPS = (3.0, _BURST_ATR)
 
+# ---- 脉冲锁利（2026-11-13） ----------------------------------------------
+# 脉冲成立（3 分钟内走满 5 ATR）之后，把**券商端 SL** 从开仓价抬到
+# 「峰值 − L 个 ATR」。峰值继续抬高这条线就跟着抬，只有回撤超过 L 才走掉。
+#
+# 为什么是抬 SL 而不是平仓（`python -m tools.burst_lock`，50 天 M1，5 ATR 档）：
+#   L=0.5 → 93% 会被打掉，其中 16% 打掉之后价格又摸回峰值（纯亏）；
+#   L=1.5 → 77% 被打掉，砍错只有 6%，锁住的利润还够看；
+#   L=3.0 → 61% 被打掉，砍错 0%，但锁住的明显少一截，等于半途而废。
+# 1.5 是"松到不被 M1 噪音打掉、紧到真能接住回撤"的那一档。打掉比例高不是
+# 坏事——趋势单本来就只有少数能一路走，锁利要的是让那 77% 变成正收益。
+#
+# 为什么不平仓：同一批事件 15 分钟均值 +0.39 ATR（被少数暴涨拉正）、中位
+# −1.27。全平就是砍右尾，而趋势单的钱全在右尾。
+# 为什么不让模型决定：脉冲的价值在"当下"，决策轮 60 秒一次，等它看到已经
+# 吐完了；何况这个特征没进提示词，模型根本不知道自己在脉冲里。
+#
+# **只对 trend 单**：震荡单有券商端硬 tp 3.25，到线就走，再加一条线会跟它打架。
+# 与 be（抬到开仓价）的关系：两条都改同一条券商 SL，取更高的那个。
+# lock 门槛（5 ATR）永远高于 be 门槛（3.25 USD），所以 lock 一定后发生、
+# 并且覆盖 be 抬过的位置——顺序天然安全，不需要额外仲裁。
+_LOCK_L = 1.5          # 锁利线 = 峰值 − 1.5 个 ATR
+_LOCK_STEP_ATR = 0.5   # 目标价要比当前挂着的线高出这么多才值得改一次单
+
 
 def _atr_pnl_unit(atr: float, lots: float, symbol: str) -> float:
     """1 个 ATR 折成这笔单的浮盈（账户结算货币）。算不出来返回 0。
@@ -5969,7 +6042,11 @@ def _mark_burst(pos: dict, peak: float, ts: int) -> bool:
         if k != _BURST_ATR:
             continue
         fired = True
-        if pos.get("plan") == "trend" and not pos.get("burst_alert"):
+        # 弹窗只给**辅助模式**的趋势单（2026-11-13）：全自动模式下没人盯屏，
+        # 弹窗等于纯干扰；而锁利线由程序自己抬（见 _lock_step），不需要人。
+        # 记录（t3/t5/burst）与模式无关，照记——那是统计的原料。
+        if (pos.get("plan") == "trend" and pos.get("assist")
+                and not pos.get("burst_alert")):
             # 只放面板要显示的那几个数。**不在这里做任何交易动作**——
             # 弹窗是提醒人看，不是替人平仓；程序平不平仓仍由 _exit_gate 决定。
             pos["burst_alert"] = {
@@ -6000,6 +6077,127 @@ def _is_burst(pos: dict) -> bool:
     """3 分钟（≈3 根 M1）内走满 5 个 ATR。"""
     t5 = pos.get("t5")
     return t5 is not None and float(t5) <= _BURST_WIN_MIN
+
+
+def _lock_applies(pos: dict | None) -> bool:
+    """脉冲锁利管不管这一笔：趋势单，且脉冲已经成立（`t5` 有值）。
+
+    门槛用 `t5` 而不是 `_is_burst`：3 分钟内没走完、但 4 分钟走完 5 ATR 的单子
+    同样有回撤风险，而"3 分钟"这个窗口本身是 n=30 的样本里挑出来的，不该
+    让它同时决定"要不要保护"。窗口只作统计标签，保护只看"到过 5 ATR"。
+    """
+    if not pos:
+        return False
+    if str(pos.get("plan") or "") != "trend":
+        return False
+    return pos.get("t5") is not None
+
+
+def _lock_target(pos: dict) -> float | None:
+    """锁利线该挂在哪。None = 这一笔现在没有该抬的线。
+
+    峰值折成价格：`peak_pnl / atr_pnl` 就是峰值那一刻价格相对开仓价走了多少
+    个 ATR（`atr_pnl` = 1 个 ATR 的浮盈，见 `_atr_pnl_unit`），乘回 ATR 得到
+    价格位移，再退 L 个 ATR = 要锁住的位置。
+
+    全程用**开仓时锁定的** atr / atr_pnl，中途不重算——和 be 同理，否则同一
+    笔仓前后会被两套门槛管。缺失就返回 None：算不出就不挂，不猜。
+    """
+    try:
+        unit = float(pos.get("atr_pnl") or 0.0)
+        atr = float(pos.get("atr") or 0.0)
+        entry = float(pos.get("price_open") or 0.0)
+        d = int(pos.get("direction") or 0)
+        peak = float(pos.get("peak_pnl") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if unit <= 0 or atr <= 0 or entry <= 0 or not d:
+        return None
+    move = (peak / unit - _LOCK_L) * atr      # 价格位移，单位=报价货币
+    if move <= 0:
+        return None                          # 峰值还不够高，锁不出利润
+    return entry + d * move
+
+
+def _lock_step(cfg: Cfg, pos: dict, now: int) -> dict | None:
+    """把券商端 SL 抬到锁利线。返回要落盘的一行或 None。
+
+    和 `_be_step` 完全同构（幂等用 `lock_ok`、失败节流用 `lock_try_ts`、
+    busy 不算失败、纸面单只记账），差别只有目标价：be 是开仓价，这条是
+    「峰值 − 1.5 ATR」，且会随峰值继续抬高。
+
+    挂失败时的兜底在 `_lock_local_hit` + `_exit_gate` 的 `lock_local` 分支：
+    券商会拒掉"已经在现价错误一侧"的 SL（10016），而那正是锁利该生效的时刻，
+    不能只记一个 `lock_err` 就当作没这条规则。
+    """
+    if not bool(getattr(cfg, "lock_profit", False)):
+        return None
+    if not _lock_applies(pos):
+        return None
+    target = _lock_target(pos)
+    if target is None:
+        return None
+
+    atr = float(pos.get("atr") or 0.0)
+    prev = pos.get("lock_sl")
+    if prev is not None and atr > 0:
+        try:
+            # 没比已经挂着的线高出半个 ATR：不值得再改一次单。券商端改单要
+            # 抢 MT5 锁，峰值一路上抬时连改几十次，会把 2 秒一格的止损快查
+            # 挤成 5 秒——那条路径上还有硬止损在判，不能为一点小钱冒险。
+            if float(target) - float(prev) < _LOCK_STEP_ATR * atr:
+                return None
+        except (TypeError, ValueError):
+            pass
+
+    now = int(now)
+    retry = int(getattr(cfg, "be_retry_sec", 20) or 0)
+    last = pos.get("lock_try_ts")
+    if last is not None and retry > 0:
+        try:
+            if now - int(last) < retry:
+                return None
+        except (TypeError, ValueError):
+            pass
+
+    ticket = int(pos.get("ticket") or 0)
+    peak = float(pos.get("peak_pnl") or 0.0)
+    if pos.get("dry_run") or ticket <= 0:
+        pos["lock_try_ts"] = now
+        pos["lock_mode"] = "paper"
+        pos["lock_sl"] = round(target, 3)
+        pos["lock_ts"] = now
+        return {"ts": now, "kind": "lock", "ticket": ticket,
+                "direction": pos.get("direction"), "mode": "paper",
+                "sl": round(target, 3), "peak_pnl": round(peak, 2),
+                "reason": (f"峰值 {peak:+.2f}（{_peak_atr(pos)} ATR）后，"
+                           f"纸面锁利线设到 {target:.3f}（峰值 −{_LOCK_L:g} ATR）")}
+
+    res = send_modify_sl(cfg, ticket, target)
+    if res.get("busy"):
+        # 终端这一格没排上队：不算失败，也不消耗重试窗口（同 _be_step）。
+        return None
+    pos["lock_try_ts"] = now
+    if res.get("ok"):
+        pos["lock_ok"] = 1
+        pos["lock_sl"] = float(res.get("price") or target)
+        pos["lock_ts"] = now
+        # 券商端那条线现在就是锁利价；同步给 sl_broker，让面板只读一处。
+        pos["sl_broker"] = float(pos["lock_sl"])
+        pos.pop("lock_err", None)
+        return {"ts": now, "kind": "lock", "ticket": ticket,
+                "direction": pos.get("direction"), "mode": "broker",
+                "sl": round(float(pos["lock_sl"]), 3),
+                "peak_pnl": round(peak, 2),
+                "reason": (f"峰值 {peak:+.2f}（{_peak_atr(pos)} ATR）后，"
+                           f"券商端 SL 抬到 {float(pos['lock_sl']):.3f}"
+                           f"（峰值 −{_LOCK_L:g} ATR，锁住这一段）")}
+
+    # 改单失败（多半是价格已经回落到目标线下方 → 10016）。只记一笔原因，
+    # **不进流水**：这种失败会每 20 秒重复一次，写进流水会把真正的成交淹掉。
+    # 面板/复盘看 `lock_err` 就知道这条线当时为什么没挂上。
+    pos["lock_err"] = str(res.get("reason") or "改单失败")
+    return None
 
 
 def _track_peak(pos: dict, float_pnl: float, ts: int) -> bool:
@@ -6176,6 +6374,46 @@ def _be_applies(pos: dict | None) -> bool:
     return str(pos.get("plan") or "") == "trend"
 
 
+def _lock_local_hit(cfg: Cfg, pos: dict | None, float_pnl: float) -> bool:
+    """锁利线的**本地兜底**：券商端那条线没挂上时，浮盈跌破锁定值由程序平。
+
+    只在 `lock_ok` 为假时成立。挂上了就绝不重复判——两道同时生效会让成交价
+    变成"谁先到谁赢"，而这条规则的全部价值就在于事后能按 source 算期望。
+
+    为什么必须有：`modify_sl` 在价格已经回落到目标线下方时会被券商直接拒
+    （10016），而这恰恰就是"锁利想防的事已经发生了"的那一刻。没有兜底的话，
+    这笔单会一路退回开仓价（再由 be 兜底），锁利线形同虚设。
+
+    为什么要求 `lock_try_ts`（**试过挂单**）而不只是"脉冲成立"：升级瞬间手里
+    可能正拿着一笔峰值 6 ATR、已回落到 4.5 ATR 的旧持仓，`_mark_burst` 会当场
+    把 t5 补记上。只按"脉冲成立 + 浮盈跌破锁定值"判，这一格就会**平掉一笔本来
+    没打算平的盈利单**。加上"试过改单"这个前提，兜底只接管真正挂失败的那些。
+
+    锁定值用 `peak − L×unit`：和 `_lock_target` 同一个式子，只是单位是钱而不是
+    价格。峰值抬高时这条线跟着抬，所以它永远比"当前峰值 − L"更松不了。
+    """
+    if not pos or not bool(getattr(cfg, "lock_profit", False)):
+        return False
+    if not _lock_applies(pos):
+        return False
+    if pos.get("lock_ok") or pos.get("lock_mode") == "paper":
+        return False
+    if not pos.get("lock_try_ts"):
+        return False        # 还没试过挂单（升级瞬间的旧持仓），不接管
+    try:
+        unit = float(pos.get("atr_pnl") or 0.0)
+        peak = float(pos.get("peak_pnl") or 0.0)
+        fp = float(float_pnl)
+    except (TypeError, ValueError):
+        return False
+    if unit <= 0:
+        return False
+    locked = peak - _LOCK_L * unit
+    if locked <= 0:
+        return False
+    return fp <= locked
+
+
 def _be_local_hit(cfg: Cfg, pos: dict | None, float_pnl: float) -> bool:
     """保本线的**本地兜底**：券商端没挂上时，浮盈回到 0 由程序平。
 
@@ -6347,6 +6585,10 @@ def _guard_hit(cfg: Cfg, pos: dict, bid: float, ask: float,
     sl = float(exit_params(cfg, pos.get("plan"))["sl_usd"] or 0.0)
     if sl > 0 and fp <= -abs(sl):
         return f"浮亏 {fp:+.2f} 触及 -{abs(sl):.2f}"
+    # 锁利线位置比保本线高（峰值 −1.5 ATR > 0），价格往下走一定先破它，
+    # 所以锁利这条排在前面判——反过来的话，跳空那一下会被记成 be_local。
+    if _lock_local_hit(cfg, pos, fp):
+        return f"浮盈 {fp:+.2f} 跌破锁利线（券商端未挂上，程序代平）"
     if _be_local_hit(cfg, pos, fp):
         return f"浮盈 {fp:+.2f} 回到 0（保本线，券商端未挂上，程序代平）"
     return ""
@@ -6883,7 +7125,13 @@ def _wait_next(started: float, row: dict, cfg: Cfg, login=None,
         be_row = _be_step(cfg, pos, fp, int(time.time()))
         if be_row:
             append_log(be_row, login)
-        if peak_up or be_row:
+        # 脉冲锁利：和 tick 里同一个 _lock_step。之所以必须在快查里做，
+        # 理由和 be 一样——脉冲的峰值是 2 秒一格抓到的，等 60 秒那一轮再看，
+        # 价格早就从峰值退下来了，锁利线也就抬不到该在的位置。
+        lock_row = _lock_step(cfg, pos, int(time.time()))
+        if lock_row:
+            append_log(lock_row, login)
+        if peak_up or be_row or lock_row:
             # 重读再写：state 里可能还有面板写的其他字段，别拿旧快照整体覆盖。
             # 外部平仓竞态无害：pos 还是旧引用，峰值照记，下一轮 tick()
             # 检测外部平仓时会整体覆盖处理。
