@@ -87,6 +87,23 @@ class TestLockApplies(unittest.TestCase):
     def test_trend_with_t5(self):
         self.assertTrue(autotrade._lock_applies(_pos()))
 
+    def test_assist_mode_never_gets_locked(self):
+        """辅助模式只弹窗：人正在看屏，程序不该替他把 SL 抬掉。
+
+        这是 2026-11-13 用户定的分工——辅助模式下「锁利」这条规则整体不生效，
+        抬不抬线由人在终端上决定或切到全自动。
+        """
+        self.assertFalse(autotrade._lock_applies(_pos(assist=True)))
+
+    def test_missing_assist_means_auto(self):
+        """升级瞬间的旧持仓没有 assist 字段：按全自动处理，别把保护抽走。
+
+        与 `burst_alert` 的缺省方向一致（缺字段 → 不弹窗 → 全自动那一侧）。
+        """
+        pos = _pos()
+        pos.pop("assist")
+        self.assertTrue(autotrade._lock_applies(pos))
+
 
 class TestLockStep(unittest.TestCase):
     def _cfg(self, **over):
@@ -111,6 +128,19 @@ class TestLockStep(unittest.TestCase):
         self.assertEqual(row["kind"], "lock")
         self.assertEqual(row["mode"], "broker")
         self.assertAlmostEqual(row["sl"], 4007.0, places=3)
+
+    def test_assist_mode_does_not_send_any_modify(self):
+        """辅助模式连改单都不发——不是发出去再回退，是压根不进这一步。
+
+        用 mock 断言 `send_modify_sl` 未被调用：只判返回值的话，写错成
+        "发了然后 return None" 也能过，那已经是动过券商的单了。
+        """
+        pos = _pos(assist=True)
+        with mock.patch.object(autotrade, "send_modify_sl") as m:
+            self.assertIsNone(autotrade._lock_step(self._cfg(), pos, NOW + 120))
+        m.assert_not_called()
+        self.assertNotIn("lock_ok", pos)
+        self.assertNotIn("lock_try_ts", pos)
 
     def test_skip_when_target_not_a_half_atr_above_current(self):
         """峰值只抬高 0.3 ATR：不值得再抢一次 MT5 锁（会把快查挤成 5 秒）。"""
@@ -247,6 +277,15 @@ class TestLocalFallback(unittest.TestCase):
     def test_paper_position_not_handled_here(self):
         """纸面单没有券商仓，程序代平无从谈起（由 _exit_gate 照常判）。"""
         pos = _pos(lock_mode="paper", lock_try_ts=NOW + 120)
+        self.assertFalse(autotrade._lock_local_hit(self._cfg(), pos, 1.0))
+
+    def test_assist_mode_does_not_take_over(self):
+        """辅助模式连兜底也不接管：线从来没挂过，就不该由程序代平。
+
+        否则会出现最难解释的一种成交——弹窗上写着"程序不会平仓"，几秒后
+        程序自己平了（因为 `lock_try_ts` 是升级前那套流程留下的）。
+        """
+        pos = _pos(assist=True, lock_try_ts=NOW + 120)
         self.assertFalse(autotrade._lock_local_hit(self._cfg(), pos, 1.0))
 
     def test_switch_off(self):
