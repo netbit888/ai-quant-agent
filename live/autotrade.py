@@ -48,10 +48,58 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from live import paths
+from live.cfg import (  # noqa: F401  （重新导出：老路径 autotrade.Cfg 继续可用）
+    BASE_LOTS,
+    CODE_ONLY,
+    Cfg,
+    PANEL_FIELDS,
+    TRADABLE_SYMBOLS,
+    _SCALE_EPS,
+    _TYPE_LABEL,
+    _as_bool,
+    _coerce,
+    _field_kind,
+    cfg_from_start_body,
+    cfg_to_dict,
+    lot_scale,
+    money_at_lots,
+    money_label,
+)
+from live.ta import (  # noqa: F401  （重新导出：老路径 autotrade._atr 继续可用）
+    ER_RANGE_MAX,
+    ER_TREND_MIN,
+    MA_PERIOD,
+    P_UP_CEIL,
+    P_UP_FLOOR,
+    SYMBOL_LABELS,
+    VISIBLE_BARS,
+    _JSON_RE,
+    _PUP_RE,
+    _atr,
+    _fmt_bar_lines,
+    _last_bar_shape,
+    _ma_calc,
+    _norm_bool,
+    _norm_prob,
+    _prog_direction,
+    _regime_word,
+    _returns,
+    _spread_points,
+    _structure,
+    _structure_text,
+    _symbol_label,
+    _zone_fact,
+    _zone_text,
+    clamp_p_up,
+    feature_snapshot,
+    ma_line,
+    parse_p_up,
+    regime_of,
+    visible_bars,
+)
 
 
 def _llm():
@@ -64,527 +112,12 @@ def _llm():
 # ------------------------------------------------------------------ 配置
 
 
-@dataclass
-class Cfg:
-    """运行参数。
-
-    字段归属见下面的 `PANEL_FIELDS` / `CODE_ONLY`：前者面板能设（仓位、节奏、
-    模式、刹车、对照开关），后者只跟本版默认值（回放扫出来的阈值，让人在
-    界面上随手拖就是噪声）。启动路径的唯一入口是 `cfg_from_start_body()`。
-    """
-
-    symbol: str = "XAUUSDm"
-    lots: float = 0.01
-    # 决策节奏。用户 10-26 明确要求默认 60 秒：3 秒那个档位一轮决策约 2.6 秒，
-    # 等于不间断连打模型，一天上万次调用，而且平仓后冷却根本插不进去。
-    interval_sec: int = 60
-    # 决策唤醒对齐 K 线收盘（2026-11-10）。唤醒点 = 下一个 interval 网格 + 这一秒数。
-    # **0 = 关闭，回到 `started + interval_sec` 的自由跑表。**
-    #
-    # 起因：唤醒点算的是 `started + interval_sec`，而 started 是上一轮**实际**
-    # 返回的时刻。三样东西会把这个基准搬到任意一秒，且搬完之后没有任何东西把它
-    # 拉回来：尾段那记「不足 1 秒也保底睡 1 秒」、快查的提前唤醒（止损/保本/tp/
-    # 停滞，跳到事件发生的那一秒）、辅助模式下从 tick 结束才开始计时。
-    # 实测按会话切开：段内相位标准差中位 15.5~15.9 秒，93%/100% 的会话段都在
-    # 漂——不是"每次重启随机一次"，是**每一轮都在走**。
-    #
-    # 为什么这是 bug 不是风格：visible_bars 的最后一根就是**正在长的那根**，而
-    # clv / upper_wick / body / streak / pos / er 全拿它算。开盘 5 秒看到「上影
-    # 62%」，收盘可能变成实体 80%；而「插针顶不做」是提示词里的硬规则（代码不拦），
-    # 于是这条否决变成了掷骰子，且流水里查不出来——feat 里没有「当时那根还没长完」
-    # 的痕迹。对齐之后，「60 秒一轮」精确等于「新增 1 根已收 K 线」。
-    #
-    # 为什么不给面板：这不是策略参数，是时钟管道。3 秒 = 等券商把这一根落定，
-    # 没有可调余地（调大只是把决策推离收盘更远，调小等于在边界上抢跑）。
-    # 唯一的口径变化：冷却短于一个周期时（如 cooldown=30），原来 +1 秒就醒，
-    # 现在被推到下一根收盘——那次「提前看一眼」读的是半根 bar，本来也没有价值。
-    #
-    # 代价（明码标价）：决策永远落在每分钟同一秒。若券商在整分钟边界扩点差，
-    # 会系统性撞在最差时刻；settle 就是为了避开边界那一瞬。要验证就量 60 秒
-    # 周期内点差的相位分布，别靠感觉。
-    align_settle_sec: float = 3.0
-    # 平仓冷却按方向分两档（2026-10-29 改）。原来是单一 30 秒，正好落在
-    # 「冷却+1 秒」的唤醒点上，等于每笔平仓后把模型推回同一个方向问一次。
-    # 10-22 起 331 笔里「同向 ≤60 秒重进」102 笔、均值 -0.50 USD/笔
-    # （整体 -0.22，t=-3.6）——最大且最差的桶；同向 61-300 秒桶均值 -0.09
-    # （近中性），所以同向推长到 3 分钟不掉钱。反向只防连环单，60 秒够。
-    cooldown_sec: int = 60          # 反向（以及方向未定）的冷却
-    cooldown_same_sec: int = 180    # 同向重进的冷却
-    magic: int = 20261022
-    # 用户 10-26 明确要求默认真实做单。**面板启动前仍要过一次确认弹窗**，
-    # 且纸面/真实二选一始终留在界面上——默认值只是省一次点击，不是免确认。
-    dry_run: bool = False
-    tf: str = "M1"
-    # 只取 14 根就够：AI 只允许看当前 + 前 13 根。多取没意义，
-    # 反正 prompt 层还会再截一次（见 visible_bars）。
-    bars: int = 14
-    # 平仓后让 AI 回看一段做复盘，并把结论带进下一次进场判断
-    review: bool = True
-    # 用户明确要求「无视点差成本」：成本由系统承担，不让模型拿它当拒绝的理由。
-    # 打开后（1）进场数据里不再给成本数字（2）系统提示禁止以成本为由拒绝
-    # （3）注入经验时过滤掉「点差/成本过高」这一类教训。
-    # 不这么做的话，模型会一直说"点差240吃掉微利，不做"，结果一笔都不开。
-    ignore_spread: bool = True
-    # 最短持仓秒数：刚开仓就平等于白送点差。60 秒内除浮亏超过豁免线，一律不平。
-    # 2026-10-23 起这条只在 tp_min_usd=0 时才起作用（见下面的止盈门槛）。
-    min_hold_sec: int = 60
-    # 浮亏超过这个额度才允许提前平仓（保护，别真扛爆）
-    min_hold_exempt_usd: float = 0.5
-    # ---------------------------------------------------------------
-    # 出场规则（2026-10-23 第 3 场复盘后加，专治「1:1 盈亏比 + 24 点差」的必输结构）
-    #
-    # 那一场的账：191 笔，胜率 35.6%，avgW 1.011 / avgL 1.026 → 盈亏比 0.99，
-    # 要打平需要胜率 50.4%。点差 0.24/笔 × 191 = 45.84，占总亏损 80%；
-    # 扣点差后判断失误只有 -11.59。也就是说**问题不在判断准不准，在每笔抓得太少**：
-    # 平均只抓 1.02 USD 的波动，光过路费就吃掉 23.5%，做的越多亏得越快。
-    #
-    # 参数不是拍的，是用 `tools/replay_exit.py` 拿那 191 个真实入场点
-    # × 当天真实 M1 K 线扫出来的（36 组组合）。结论：
-    #   实际（60 秒就跑）        -57.43   期望 -0.301   胜率 35.6%
-    #   止损 1.0 / 止盈 2.0      -29.00   期望 -0.152   胜率 28.3%
-    #   止损 3.0 / 止盈 3.25     -16.75   期望 -0.088   胜率 46.6%  ← 拐点
-    #   止损 4.0 / 止盈 4.5      -87.11   期望 -0.456   胜率 41.4%  （再宽就崩）
-    # 全部 36 组都是负期望。所以这两个参数**把亏损砍掉 71%，但救不活**——
-    # 最好的一组仍需 48.0% 胜率，实际只有 46.6%，差 1.4 个百分点。
-    # 剩下那 1.4pp 只能靠改入场方向（p_up 有一半是饱和的 0.0，见下）。
-    #
-    # 起作用的是什么，跟直觉相反：不是"让利润跑"，而是**给够空间**。
-    # 胜率从 35.6% 涨到 46.6%，是因为短期噪音不再把方向正确的单子打成亏损；
-    # 而 3.25/3.0 的盈亏比只有 1.08，几乎对称。真正压低点差占比的是
-    # 平均波动从 1.02 变成 3.1（点差占比 23.5% → 7.7%）。
-    #
-    # 硬止损：浮亏到这个额度**由程序直接市价平**，不问模型。
-    # 为什么不信模型：前四大亏（-6.08/-3.51/-2.70/-2.49）全是 p_up=0.0 的单子。
-    # 但注意 p_up=0.0 当时被 confidence=max(p_up,1-p_up)=1.0 记成"最自信"，
-    # 实际那是输出示例的占位值被照抄，不是自信（见 clamp_p_up）。所以这条教训
-    # 的真实含义是"模型给的数会骗人，不能让它单独管出场"，不是"它自信时必亏"。
-    # 注意这不是给订单挂 SL——账本里仍然是「手动平仓」，只是触发者是代码。
-    # 这样复盘口径、K 线判定都不用改。
-    sl_usd: float = 3.0
-    # 止盈门槛：浮盈没到这个数，模型说平也不平，继续持有（也不调模型，省 token）。
-    # 设 0 关掉，回到「60 秒一到就随便平」的老行为。
-    tp_min_usd: float = 3.25
-    # 持仓上限。拉长持仓必须有上限，否则震荡行情里会变成无限扛单：
-    # 回放里 3.0/3.25 这组的中位持仓已经 480 秒、最长 4560 秒（76 分钟），
-    # 再不封顶就成隔夜了——1 分钟周期的策略持有到隔夜已经不是同一个策略。
-    # 到点无条件市价平，盈亏都平。
-    max_hold_sec: int = 3600
-    # 持仓期间的硬止损快查间隔（秒）。0 = 关，回到「每 interval_sec 才看一次止损」。
-    #
-    # 为什么必须有：决策间隔是 60 秒，而 XAUUSD M1 的单根 K 线振幅中位就有 1.51
-    # USD、P90 2.99。止损 3.00 只在每 60 秒那一格被检查一次，意味着价格在两次
-    # 检查之间可以跑完整根 K 线——**止损永远不是按 3.00 成交的**。
-    # 实测证据（2026-10-26 13:13 那笔）：13:42:42 浮亏 -2.06，13:43:42 以 -3.77
-    # 平掉，超调 0.77 = 把 3.00 的止损放大 26%。227 笔反事实回放里所有规则都按
-    # -3.00 精确成交算，等于给了自己一个乐观假设。
-    #
-    # 这个快查**只读一个 tick、只判 sl_usd 一条、不调模型**：过线就提前结束等待，
-    # 让下一轮 tick() 照常走 _exit_gate→send_close 的老路平仓。
-    # 刻意不在这里直接下单——复制一份平仓逻辑就等于有两个账本口径。
-    # 5 秒的依据：一次 tick 读取的成本可以忽略；模型单次调用实测 2.6 秒，但这个
-    # 循环不碰模型，所以不受它限制。
-    guard_sec: float = 5.0
-    # 近门槛快查步长（秒）。快查循环的步长不是均匀的：浮盈离止盈门槛远时按
-    # guard_sec 粗看，一旦 fp >= tp_min_usd - tp_wake_band（默认 2.25 起）就切到
-    # 这一档细看。理由（第一性原理）：采样密度该花在决策边界附近——fp 在 0 附近
-    # 时用 2 秒盯是浪费，fp 逼近 3.25 时 5 秒反而可能错过穿越。2 秒下限的依据与
-    # guard_sec 相同：再快 MT5 tick 读取的抖动比价格变化还大。
-    guard_near_sec: float = 2.0
-    # 近门槛带宽（USD）：浮盈进入 [tp_min - band, ∞) 就切近档。0 = 关闭近档，
-    # 整轮都按 guard_sec 粗看（纯记录模式）。
-    tp_wake_band: float = 1.0
-    # tp 穿越是否提前唤醒。True 时快查里发现 fp >= tp_min_usd 就提前结束等待，
-    # 下一轮 tick() 的 _exit_gate 会因为到线返回 None 而把决定交给模型——
-    # **参数没变，变的只是延迟**：模型从「最坏 60 秒后才被问到」变成「≤2 秒」。
-    # False = 快查只记录峰值和止损，出场节奏完全回到老行为。
-    tp_wake: bool = True
-    # 到过门槛后的复核节拍（秒）。**0 = 关闭，回到旧行为。**
-    #
-    # 起因（2026-10-29 23:27 那笔，空 0.01@4027.164，plan=trend）：
-    #   浮盈摸到 peak=+7.39（≥ tp_min_trend=7.00），tp_wake 把模型叫来问过一次，
-    #   模型说继续持有；随后浮盈回落到 +6.08，_exit_gate 立刻改回 tp_wait
-    #   「未达止盈门槛 7.00，本轮不调模型」——**这一笔从此没人再看**。
-    #   唯一的重复唤醒是 _stale_hit，而它的条件是 fp < tp×0.6 = 4.2，
-    #   于是 4.2~7.0 这一整段是静默区：既能吐掉全部利润，也不问一句。
-    #
-    # 语义（用户的定位）：达到门槛 ≠ 一次性事件，而是"这笔单进入高频复核状态"。
-    # 一旦到过门槛，之后每隔 tp_reask_sec 秒把决定权交给模型，不管当时浮盈
-    # 在门槛上方还是下方——回落的瞬间恰恰是最该判断的时刻，旧逻辑却在那时闭嘴。
-    #
-    # 为什么是 60：决策轮本身就是 interval_sec(60)，节拍与之对齐等于"每分钟一次"，
-    # 不需要在快查里另开一路。**已过门槛后 tp_wake 不再唤醒**（见 _wait_next），
-    # 否则浮盈稳定在门槛上方时会变成每 2~5 秒问一次模型。
-    #
-    # 成本：趋势单上限 3 小时 → 最坏约 180 次调用/笔。这是明码标价的代价，
-    # 觉得贵就把它调大或设 0，不要偷偷改回去。
-    tp_reask_sec: int = 60
-    # ---------------------------------------------------------------
-    # 峰值停滞唤醒（2026-10-29）。**不改任何平仓阈值，只改"谁能说话"。**
-    #
-    # 起因（2026-10-28 23:22 那笔，多 0.01@4039.118，plan=range）：
-    #   开仓 feat atr=1.35 / span=2.864（2.12×ATR），而 tp_min_usd=3.25
-    #   = 2.41×ATR，比整个 14 根窗口振幅还大 13.5%。
-    #   浮盈摸到 peak=1.85（=1.37 ATR）之后 **455 秒、7 轮 tick，模型一次
-    #   没被问过**——_exit_gate 每轮只回一句"未达止盈门槛 3.25，本轮不调模型"，
-    #   于是从 +1.85 一路看回 +0.70，既没落袋也没让模型判断。
-    #
-    # 为什么不是直接改 tp：19 笔带 peak_pnl 的实测里，peak/atr 中位只有 1.38，
-    #   而 3.25/atr 的跨度是 1.21(波动大的单) ~ 3.75(波动小的单)——同一个数字
-    #   对不同笔根本是不同的规则。但**改阈值属于 P2/P3，必须先过 replay 闸门**
-    #   （见 autotrade.py L2325 记的历史负先验：峰2.0回撤1.0 -0.114/笔）。
-    #   这一组参数不碰阈值，只把"峰值停滞"做成一次唤醒，风险面小得多。
-    stale_wake: bool = True
-    # 峰值停滞多久算停滞（秒）。180 = 3 分钟：M1 上 3 根 K 线没能把峰值再抬高，
-    # 且浮盈已经掉到 tp 的 60% 以下，这笔就不该再盲等了。
-    stale_sec: int = 180
-    # 浮盈低于 tp 的这个比例才唤醒。已经接近门槛（≥60%）的单子不用救——
-    # 它马上就会因为 tp_wake 被问到，多问一次纯浪费 token。
-    stale_frac: float = 0.6
-    # 防抖：同一次唤醒之后至少隔这么久才允许再唤醒。没有它的话 peak_ts 不再
-    # 更新，_stale_hit 每分钟都为真 → 退化成"每轮都问模型"，正好把 tp_wait
-    # 省 token 的初衷废掉。300 秒 = 一笔 60 分钟的持仓最多问 ~10 次。
-    stale_reask_sec: int = 300
-    # 峰值下限（USD）：peak 只有 0.1 的单子不值得唤醒——那不是"摸到过利润又
-    # 吐回去"，是压根没赚过，该交给止损和持仓上限。
-    stale_min_peak: float = 0.5
-    # 位置阈值：收盘位置 ≤ 这个值算"贴下沿"、≥ 1-这个值算"贴上沿"，中间不动手。
-    # 从 0.20 放宽到 0.35——原来太严，死水行情里几乎永远轮不到它出手。
-    zone_edge: float = 0.35
-    # ---------------------------------------------------------------
-    # 趋势打法（2026-10-28）：先判行情，再选交易逻辑。
-    #
-    # 在这之前 regime 只用来给复盘教训打标签，进出场规则是**一套通吃**：
-    # 提示词里趋势市的写法是"等回踩到 X 再顺势"，而执行层只有市价单，
-    # 于是趋势市被降级成"永远等不到"——实测 70 次趋势市决策只开 4 仓（6%），
-    # 其中 31 次 p_up≥0.60 明确看多却全给 act=false。
-    #
-    # 关键证据（95 个"模型说等回踩到 X"的真实决策点，用历史 M1 回放）：
-    #   A 挂限价等回踩，触及后持 10 根：均值 **-1.21**/笔，胜率 36%，
-    #      MFE 仅 0.85 / MAE -3.35 —— 回踩真来了基本不反弹，是接刀不是低吸。
-    #   B 同一时刻直接市价同向做：固定持 10 根 **+0.148**/笔，胜率 60%。
-    # 所以趋势市的标准动作从"等回踩"改成"顺势直接做"。
-    #
-    # 出场为什么必须分 regime：同样这 85 个信号，
-    #   固定持 10 根          +12.6（胜率 60%）
-    #   套 sl3.0 / tp3.25     -5.0（胜率 47%）  ← 现有参数把正期望变负
-    #   套 sl3.0 / tp6~12     全部为负转正，6×6 网格里 tp≥4.5 整片为正
-    # 也就是说**出血点是止盈太窄，不是止损太窄**。止损不动：
-    # 全样本显示"止损越宽越好"，但同向 5 分钟去重后（29 点）单调性消失，
-    # sl=4.0 那行反而全面低于 3.0 —— 那是重复决策点造成的假象，不据此改参。
-    trend_follow: bool = True
-    # 趋势单的止盈门槛（USD）。取网格平台的中段而不是峰值（峰值 12.0 在
-    # 29 个去重点上挑出来等于拟合）。设 0 = 趋势单也退回 tp_min_usd。
-    tp_min_trend: float = 7.0
-    # 趋势单持仓上限。止盈放宽到 7.0 后中位持仓必然拉长，沿用 max_hold_sec
-    # 的 60 分钟会在行情刚展开时把它掐掉。默认 3 小时，仍受日内约束。
-    max_hold_trend: int = 10800
-    # 振幅余量上限（倍单根均幅）：14 根窗口的振幅超过这个数，说明这波在
-    # 可见范围内已经走得太远，趋势市也只允许"回踩后"的位置，不许再追。
-    # 理论上限约 13（每根都创新高）。实测趋势市 skip 点的中位是 4.9。
-    trend_span_atr_max: float = 8.0
-    # ---------------------------------------------------------------
-    # 保本止损（2026-10-29）。**趋势单浮盈摸到 be_arm_usd 之后，把券商端的
-    # 硬止损抬到开仓价。**
-    #
-    # 为什么加：tick 级重放了 17 笔「峰值摸到过 3.25」的单子（M1 的 OHLC
-    # 分不出同一分钟内先到 3.25 还是先回开仓价，只有逐笔 tick 能定先后）。
-    # 结果里 trend 6 笔 +24.32 → +34.00（+9.68），**赢单零误伤**：3 笔赢单
-    # 一次都没回到开仓价，3 笔亏损单全部回到过。也就是说在趋势单里
-    # 「摸到 3.25 又回开仓价」≈「这笔趋势失败了」，这条线是个失效探测器。
-    #
-    # 为什么只给 trend：震荡单的止盈门槛本来就是 3.25，摸到就该让模型说话，
-    # 不需要第二道线；而 trend 的门槛是 7.0，摸到 3.25 之后既不平也没人问，
-    # 正是 10-28 / 10-29 那几笔「+3.63 一路看到 −3.11」的死角。
-    #
-    # 为什么挂在券商端而不是程序轮询：轮询实测超调 13%（−3.00 打成 −3.39），
-    # 而改单就是那个价成交；并且进程崩了这条线还在。
-    be_at_entry: bool = True
-    # 触发线（USD）：峰值浮盈到这个数才把止损抬到开仓价。
-    # 取 3.25 而不是 tp_min_trend 的 7.0 —— 7.0 是"目标"，3.25 是"方向已经
-    # 被证明过"。实测 4.5~7.0 区间一笔样本都没有，等 7.0 等于不保护。
-    # 设 0 关掉（等价于 be_at_entry=False）。
-    be_arm_usd: float = 3.25
-    # 挂单失败后的重试间隔（秒）。失败通常是终端这一下没收（算法交易没开、
-    # 锁被占、或价格已经回到开仓价以下挂不上去）。节流是为了别每 2 秒锤
-    # 一次券商。**失败期间保护不缺席**：浮盈回到 0 由 _guard_hit 本地代平。
-    be_retry_sec: int = 20
-    # 脉冲锁利（2026-11-13）：趋势单浮盈**首次走满 5 个 ATR** 之后，把券商端
-    # SL 从开仓价抬到「峰值 − 1.5 ATR」，峰值再抬高就跟着抬。
-    #
-    # 和 be 的区别：be 只保本（零利润），这条**保利润**。两者改的是同一条
-    # 券商 SL，取更高的位置——lock 的门槛（5 ATR）天然高于 be（3.25 USD），
-    # 所以 lock 一定在 be 之后发生并覆盖它，不需要额外仲裁。
-    #
-    # 依据 `python -m tools.burst_lock`（50 天 M1）：脉冲后按 L=1.5 抬线，
-    # 77% 会被打掉、其中只有 6% 打掉后价格又创新高；L=0.5 太紧（16% 砍错），
-    # L=3.0 太松（锁住的少一截）。**样本 n=22，属"方向明确、量级待验证"**，
-    # 关掉只需把这里设 False。
-    #
-    # **只对全自动生效**：辅助模式下这条规则不抬线，只弹窗让人自己判断
-    # （弹窗条件见 `_mark_burst`；真正拦截见 `_lock_applies`）。
-    lock_profit: bool = True
-    # ---------------------------------------------------------------
-    # 入场端的两个硬闸门（2026-10-27 复盘后加）。它们**不发明新规则**，
-    # 只是把提示词里早就写着、模型却会违反的两条约束交给代码执行。
-    #
-    # 那一轮（15:36 起 10 笔）的证据：
-    #   5 胜 5 负，净 +6.30；5 笔亏损全是硬止损，均值 -3.38。
-    #   贴在区间下沿（pos ≤ 0.35）的 6 笔：+12.86。
-    #   贴在区间上沿（pos ≥ 0.75）的 3 笔：0 胜，-10.27。
-    #   其中 17:07 与 18:45 两笔做多，入场分位 0.97 / 0.96、ER 0.71 / 0.61、
-    #   drift +8.4 / +13.7——正是提示词里那句"上涨趋势里贴上沿是不追多"
-    #   的场景，模型两次都写了 act=true。它们的 reason 还明写"回踩 3998-3996"、
-    #   "回踩 4004 挂多，不追高"，实际成交价 4000.403 / 4010.917——因为执行层
-    #   只有市价单，模型描述的"挂单/等回踩"物理上不存在，全变成"现在这一秒买"。
-    #
-    # 为什么不改出场（sl_usd/tp_min_usd）：227 笔反事实回放已经证明所有放松
-    # 版本都更差，根子在入场不在出场。这两条都只碰「开不开」，不碰「怎么走」。
-    #
-    # act_guard：reason 里出现"等确认/回踩再/挂多/不追"这类"我现在不进场"的
-    #   措辞，却给了 act=true —— 程序据此给一条建议。提示词里「注意 act
-    #   和 reason 必须一致」那段本来就有这条约束，实测违反率 3/10，且这 3 笔
-    #   亏掉当天亏损的 58%。
-    # top_long_ban：做多且收盘位置 ≥ 1-zone_edge（贴上沿）—— 也是建议。
-    #   `_zone_text` 在所有 regime 分支下都只会给出"做空 / 等回踩"，从来没有
-    #   "贴上沿做多"这一项，所以这不是新规矩，是让代码和位置判定对齐。
-    # **两个开关默认关（2026-10-28）**：用户要求把决策权交还模型，程序只给
-    #   建议和特征。打开即回到"程序硬拦"的旧行为；关闭时命中只写日志，
-    #   开仓行会带 `would_veto` 字段，事后能按这个分桶算"听了程序 vs 没听"的期望。
-    act_guard: bool = False
-    top_long_ban: bool = False
-    # mtf_conflict：M1 判震荡、但 M5 净变动明显和这笔方向相反时给建议。
-    # 同样默认关，理由同上。
-    # 2026-11-06 起，趋势单的同名冲突也会记录（代号 mtf_conflict_trend），
-    # 但**没有开关、永远不拦**——先攒样本，见 _entry_advice 里那段账。
-    mtf_conflict: bool = False
-    # 是否把 tick 级（逐笔 bid/ask）数据喂给模型。关掉可省 token 和一次数据查询。
-    ticks: bool = True
-    # 信号强度门槛：|p_up - 0.5| 低于这个值就不开仓。
-    # 为什么必须有：p_up=0.51 和 0.5 在统计上没区别，但开仓要先付 0.24 点差。
-    # 高频下单时这种"微弱优势单"一分钟能有十几笔，数学上必被磨死。
-    # 设 0 可关闭（回到"只要不等于 0.5 就开"的旧行为）。
-    min_edge: float = 0.06
-    # 刹车。0 = 不限。这是「跑飞了自动停」，不是风控策略。
-    max_trades: int = 0
-    max_loss_usd: float = 0.0
-    max_minutes: int = 0
-    # ---------------------------------------------------------------
-    # AI 辅助做单（2026-10-28）：第三种模式，与纸面 / 真实并列。
-    #
-    # 决策链一个字没改，只在**下单前停住等人点一下**：模型说做多 → 弹窗 →
-    # 你点同意才发单。硬止损（sl_usd）和持仓上限（max_hold_sec）仍然由程序
-    # 无条件执行，不弹窗、不等人——「人手确认」不等于「人肉止损」，
-    # 一旦允许人挡住止损，一次走神就是 20 美元而不是 3 美元。
-    #
-    # 为什么必须有这道人工闸：模型在「说要等回踩、实际追在顶上」这类
-    # 言行不一的单子上，肉眼几乎看不出来（reason 写得头头是道，成交价高
-    # 6~7 美元）。弹窗把「程序倾向 / 模型判断 / 成交价」摆在一起，
-    # 人只需要判断"这个位置我现在愿不愿意买"，比翻日志快两个数量级。
-    assist: bool = False
-    # 入场弹窗的时效。90 秒不是拍脑袋：M1 上 60 秒能跑 1~2 美元，超过一分半
-    # 的信号，弹窗里那个价格已经是历史；而太短（30 秒）又不够看清理由。
-    assist_entry_wait_sec: int = 90
-    # 出场弹窗的宽限期。**到点无人应答就执行模型的平仓决定**（人只有否决权）。
-    # 入场默认"不做"、出场默认"照做"，这个不对称是有意的：错过一笔开仓
-    # 只是少赚，持仓没人管会从 +3 拖成 -3。
-    assist_exit_wait_sec: int = 120
-    # 价格漂移保护：点了同意，但成交价已经在**不利方向**跑掉超过这个数，
-    # 信号作废不下单。只判不利方向——有利方向（买得更便宜 / 空得更高）
-    # 拦掉它没道理。0.80 ≈ 3 倍点差，也约等于半个 M1 ATR。
-    assist_max_slip_usd: float = 0.80
-    # 否决 / 超时之后的静默期：这段时间内不再弹窗（入场连模型调用一起省）。
-    # 不设它的话，模型每 60 秒会重提同一次机会，人不在电脑前就会被铃声轰炸。
-    assist_deny_cooldown: int = 180
-    # 弹窗时是否把面板窗口还原并置顶 5 秒。面板被最小化 / 压在别的窗口后面时，
-    # 光有提示音找不到窗口，信号 90 秒就作废了。
-    assist_raise_window: bool = True
-    comment: str = "aqa_ai"
 
 
-# ------------------------------------------------- 手数与金额阈值的换算
-#
-# 出场那一套数（sl_usd=3.00 / tp_min_usd=3.25 / be_arm_usd=3.25 …）是在
-# 0.01 手下标定的：当时 0.01 手 XAUUSDm = 1 盎司，1.00 价距恰好等于
-# 1.00 USD，所以「3.00 金额」和「3.00 价距」是同一个数。227 笔反事实
-# 回放扫出来的其实是**价距**，只是被写成了金额。
-#
-# 浮盈 = 价距 × 合约 × 手数 × 账户系数。手数放大 N 倍，同一个金额阈值
-# 对应的价距就缩到 1/N：0.02 手时 3.00 USD 止损只剩 1.50 价距，0.10 手
-# 只剩 0.30，而单笔点差约 0.24 —— 等于一开仓就被点差打掉，回放证据也
-# 跟着失效。所以手数可以选，但金额阈值必须等比放大，把价距钉回原处。
-#
-# 缩放**在运行时按 cfg.lots 派生**，不写回 Cfg 字段：这样 CODE_ONLY 仍然
-# 是本版代码的默认值（test_cfg_ownership 钉着），面板/CLI 两条启动路径
-# 天然一致，state 里存的那份 cfg 也永远是原始值，不会被重复缩放。
-BASE_LOTS: float = 0.01
-_SCALE_EPS = 1e-9
 
 
-def lot_scale(cfg: Cfg) -> float:
-    """当前手数相对基准手数的倍数；手数非法时按 1 处理（回退旧行为）。"""
-    try:
-        lots = float(getattr(cfg, "lots", BASE_LOTS) or 0.0)
-    except (TypeError, ValueError):
-        return 1.0
-    return lots / BASE_LOTS if lots > 0 else 1.0
 
 
-def money_at_lots(cfg: Cfg, value) -> float:
-    """把「0.01 手口径」的金额阈值换算成当前手数下的等效金额。
-
-    只有账户货币金额要过这里。概率（min_edge）、秒数、价距口径的
-    assist_max_slip_usd 都不过；`max_loss_usd` 刹车也**故意不缩放**——
-    手数放大后更早触发，属于额外保护。
-    """
-    try:
-        return float(value) * lot_scale(cfg)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-# --------------------------------------------------------- 谁能改这些参数
-#
-# 起因（2026-11-05）：面板的 /api/autotrade/start 手写了 14 个字段的映射，
-# 而 Cfg 有 49 个。剩下 35 个既不在映射里、也没有任何地方声明，落在**没人管
-# 的地带**：想调只能改代码，新增字段也会静静掉进同一个洞——不报错，只是
-# 永远用不上。
-#
-# 所以把归属写成数据，让测试守（tests/test_cfg_ownership.py）：
-#   PANEL_FIELDS —— 面板 / API 可以传，传了就以传的为准
-#   CODE_ONLY    —— 只由**本版代码的默认值**决定，面板永不覆盖
-#
-# 判据不是「重要不重要」，是**这个数是怎么来的**：
-# 回放扫出来的阈值（sl / tp / 持仓上限 / 快查节拍 / zone_edge…）让人在界面上
-# 随手拖，拖出来的就是噪声——227 笔反事实回放里所有放松版本都更差，tp 扫描
-# 是锯齿。这类「有证据的数」只能随代码走，改它要带上新证据。
-# 反过来「这单投多大、多久问一次、要不要真下单、亏多少就停」是仓位与节奏，
-# 本来就该按当下的账户和心情调。
-PANEL_FIELDS: tuple[str, ...] = (
-    # 仓位与节奏
-    "symbol", "lots", "interval_sec",
-    # 平仓冷却，按方向分两档（依据见 Cfg.cooldown_same_sec 上面的实测）
-    "cooldown_sec", "cooldown_same_sec",
-    # 三种模式：纸面 / 真实 / 辅助
-    "dry_run", "assist",
-    "assist_entry_wait_sec", "assist_exit_wait_sec",
-    "assist_max_slip_usd", "assist_deny_cooldown",
-    # 三个刹车：笔数 / 亏损 / 时长，0 = 不限
-    "max_trades", "max_loss_usd", "max_minutes",
-    # 验证期的对照开关。面板上暂时没有控件，留给 API 和回放对照用——
-    # 它们以前被写成「开关保留」，但两条路都不通，等于永远打不开。
-    "act_guard", "top_long_ban", "mtf_conflict",
-)
-
-CODE_ONLY: tuple[str, ...] = (
-    "magic", "tf", "bars", "comment", "ticks", "review", "ignore_spread",
-    "min_hold_sec", "min_hold_exempt_usd", "min_edge",
-    "sl_usd", "tp_min_usd", "max_hold_sec",
-    "guard_sec", "guard_near_sec", "tp_wake_band", "tp_wake", "tp_reask_sec",
-    # 时钟管道，不是策略参数（见 Cfg.align_settle_sec）
-    "align_settle_sec",
-    "stale_wake", "stale_sec", "stale_frac", "stale_reask_sec", "stale_min_peak",
-    "zone_edge", "trend_follow", "tp_min_trend", "max_hold_trend",
-    "trend_span_atr_max",
-    "be_at_entry", "be_arm_usd", "be_retry_sec",
-    "lock_profit",
-    "assist_raise_window",
-)
-
-_TYPE_LABEL = {"int": "整数", "float": "数字", "bool": "布尔值（true/false）",
-               "str": "文本"}
-
-
-def _field_kind(name: str) -> str:
-    """字段的类型名：`"int"` / `"float"` / `"bool"` / `"str"`。
-
-    模块开了 `from __future__ import annotations`，所以 `field.type` 现在是
-    **字符串**。但这里不写死这个假设——哪天有人去掉那行 future，拿到的是
-    真类型对象，`_field_kind` 不该跟着崩。
-    """
-    tp = Cfg.__dataclass_fields__[name].type
-    return tp if isinstance(tp, str) else getattr(tp, "__name__", str(tp))
-
-
-def _as_bool(name: str, raw) -> bool:
-    """宽松但**不骗人**的布尔转换。
-
-    旧代码是 `bool(body.get("dry_run"))`——`bool("false")` 是 True。前端现在
-    传的是真 bool，但这条路以后会被 curl / 脚本走，字符串 "false" 被当成
-    打开就等于「纸面演练」静默变真单。
-    """
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return bool(raw)
-    text = str(raw).strip().lower()
-    if text in ("1", "true", "yes", "on", "y", "t"):
-        return True
-    if text in ("", "0", "false", "no", "off", "n", "f"):
-        return False
-    raise ValueError(f"{name} 必须是布尔值，收到 {raw!r}")
-
-
-def _coerce(name: str, raw):
-    kind = _field_kind(name)
-    try:
-        if kind == "bool":
-            return _as_bool(name, raw)
-        if kind == "int":
-            if isinstance(raw, bool):
-                raise TypeError
-            if isinstance(raw, float) and not raw.is_integer():
-                raise ValueError
-            return int(raw)
-        if kind == "float":
-            if isinstance(raw, bool):
-                raise TypeError
-            return float(raw)
-        return str(raw).strip()
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"{name} 必须是{_TYPE_LABEL.get(kind, kind)}，收到 {raw!r}") from None
-
-
-def cfg_from_start_body(body: dict | None = None) -> Cfg:
-    """把面板 / API 的启动参数收敛成 Cfg。**启动路径的唯一入口。**
-
-    三条规矩，都是踩过的坑：
-
-    1. **只认 PANEL_FIELDS**。body 里出现 CODE_ONLY 的字段直接报错，而不是
-       静静忽略——静默忽略就是"假开关"：调用方以为改了，实际跑的还是默认值。
-       body 里不认识的非 Cfg 键（confirm / account / 旧版本的 cfg 嵌套）
-       照旧忽略，那是协议字段不是参数。
-    2. **不拿 `or` 兜底**。旧代码是 `int(body.get("x") or 默认值)`，于是 0
-       被当成"没填"吞掉：想把冷却关掉（0 秒）配不了，一定会变回 60。
-       现在只看"键在不在"。
-    3. **空串 = 没填**。前端下拉框没选中时传的是 `""`，不能让它变成
-       `symbol=""` 再被 validate_cfg 拒掉——那是界面的空状态，不是用户的选择。
-
-    拿不到值就抛 ValueError（带字段名和收到的值），由调用方翻成 400。
-    类型不对是**调用方的错**，不该让它掉进 validate_cfg 的语义检查里混淆。
-    """
-    body = dict(body or {})
-    code_only_hit = sorted(k for k in body if k in CODE_ONLY)
-    if code_only_hit:
-        raise ValueError(
-            f"{'/'.join(code_only_hit)} 属于代码所有参数（阈值由回放证据定），"
-            "面板/API 不能改；要改请连同依据一起改代码默认值"
-        )
-
-    kwargs: dict[str, object] = {}
-    for name in PANEL_FIELDS:
-        if name not in body:
-            continue
-        raw = body[name]
-        if raw is None:
-            continue
-        if isinstance(raw, str) and not raw.strip():
-            continue
-        kwargs[name] = _coerce(name, raw)
-    try:
-        return Cfg(**kwargs)
-    except TypeError as exc:      # 理论上到不了：字段名已按白名单过滤
-        raise ValueError(f"启动参数不匹配：{exc}") from None
 
 
 # ------------------------------------------------------------------ 存储
@@ -693,8 +226,6 @@ def save_state(state: dict, login: int | str | None = None) -> None:
     paths.write_json(paths.resolve_login(login), "autotrade_state.json", state)
 
 
-def cfg_to_dict(cfg: Cfg) -> dict:
-    return {k: getattr(cfg, k) for k in Cfg.__dataclass_fields__}
 
 
 def cfg_from_state(login: int | str | None = None) -> Cfg | None:
@@ -887,7 +418,6 @@ def read_log(login: int | str | None = None, limit: int | None = None) -> list[d
     return out
 
 
-
 def append_lesson(row: dict, login: int | str | None = None) -> None:
     p = lessons_path(login)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1019,100 +549,7 @@ def backfill_sl_src(login: int | str | None = None) -> dict:
 # 但抠不出来就返回 None，由调用方退回规则兜底。绝不能猜一个数字糊过去——
 # 猜出来的概率和模型给的没区别，事后就没法判断到底是模型的锅还是解析的锅。
 
-_JSON_RE = re.compile(r"\{[^{}]*\}", re.S)
-_PUP_RE = re.compile(r'"?p_?up"?\s*[:=]\s*([0-9]+\.?[0-9]*)', re.I)
 _CLOSE_RE = re.compile(r'"?close"?\s*[:=]\s*(true|false|1|0|yes|no)', re.I)
-
-
-def _norm_prob(val) -> float | None:
-    """把各种写法的概率归一化到 [0,1]。62 / 0.62 / "62%" 都收。"""
-    try:
-        num = float(str(val).strip().rstrip("%"))
-    except (TypeError, ValueError):
-        return None
-    if num > 1.0:
-        if num > 100.0:
-            return None
-        num = num / 100.0
-    if num < 0.0 or num > 1.0:
-        return None
-    return num
-
-
-P_UP_FLOOR, P_UP_CEIL = 0.20, 0.80
-
-
-def clamp_p_up(p: float) -> float:
-    """把 p_up 压回 [0.20, 0.80]。
-
-    实测 46% 的 p_up 精确等于 0.0，|p_up-0.5|≥min_edge 的闸门对它们完全
-    无效（偏离 0.5 达 0.5，比任何正常估计都"强"）。根因已查明：ENTRY_SYSTEM
-    的输出示例原来写着 `"p_up": 0.00`，模型照抄这个占位值，程序按
-    `p_up > 0.5 else -1` 读成"最强看空"→ 89 笔清一色空单。示例已改。
-
-    注意 clamp **替代不了修示例**：0.0 被压成 0.20 之后仍然是"最强看空"
-    （|0.20-0.5|=0.30 照样过闸门），还是开空单，只是日志里再也看不到 0.0
-    ——等于把 bug 藏起来。所以判断 p_up 是否真的散开，要看 0.20 / 0.80
-    这两个边界值的出现频率，它们等价于旧的 0.0 / 1.0。
-    """
-    return max(P_UP_FLOOR, min(P_UP_CEIL, float(p)))
-
-
-def _norm_bool(raw) -> bool | None:
-    """把模型写的 act 归一成布尔。认不出来就返回 None（交给下游按旧逻辑处理）。"""
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return bool(raw)
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s in ("true", "1", "yes", "y", "是", "做", "开仓", "trade"):
-            return True
-        if s in ("false", "0", "no", "n", "否", "不做", "不交易", "观望", "等", "wait", "skip"):
-            return False
-    return None
-
-
-def parse_p_up(text: str) -> dict | None:
-    """从模型回复里抠出 {act, p_up, reason}。失败返回 None。
-
-    `act` 是"这笔到底做不做"的显式开关。以前只能靠 p_up≈0.50 间接表达"不做"，
-    结果模型经常一边写"不追"一边给 0.38 —— 说不做，数值却在开仓。
-    多一个布尔字段，两者就不会再打架。老格式没有 act 时返回 None，下游按旧逻辑走。
-    """
-    if not text or not text.strip():
-        return None
-
-    data: dict | None = None
-    m = _JSON_RE.search(text)
-    if m:
-        try:
-            loaded = json.loads(m.group(0))
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError:
-            data = None
-
-    if data is not None:
-        raw = data.get("p_up", data.get("pUp", data.get("prob")))
-        p_up = _norm_prob(raw)
-        if p_up is not None:
-            reason = str(data.get("reason") or data.get("why") or "").strip()
-            act = _norm_bool(data.get("act", data.get("trade", data.get("action"))))
-            # agree：模型自己声明是否同意程序的位置判定。
-            # None = 没答（老格式/解析失败），下游不强行推断。
-            agree = _norm_bool(data.get("agree"))
-            return {"p_up": clamp_p_up(p_up), "reason": reason[:200],
-                    "act": act, "agree": agree}
-
-    # JSON 烂了，退一步直接抓数字
-    mm = _PUP_RE.search(text)
-    if mm:
-        p_up = _norm_prob(mm.group(1))
-        if p_up is not None:
-            return {"p_up": p_up, "reason": "", "act": None}
-
-    return None
 
 
 def parse_exit(text: str) -> dict | None:
@@ -1270,12 +707,6 @@ def fetch_ticks(cfg: Cfg, bars: list[dict]) -> list[dict]:
     return [t for t in ticks if from_ts <= int(t.get("time") or 0) <= to_ts]
 
 
-def _spread_points(tick: dict, point: float) -> float:
-    if not point:
-        return 0.0
-    return (float(tick.get("ask") or 0.0) - float(tick.get("bid") or 0.0)) / point
-
-
 def summarize_ticks(ticks: list[dict], bars: list[dict],
                     point: float = 0.001, recent: int = TICK_RECENT) -> dict:
     """按可见 K 线分桶统计。数据不足时返回 {"ok": False}。"""
@@ -1402,15 +833,8 @@ def _fmt_tick_block(summary: dict, digits: int = 3) -> str:
 #
 # 信息边界（用户指定的硬约束）
 # ---------------------------
-# AI 交易员**只能看到当前这根 K 线 + 之前 13 根**，共 14 根，四价全给。
-# 这不是在提示词里客气地写一句"请你只看这些"，而是在构造 prompt 时**物理截断**：
-# 就算上游传进来 120 根，`visible_bars()` 也只会输出最后 14 根。
-# 模型守不守规矩不该靠它自觉——它能看到的和它被告知能看到的一致，才叫约束。
-#
-# 唯一的例外是**平仓之后**：允许回看「平仓前 13 根 → 开仓之前」那一段，
-# 用来复盘。那时仓位已经没了，回看不会让它改主意，所以不违反约束。
 
-VISIBLE_BARS = 14      # 当前 1 根 + 之前 13 根
+
 # 复盘窗口：**平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根**（用户指定）。
 # 为什么要等平仓后 7 根走完才复盘：刚平掉那一刻还没有"平仓后走势"，
 # 只能得出"赚了/亏了"；等 7 根之后才看得出「平太早」还是「跑得及时」。
@@ -1431,11 +855,6 @@ REVIEW_AFTER_BARS = 7
 MTF_TF = "M5"
 MTF_BARS = 14          # 14 根 M5 = 70 分钟背景
 MTF_MIN_BARS = 5       # 少于这个数就不给背景（样本太少，ER 没意义）
-
-
-def visible_bars(rows: list[dict]) -> list[dict]:
-    """裁到 AI 允许看到的 14 根。所有喂给模型的 prompt 都必须过这一道。"""
-    return rows[-VISIBLE_BARS:] if rows else []
 
 
 ENTRY_SYSTEM = """你是 {SYMBOL_LABEL} 的日内交易员，看 M1 图定时机。
@@ -1750,28 +1169,6 @@ REVIEW_PROMPT = """这一笔刚平掉。
 只输出那个 JSON 对象（scope / theme / lesson 三个字段），复盘内容全写在 lesson 里。"""
 
 
-# 行情状态分桶阈值。_structure_text 的「行情判定」和教训的 regime 标签
-# 必须用同一套数，各写一份必然漂移。
-ER_RANGE_MAX = 0.30   # ER 低于此 = 震荡 → 低买高卖
-ER_TREND_MIN = 0.50   # ER 高于此 = 趋势 → 等回踩顺势
-
-
-def regime_of(rows: list[dict]) -> str:
-    """把这堆 K 线归到三种行情状态之一："range" / "trend" / "mid"。
-
-    用途是给复盘教训打标签：在震荡里攒的教训，优先在震荡里拿出来用。
-    数据不足返回空串，归「通用」。
-    """
-    s = _structure(rows)
-    if not s.get("ok"):
-        return ""
-    if s["er"] < ER_RANGE_MAX:
-        return "range"
-    if s["er"] > ER_TREND_MIN:
-        return "trend"
-    return "mid"
-
-
 def exit_params(cfg: Cfg, plan: str | None) -> dict:
     """这一笔持仓按哪套出场参数走。**由开仓时的行情决定，持仓期间不换**。
 
@@ -1806,369 +1203,6 @@ def exit_params(cfg: Cfg, plan: str | None) -> dict:
         "tp_min_usd": money_at_lots(cfg, cfg.tp_min_usd),
         "max_hold_sec": int(cfg.max_hold_sec),
     }
-
-
-def _last_bar_shape(rows: list[dict]) -> dict:
-    """当前这根 K 线自己的形状：收盘在自身区间的位置、上下影线占比。
-
-    趋势打法需要它来区分「强势推进」和「插针见顶」——两者在 14 根窗口里
-    的 ER、drift、pos 可以完全一样，区别只在最后一根长什么样。
-    只看当前根，不引入新指标，也不碰可见窗口之外的数据。
-
-    clv（close location value）= (收-低)/(高-低)，1 = 收在最高，0 = 收在最低。
-    上影线占比大 + clv 低 = 冲高被打回来，趋势市追这种就是接最后一棒。
-    """
-    w = visible_bars(rows)
-    if not w:
-        return {"ok": False}
-    b = w[-1]
-    try:
-        h, l = float(b.get("high") or 0.0), float(b.get("low") or 0.0)
-        c, o = float(b.get("close") or 0.0), float(b.get("open") or 0.0)
-    except (TypeError, ValueError):
-        return {"ok": False}
-    rng = h - l
-    if rng <= 0 or min(h, l, c, o) <= 0:
-        return {"ok": False}
-    return {
-        "ok": True,
-        "clv": round((c - l) / rng, 4),
-        "upper_wick": round((h - max(c, o)) / rng, 4),
-        "lower_wick": round((min(c, o) - l) / rng, 4),
-        "body": round(abs(c - o) / rng, 4),
-        "bull": c > o,
-    }
-
-
-def _structure(rows: list[dict]) -> dict:
-    """把这 14 根 K 线的"性质"算成几个数，让模型不用凭感觉猜行情。
-
-    ER（净移动 ÷ 总行程，0~1）是这里的关键：
-      - 净移动 = 最后一根收盘 - 第一根收盘（走了多远）
-      - 总行程 = 相邻收盘价变动绝对值之和（绕了多远）
-      - ER 接近 1 = 一路直行（趋势）；接近 0 = 来回磨（震荡）
-    这个数的好处是可解释：两个价格相除，没有黑箱参数。
-    "每个数字都能说清怎么来的"是这个项目的卖点，不能用拍脑袋的阈值。
-    """
-    w = visible_bars(rows)
-    if len(w) < 2:
-        return {"ok": False}
-
-    closes = [float(r.get("close") or 0.0) for r in w]
-    highs = [float(r.get("high") or 0.0) for r in w]
-    lows = [float(r.get("low") or 0.0) for r in w]
-
-    net = abs(closes[-1] - closes[0])
-    path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
-    er = (net / path) if path else 0.0
-
-    hi, lo = max(highs), min(lows)
-    span = hi - lo
-    pos = ((closes[-1] - lo) / span) if span else 0.5
-
-    # 末段连续同向根数：连阳为正、连阴为负
-    streak = 0
-    for i in range(len(closes) - 1, 0, -1):
-        step = closes[i] - closes[i - 1]
-        if step > 0 and streak >= 0:
-            streak += 1
-        elif step < 0 and streak <= 0:
-            streak -= 1
-        else:
-            break
-
-    return {"ok": True, "er": er, "net": net, "path": path,
-            "span": span, "pos": pos, "streak": streak,
-            # 带符号的净移动：ER 只回答"走得多直"，不回答"往哪边走"。
-            # 位置判定必须两者都有，否则跌势里每次贴下沿都会被读成买点。
-            "drift": closes[-1] - closes[0]}
-
-
-# MA 的周期。2026-10-26 用户要求：用 28 根 M1 收盘均线做多空偏向
-# （"当前 K 线在均线下方偏空，反之偏多"），他自己做单也看这条。
-#
-# 关键设计：28 根是可见窗口（14 根）的两倍，所以**必须额外取数**。
-# 但模型仍然只看 14 根原始 K 线——多出来的部分只落成一个均线数字，
-# 和 M5 摘要同一个原则：程序算好结论，不给原始数据。
-# 这不是"放宽信息边界"，是"补一个模型自己算不出来的参照系"。
-MA_PERIOD = 28
-
-
-def _ma_calc(rows: list[dict], period: int = MA_PERIOD) -> dict | None:
-    """MA 的数值部分。`ma_line` 和 `feature_snapshot` 共用同一套数，别各算各的。
-
-    算不出来（数据不够 / 有脏价格）返回 None——调用方据此决定"不写这一行"，
-    绝不编一个数出来。
-    """
-    if not rows or len(rows) < period:
-        return None
-    closes: list[float] = []
-    for r in rows[-period:]:
-        try:
-            c = float(r.get("close") or 0.0)
-        except (TypeError, ValueError):
-            return None
-        if c <= 0:
-            return None
-        closes.append(c)
-    ma = sum(closes) / len(closes)
-    last = closes[-1]
-    gap = last - ma
-    unit = float(_atr(rows).get("atr") or 0.0)
-    ratio = (abs(gap) / unit) if unit > 0 else 0.0
-    # side: +1 上方（偏多）/ -1 下方（偏空）/ 0 贴线或无法判断
-    if unit > 0 and ratio < 0.5:
-        side = 0
-    elif gap > 0:
-        side = 1
-    elif gap < 0:
-        side = -1
-    else:
-        side = 0
-    return {"ma": ma, "last": last, "gap": gap, "ratio": ratio,
-            "side": side, "unit": unit, "period": int(period)}
-
-
-def ma_line(rows: list[dict], digits: int = 3, period: int = MA_PERIOD) -> str:
-    """MA28 背景偏向，一行文字。数据不够返回空串，**不编数**。
-
-    只用收盘价算术均值——用户自己看的就是这条，不加 EMA、不加带宽之类的花活。
-
-    为什么必须同时给「距均线多远」：贴着均线时"在上方"和"在下方"只差几分钱，
-    模型会随着价格穿越反复改方向。用单根均幅（近 14 根 ATR）归一化之后，
-    "是不是真的离得远"才看得见。距离不足 0.5 倍单根均幅直接标中性。
-    """
-    m = _ma_calc(rows, period)
-    if m is None:
-        return ""
-    d = max(0, int(digits))
-    if m["side"] == 0:
-        side = ("贴着均线 → 中性，别拿它当方向依据" if m["unit"] > 0
-                else "正好压在均线上 → 中性")
-    elif m["side"] > 0:
-        side = "在均线上方 → 中期偏多"
-    else:
-        side = "在均线下方 → 中期偏空"
-    rel = (f" ｜ 距均线 {m['gap']:+.{d}f}（= {m['ratio']:.1f} 倍单根均幅）"
-           if m["unit"] > 0 else f" ｜ 距均线 {m['gap']:+.{d}f}")
-    return (f"【背景】MA{period}（{period} 根 M1 收盘均值）= {m['ma']:.{d}f}"
-            f" ｜ 当前收盘 {m['last']:.{d}f} {side}{rel}")
-
-
-def _atr(rows: list[dict]) -> dict:
-    """窗口内的真实波幅均值（ATR），以及归一化后的振幅。只用可见 14 根。
-
-    为什么必须有这个（2026-10-26 加）
-    ---------------------------------
-    模型看到的「振幅 5.100」是绝对价格，它不知道这算大还是小。同样 5.1 USD，
-    在亚洲盘午后和纽约开盘（非农）是两个完全不同的信号，但数字一模一样。
-    ATR 就是这个数字的参照系——**振幅 ÷ ATR 才是无量纲、可跨时段比较的量**。
-
-    为什么不是常见的 ATR(14)
-    -------------------------
-    TR 需要"前一根收盘"，所以 14 根 K 线只能产出 13 个 TR。命名上不装成
-    ATR14，就叫 `atr`，并在 `n_tr` 里如实给出用了几个 TR。
-
-    TR = max(高-低, |高-前收|, |低-前收|)
-    必须带上后两项：跳空时（周开盘、数据窗）光看高低差会严重低估波动。
-    """
-    w = visible_bars(rows)
-    if len(w) < 2:
-        return {"ok": False, "atr": 0.0, "n_tr": 0, "span": 0.0, "span_atr": 0.0}
-    trs = []
-    for i in range(1, len(w)):
-        high = float(w[i].get("high") or 0.0)
-        low = float(w[i].get("low") or 0.0)
-        prev_close = float(w[i - 1].get("close") or 0.0)
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    atr = sum(trs) / len(trs) if trs else 0.0
-    highs = [float(r.get("high") or 0.0) for r in w]
-    lows = [float(r.get("low") or 0.0) for r in w]
-    span = (max(highs) - min(lows)) if highs else 0.0
-    # 比值上限约等于根数（每根都创新高/新低才能到）。分母为 0 时给 0，不编数。
-    ratio = (span / atr) if atr > 0 else 0.0
-    return {"ok": True, "atr": atr, "n_tr": len(trs), "span": span,
-            "span_atr": ratio}
-
-
-def _zone_text(pos: float, er: float, drift: float, edge: float,
-               trend_follow: bool = True) -> str:
-    """位置判定：同一个「贴下沿」，在震荡里是买点，在下跌趋势里是弱势延续。
-
-    为什么必须分方向（实测教训）：以前这里只输出「贴下沿（可考虑做多）」，
-    完全不看趋势方向。价格从 4030 一路跌到 4021 的十几分钟里，14 根窗口
-    永远处于区间下部 → 永远显示"可考虑做多"；同一时刻想做空又被
-    「追破位」铁律按住。结果 18 笔里最近 4 笔全做多，而且全是在跌势里买跌。
-
-    2026-10-25 话术降级：从「不许/唯一合法方向」改成「程序建议」。
-    旧话术把模型逼成二选一：顺从时它直接复述程序结论（reason 里出现最多的
-    就是"贴下沿，可考虑做多，阈值35%"这种），反抗时给极端值。实测 46% 的
-    p_up 精确等于 0.0——那是输出示例的占位值被照抄，不是判断（见 clamp_p_up）。
-    现在给方向倾向但明确告知可以不同意——中间概率才有机制上的存在空间。
-    判定本身（ER+drift 的组合）不变，变的是语气和权限。
-    """
-    edge = max(0.0, min(0.49, float(edge)))
-    lo, hi = edge, 1 - edge
-    downtrend = er > ER_TREND_MIN and drift < 0
-    uptrend = er > ER_TREND_MIN and drift > 0
-    if (uptrend or downtrend) and not trend_follow:
-        return ("趋势市，但趋势打法已关闭（trend_follow=False）→ 本程序不建议开仓。"
-                "震荡贴边那一套不适用于这里，别拿 ER 高当成抄底摸顶的理由")
-    if pos <= lo:
-        if downtrend:
-            return ("贴下沿＋下跌趋势（程序倾向：顺势做空。贴下沿在这里是弱势延续，"
-                    "不是超卖，**不要反手接多**；但当前根必须弱势收——收盘在自身区间下半、"
-                    "下影线不长，长下影＝有人接盘，不做）")
-        if uptrend:
-            return ("贴下沿＋上涨趋势（程序倾向：回踩已经发生，直接做多，"
-                    "条件是当前根止跌——收阳或收盘回到自身区间上半。**不要再等更低的价位**）")
-        return f"贴下沿（程序倾向：可考虑做多，阈值 {edge:.0%}）"
-    if pos >= hi:
-        if uptrend:
-            # 2026-10-28 改：原文是「此处不是买点，等回踩到前一根实体中位」。
-            # 实测那句话让趋势市 94% 的时间空仓（70 次决策只开 4 仓），而
-            # 按它等来的回踩单 47 笔均值 -1.21、胜率 36% —— 等回踩在这批样本里
-            # 是负期望。现在允许顺势直接做，但用**当前根的形状**代替"等一个价位"
-            # 来挡插针顶：这条不拦"位置高"，只拦"冲高被打回来"。
-            return ("贴上沿＋上涨趋势（程序倾向：顺势做多。高位本身不是否决理由，"
-                    "但当前根必须是强势收——收盘在自身区间上半、上影线不超过区间一半；"
-                    "若冲高回落（长上影＋收盘掉到下半）就是插针顶，不做）")
-        if downtrend:
-            return ("贴上沿＋下跌趋势（程序倾向：反抽已经发生，直接做空，"
-                    "条件是当前根滞涨——收阴或收盘回落到自身区间下半。不要再等更高的价位）")
-        return f"贴上沿（程序倾向：可考虑做空，阈值 {1 - edge:.0%}）"
-    if uptrend or downtrend:
-        # 趋势市的中间地带不再是"不动手"：方向已经由 ER+drift 给出来了，
-        # 位置只影响好坏、不决定有无。震荡市中间不动手的规矩不搬到这里。
-        side = "做多" if uptrend else "做空"
-        return (f"中间地带（{edge:.0%}~{1 - edge:.0%}）＋{'上涨' if uptrend else '下跌'}趋势"
-                f"（程序倾向：可顺势{side}，位置一般，所以 p_up 别给激进值；"
-                f"当前根形状必须同向）")
-    return f"中间地带（{edge:.0%}~{1 - edge:.0%}，程序倾向不动手）"
-
-
-def _zone_fact(pos: float, edge: float) -> str:
-    """位置判定（**纯事实版**）：只说价格站在区间哪里，不说该买还是该卖。
-
-    出场 prompt 用这个，不用 `_zone_text`。理由见 `_structure_text` 的
-    `for_exit` 分支——出场端已经锁定打法（plan），再给它一句"程序倾向：
-    顺势做多"，只会让模型在两个方向之间挑一个它爱听的。
-    """
-    edge = max(0.0, min(0.49, float(edge)))
-    if pos <= edge:
-        return f"贴着区间下沿（≤{edge:.0%}）"
-    if pos >= 1 - edge:
-        return f"贴着区间上沿（≥{1 - edge:.0%}）"
-    return f"区间中部（{edge:.0%}~{1 - edge:.0%}）"
-
-
-def _prog_direction(rows: list[dict], zone_edge: float = 0.35,
-                    trend_follow: bool = True) -> int:
-    """程序对方向的**建议**：+1 多 / -1 空 / 0 不动手。
-
-    与 _zone_text 用同一套数（_structure + zone_edge），保证「模型看到的建议」
-    和「落盘的 prog_dir」永远一致——各算各的必然漂移。
-    0 的语义是"程序这一格没有方向建议"，模型选哪个方向都记为
-    "程序无建议，模型自选"（见 trade_detail 的裁决）。
-
-    分 regime（2026-10-28）：
-      · 震荡：贴下沿 +1、贴上沿 -1、中间 0（老逻辑，一个字没改）；
-      · 趋势：一律给顺势方向，位置不再决定是否给建议；
-      · 趋势但 trend_follow=False：返回 0，趋势市不交易（不是退回"等回踩"，
-        那条路实测 47 笔均值 -1.21，没有保留价值）。
-    """
-    s = _structure(rows)
-    if not s.get("ok"):
-        return 0
-    edge = max(0.0, min(0.49, float(zone_edge)))
-    pos = s["pos"]
-    downtrend = s["er"] > ER_TREND_MIN and s["drift"] < 0
-    uptrend = s["er"] > ER_TREND_MIN and s["drift"] > 0
-    # 趋势市：方向由 ER + drift 决定，**位置不再决定是否给建议**。
-    # 2026-10-28 之前这里在「涨势贴上沿」返回 0（不背书追高），中间地带也返回 0。
-    # 后果是趋势市里程序长期没有方向，模型每次顺势开仓都被面板记成
-    # 「程序无建议，模型自选」，事后根本没法按 regime 算谁的判断更准。
-    # 现在趋势市一律给顺势方向，追高与否交给当前根形状和提示词去管。
-    if uptrend or downtrend:
-        if not trend_follow:
-            return 0
-        return 1 if uptrend else -1
-    if pos > edge and pos < 1 - edge:
-        return 0
-    if pos <= edge:
-        return 1               # 震荡贴下沿：倾向做多
-    return -1                  # 震荡贴上沿：倾向做空
-
-
-def feature_snapshot(rows: list[dict], cfg: Cfg | None = None,
-                     zone_edge: float | None = None,
-                     mtf: dict | None = None) -> dict:
-    """决策时刻的特征快照，落盘到日志行。
-
-    为什么要存（2026-10-26 加）
-    --------------------------
-    这些数算出来就被扔掉了，事后想问最基础的问题——「ER 高的单是不是更容易赢」
-    「振幅大的时候胜率有没有下降」——一个都答不了。原来只能靠从终端历史重建，
-    而 M1 历史有限，越老的订单越必然重建失败（trade_detail 里就是这个困境：
-    终端没开或者历史不够，结构就永远显示不出来）。
-
-    为什么只存数、不存原始 14 根 K 线
-    ---------------------------------
-    每笔都存 14 行 OHLC 会让 open 行膨胀到 3~4 倍，而「特征值 + 结果」已经
-    够做全部单变量/双变量分析。真要看 K 线原文时，终端历史还在就重建，
-    不在就认了——但特征本身从此不会再丢。
-
-    为什么读数都是 round 过的
-    ------------------------
-    日志是给人看也给人算的，5~6 位小数足够区分任何两个决策点，
-    再多只是把文件撑大。
-    """
-    w = visible_bars(rows)
-    s = _structure(rows)
-    if not s.get("ok"):
-        return {"ok": False, "n": len(w)}
-    r1, r5, r13, _ = _returns(rows)
-    a = _atr(rows)
-    edge = float(zone_edge if zone_edge is not None
-                 else (cfg.zone_edge if cfg is not None else 0.35))
-    out = {
-        "ok": True,
-        "symbol": cfg.symbol if cfg is not None else None,
-        "tf": cfg.tf if cfg is not None else "M1",
-        "n": len(w),
-        # 窗口的真实边界：事后核对"这笔决策时用的是哪 14 分钟"，比什么都可靠
-        "win": ([int(w[0].get("time") or 0), int(w[-1].get("time") or 0)]
-                if w else []),
-        "er": round(s["er"], 4),
-        "drift": round(s["drift"], 5),
-        "pos": round(s["pos"], 4),
-        "span": round(s["span"], 5),
-        "streak": int(s["streak"]),
-        "path": round(s["path"], 5),
-        "r1": round(r1, 6),
-        "r5": round(r5, 6),
-        "r13": round(r13, 6),
-        "atr": round(a.get("atr") or 0.0, 5),
-        "span_atr": round(a.get("span_atr") or 0.0, 3),
-        "regime": regime_of(rows),
-        "prog_dir": _prog_direction(
-            rows, edge,
-            cfg.trend_follow if cfg is not None else True),
-        # 当前根形状：趋势打法的入场确认全靠它（强势收 vs 插针顶），必须落盘
-        # 才能事后回答「追高的单里，形状占多大权重」。
-        "shape": _last_bar_shape(rows),
-    }
-    if mtf:
-        out["mtf"] = mtf
-    # MA28 同时落盘：以后才能回答「均线上方的单是不是真的更容易赢」。
-    # 只存数和方向标记，不存那 28 根原始 K 线（同上：特征够用，原文太胖）。
-    m = _ma_calc(rows)
-    if m is not None:
-        out["ma28"] = round(m["ma"], 4)
-        out["ma28_gap"] = round(m["gap"], 4)
-        out["ma28_atr"] = round(m["ratio"], 2)
-        out["ma28_side"] = m["side"]        # +1 上方 / -1 下方 / 0 贴线
-    return out
 
 
 # 模型在 reason 里"说我这一轮还不进场"的措辞。
@@ -2545,84 +1579,6 @@ def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
             "drift": int(old.get("drift") or 0)}, "move"
 
 
-def _structure_text(rows: list[dict], zone_edge: float = 0.35,
-                    digits: int = 3, trend_follow: bool = True,
-                    for_exit: bool = False) -> str:
-    s = _structure(rows)
-    if not s.get("ok"):
-        return "结构 数据不足"
-    if for_exit:
-        # 出场端只报「是什么行情」，不报「该怎么做」。
-        #
-        # 2026-10-29 那笔的账：plan=range（止盈 3.25）锁定了打法，20 分钟后
-        # 一根插针把 ER 从 0.04 顶到 0.74，这里原样塞进 prompt 的
-        # 「趋势市·上行 → 顺势做多，不等回踩」和 plan_text 的「震荡单别指望
-        # 变成趋势」正面打架。模型 13 秒里被问三次、三次都挑后者，从 +4.86
-        # 拿到 -3.90（真实高点 8.30，浮盈 6.9 倍 ATR）。
-        #
-        # 入场端靠这句话选打法，必须留着；出场端打法已经定了，再看一遍
-        # 行情判定只会给它一个反悔的理由。纯结构（ER/位置/形态）仍在。
-        zone = _zone_fact(s["pos"], zone_edge)
-        regime = _regime_word(s["er"], s["drift"])
-    elif s["er"] < ER_RANGE_MAX:
-        regime = "震荡市 → 低买高卖（贴下沿做多、贴上沿做空，中间不动手）"
-    elif s["er"] > ER_TREND_MIN:
-        if not trend_follow:
-            regime = "趋势市，趋势打法已关闭 → 不交易"
-        else:
-            regime = ("趋势市·上行 → 顺势做多，不等回踩"
-                      if s["drift"] > 0 else
-                      "趋势市·下行 → 顺势做空，不等反抽")
-    else:
-        regime = "方向不明确 → 只做位置明显的单"
-
-    # 位置判定直接算好给模型，不让它自己套阈值：
-    # 阈值改一次就得让它跟着变，各算各的必然对不上。
-    pos = s["pos"]
-    edge = max(0.0, min(0.49, float(zone_edge)))
-    if not for_exit:
-        zone = _zone_text(pos, s["er"], s["drift"], edge, trend_follow)
-
-    streak = s["streak"]
-    streak_text = f"连阳 {streak} 根" if streak > 0 else (
-        f"连阴 {-streak} 根" if streak < 0 else "无连阳连阴")
-    # 净移动带符号：只给 0.12 这种绝对值，模型分不清是在跌还是在涨
-    drift = s["drift"]
-    dir_text = "上行" if drift > 0 else ("下行" if drift < 0 else "走平")
-    d = max(0, int(digits))
-    # 振幅后面补一个无量纲比值：绝对价格模型没法判断大小，比值可以。
-    # 拿不到 ATR 就不写这一截，不编一个数出来。
-    a = _atr(rows)
-    atr_text = (f"（= {a['span_atr']:.1f} 倍单根均幅 {a['atr']:.{d}f}）"
-                if a.get("ok") and a.get("atr", 0) > 0 else "")
-    # 当前根形状：趋势打法就靠它分辨「强势推进」和「插针见顶」。
-    # 只描述事实、不下结论——结论在上面 zone 里，两处必须说同一件事。
-    sh = _last_bar_shape(rows)
-    if sh.get("ok"):
-        shape = (f"｜当前根：收盘在自身区间 {sh['clv']:.0%}"
-                 f"（{'收阳' if sh['bull'] else '收阴'}，实体占 {sh['body']:.0%}，"
-                 f"上影 {sh['upper_wick']:.0%}，下影 {sh['lower_wick']:.0%}）")
-    else:
-        shape = ""
-    return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.{d}f}（{dir_text}）/ 总行程 {s['path']:.{d}f}）"
-            f"｜振幅 {s['span']:.{d}f}{atr_text}｜当前收盘位置 {pos:.0%}（0%=区间最低 100%=最高）"
-            f"｜{streak_text}{shape}｜位置判定：{zone}｜行情判定：{regime}")
-
-
-def _regime_word(er: float, drift: float) -> str:
-    """三态归类的**短词**版本，给多周期背景用。
-
-    没复用 `_structure_text` 里的长文案：那一段带「→ 低买高卖」这类打法指引，
-    是给 M1 主窗口的。M5 背景只该回答"大方向偏哪边"，不该再给一套打法，
-    否则模型会在两套打法之间反复横跳。
-    """
-    if er < ER_RANGE_MAX:
-        return "窄幅震荡"
-    if er > ER_TREND_MIN:
-        return "单边上行" if drift > 0 else "单边下行"
-    return "方向不明"
-
-
 def _mtf_bundle(symbol: str, zone_edge: float = 0.35,
                 digits: int = 3) -> dict:
     """更高周期背景：M5 14 根的结构摘要。返回 {"text": ..., "info": ...}。
@@ -2675,53 +1631,9 @@ def _mtf_text(symbol: str, zone_edge: float = 0.35, digits: int = 3) -> str:
     return _mtf_bundle(symbol, zone_edge, digits)["text"]
 
 
-def _fmt_bar_lines(rows: list[dict], digits: int = 3) -> str:
-    """K 线表格。序号列用 T-13…T-1 / 当前，让模型一眼知道"只有这么点数据"。
-
-    digits 必须跟着品种走：黄金 3 位、BTC 2 位。写死 3 位在 BTC 上只是多一个
-    没意义的 0，但在 5 位报价的外汇上会把价格截断——那是真的误导。
-    """
-    lines = []
-    n = len(rows)
-    d = max(0, int(digits))
-    for i, r in enumerate(rows):
-        ts = int(r.get("time") or 0)
-        clock = time.strftime("%m-%d %H:%M", time.gmtime(ts)) if ts else "--"
-        tag = "当前" if i == n - 1 else f"T-{n - 1 - i:<2}"
-        lines.append(
-            f"{tag}  {clock}  {float(r.get('open') or 0):.{d}f}  "
-            f"{float(r.get('high') or 0):.{d}f}  "
-            f"{float(r.get('low') or 0):.{d}f}  "
-            f"{float(r.get('close') or 0):.{d}f}"
-        )
-    return "\n".join(lines)
-
-
 def _fmt_bars(rows: list[dict], digits: int = 3) -> str:
     """喂给决策提示词的 K 线。**永远只有 14 根**，不接受"多给一点"。"""
     return _fmt_bar_lines(visible_bars(rows), digits)
-
-
-def _returns(rows: list[dict]) -> tuple[float, float, float, float]:
-    """返回 (r1, r5, r13, 振幅)，全部只在可见的 14 根内计算。
-
-    以前这里用的是 15 根窗口——那已经越过信息边界了，等于偷偷多看一眼。
-    """
-    w = visible_bars(rows)
-    if not w:
-        return 0.0, 0.0, 0.0, 0.0
-
-    def chg(n: int) -> float:
-        if len(w) <= n:
-            return 0.0
-        base = float(w[-n - 1].get("close") or 0.0)
-        cur = float(w[-1].get("close") or 0.0)
-        return (cur - base) / base if base else 0.0
-
-    highs = [float(r.get("high") or 0.0) for r in w]
-    lows = [float(r.get("low") or 0.0) for r in w]
-    span = (max(highs) - min(lows)) if highs else 0.0
-    return chg(1), chg(5), chg(13), span
 
 
 # 降级留痕的节流表：{(函数名, 品种): 上次记录的时间}。
@@ -3954,35 +2866,6 @@ def _exit_hold(why: str) -> dict:
 # 这里只防同一个 tick 里连环开仓（状态写入和仓位读取之间的竞态窗口）。
 MIN_OPEN_GAP_SEC = 3
 
-# 允许上真单的品种。不直接用 SYMBOLS.keys()：那张表是回测用的全量清单，
-# 里面的外汇/指数没在实盘验证过——实盘白名单必须显式列出来，加一个要想一次。
-# 每个品种的 point/contract/spread/atr 都在 backtest/symbols.py 里带实测来源。
-#
-# XAUUSDc = 美分账户的黄金（2026-11-02 加）。同一个行情图、同一条 K 线，
-# contract=1 盎司（标准户是 100 盎司/手），所以**同一个手数在这里的仓位只有
-# 1/100**；而账户余额、profit、阈值又都按「分」计——两边同时缩 100 倍，
-# 于是 0.01 手 + 止损 3.00 分 与 标准户 0.01 手 + 止损 3.00 美元 落在
-# 同一个价格位置上。**不要为了"对齐仓位"把手数乘 100**，那样保证金会不够。
-TRADABLE_SYMBOLS = ("XAUUSDm", "XAUUSDc", "BTCUSDm")
-
-# 给面板用的品种展示名（下拉框文案）。键必须都在 TRADABLE_SYMBOLS 里。
-SYMBOL_LABELS = {
-    "XAUUSDm": "黄金 XAUUSD",
-    "XAUUSDc": "黄金 XAUUSD（美分）",
-    "BTCUSDm": "比特币 BTCUSD",
-}
-
-
-def _symbol_label(symbol: str) -> str:
-    """system prompt 里自我介绍用的品种名。
-
-    为什么必须动态（2026-10-26 修）：三个 system prompt 原来全部硬编码
-    「XAUUSD」。上一轮加 BTC 时改了精度、白名单、成本提示，唯独漏了这里——
-    真选 BTC 跑起来，模型会被告知"你是黄金交易员"同时收到 80000 的价格。
-    这比没验证更糟：它会把黄金的波动直觉套到 BTC 上。
-    """
-    name = SYMBOL_LABELS.get(symbol)
-    return name or symbol
 
 
 def system_for(template: str, cfg: Cfg, plan: str | None = None) -> str:
@@ -4232,14 +3115,6 @@ def _acct_currency() -> str:
     return code
 
 
-def money_label(currency: str | None = None) -> str:
-    """金额后缀。**配置里的金额、面板上的金额、模型看到的金额都用这个单位。**
-
-    USD 户显示 USD，美分户显示 USC —— 光写个数字会让「3.00」在两种账户上
-    相差 100 倍，而界面上看起来一模一样，这是最难自己发现的一类错。
-    """
-    c = (currency or "USD").upper()
-    return "USC" if c in {"USC", "XUSC", "CNT"} else c
 
 
 _ACCT_F = {"factor": 0.0, "ts": 0.0}
