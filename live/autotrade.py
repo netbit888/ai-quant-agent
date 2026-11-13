@@ -629,6 +629,10 @@ def _empty_state() -> dict:
         # 不记的话它每轮都会换一个更靠近现价的数，等于把追高改写成等待。
         "wait": None,
         "wait_drift": 0,
+        # 上一轮「不做」的结论 + 当时的报价（见 _remember_skip / _skip_note）。
+        # 模型没有跨轮记忆，这两个字段是喂给它的外部记忆，不是给面板看的。
+        "prev_entry": None,
+        "skip_streak": None,
         # 出场端连续模型调用失败次数：≥3 次自动停（仓位没人管比少做一笔危险）
         "model_errors": 0,
         # 已平仓、但还没到复盘时机的单子。平仓后要等 7 根 K 线走完才复盘，
@@ -1609,7 +1613,7 @@ ENTRY_PROMPT = """品种 {symbol} · 周期 {tf} · 窗口 14 根（当前 + 前
 {ticks}
 短周期变化 r1={r1:+.3%}  r5={r5:+.3%}  r13={r13:+.3%}  振幅={span}
 战绩 样本={n_closed} 笔  命中率={hit}
-{recent_close}{wait_note}{lessons}
+{recent_close}{wait_note}{skip_note}{lessons}
 报价 bid={bid}  ask={ask}  点差={spread_pts} 点
 时间 {clock} UTC"""
 
@@ -2352,6 +2356,127 @@ def _wait_note(wait: dict | None, price: float, atr: float, symbol: str,
             f"要么这轮直接说「这一波不做」。\n")
 
 
+# ------------------------------------------------------- 上一轮判断（回灌）
+#
+# 模型没有跨轮记忆：每轮 prompt 都是从零拼的（见 agent/llm.py chat_ex），
+# 上一轮说了什么、之后价格往哪走了，下一轮它一概不知道。等待锚点治的是
+# 「等回踩」被改写成「追」，但趋势市里锚点整体停用——于是趋势市里它连续
+# 说「不做」时，每一轮都是全新的旁观者，每轮理由单看都成立，合起来是
+# 整段行情没参与。
+#
+# 治法同锚点：给它一份外部记忆。只回灌**结论 + 之后发生了什么**。
+# 只回灌结论是灾难：模型会为了自洽继续坚持上一轮（p_up=0.00 那次 46% 的
+# 样本就是照抄 system 示例，模型自我重复的倾向有硬证据）。带上「你没进场，
+# 价格走了 X 倍均幅」才是反馈，不带就是自我强化。
+SKIP_NOTE_MAX_SEC = 600    # 10 分钟前的判断不再提：结构早换了，提它只是噪音
+SKIP_STREAK_MIN = 3        # 连续几轮才提「整段错过」（1~2 轮不做很正常）
+SKIP_STREAK_ATR = 1.5      # 且这段位移要够大，否则 3 轮横盘也算「错过」
+
+
+def _skip_note(prev: dict | None, price: float, atr: float, symbol: str,
+               now: int, max_sec: int = SKIP_NOTE_MAX_SEC) -> str:
+    """把上一轮「不做」的判断和之后的价格走向写回 prompt。无记录返回空串。"""
+    if not isinstance(prev, dict):
+        return ""
+    try:
+        ts = int(prev.get("ts") or 0)
+        asked = float(prev.get("bid") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    age = max(0, int(now) - ts)
+    if not ts or age > max_sec:
+        return ""
+    p_up = prev.get("p_up")
+    try:
+        p_up_txt = f"p_up={float(p_up):.2f}"
+    except (TypeError, ValueError):
+        p_up_txt = "p_up 未给"
+    reason = str(prev.get("reason") or "").strip().replace("\n", " ")[:40]
+    head = f"【上一轮你的判断】{age} 秒前 · 不做（{p_up_txt}）"
+    if reason:
+        head += f" · “{reason}”"
+    if not asked:
+        return head + "\n"
+    dg = _digits(symbol)
+    move = float(price) - asked
+    mult = abs(move) / atr if atr else 0.0
+    return (f"{head}\n"
+            f"之后价格 {_px(symbol, asked)} → {_px(symbol, price)}"
+            f"（{move:+.{dg}f}，≈{mult:.1f} 倍单根均幅），你没有进场。\n")
+
+
+def _skip_streak_note(streak: dict | None, price: float, atr: float,
+                      symbol: str, now: int, regime: str = "",
+                      min_n: int = SKIP_STREAK_MIN,
+                      min_atr: float = SKIP_STREAK_ATR) -> str:
+    """连续 N 轮不做、且这期间价格已经走了一段 —— 明说「你在整段错过」。
+
+    不给这一句，模型每轮都只看眼前 14 根 K 线，"这几根没机会"和"这半小时
+    没机会"在它眼里长得一样。
+    """
+    if not isinstance(streak, dict):
+        return ""
+    try:
+        n = int(streak.get("n") or 0)
+        start_px = float(streak.get("price") or 0.0)
+        start_ts = int(streak.get("ts") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if n < min_n or not start_px or not start_ts:
+        return ""
+    move = float(price) - start_px
+    mult = abs(move) / atr if atr else 0.0
+    if mult < min_atr:
+        return ""
+    dg = _digits(symbol)
+    mins = max(1, (int(now) - start_ts) // 60)
+    if regime == "trend":
+        # 措辞要和 system 的【判断原则】对齐：趋势市不许拿"位置高/低"当理由。
+        ask = ("趋势市没有「等回踩」这个选项——要么按现价顺势做，要么明确"
+               "承认这一段放弃，并把理由写成当前根的形状证据，"
+               "不要再用「位置太高/太低」当不做的理由。")
+    else:
+        ask = ("如果你在等一个回踩价，它一直没来。按当前结构重新判断："
+               "要么现在做，要么承认这段放弃，不要再把等待价往现价挪。")
+    return (f"【连续未进场】你已经连续 {n} 轮判「不做」，{mins} 分钟里价格 "
+            f"{_px(symbol, start_px)} → {_px(symbol, price)}"
+            f"（{move:+.{dg}f}，≈{mult:.1f} 倍单根均幅）。{ask}\n")
+
+
+def _skip_step(streak: dict | None, act, bid: float, now: int) -> dict | None:
+    """推进「连续未进场」计数：act=false 才累积，做了就清零。"""
+    if act is not False:
+        return None
+    if not isinstance(streak, dict) or not streak.get("ts"):
+        # 首轮：记下起点价，后面所有位移都相对它算（跟锚点同一个道理，
+        # 起点跟着价格挪，那个数就永远算不出"整段"）。
+        return {"n": 1, "ts": int(now), "price": float(bid)}
+    out = dict(streak)
+    out["n"] = int(streak.get("n") or 0) + 1
+    out["last"] = int(now)
+    return out
+
+
+def _remember_skip(state: dict, act, bid: float, now: int, p_up,
+                   reason, ok: bool = True) -> None:
+    """记下这一轮的「不做」，供下一轮回灌。真做了就清空（它已经知道结果，
+    平仓那边有自己的 recent_close，不需要这里再说一遍）。
+
+    `ok=False`（调用失败 / 输出解析不了）什么都不动：那不是它的判断，
+    覆盖上一轮真实结论等于把「我本来在等 4044」改成「我上轮连话都没说」，
+    而且技术故障也不该被算进「连续 N 轮不做」里。
+    """
+    if not ok:
+        return
+    if act is False:
+        state["prev_entry"] = {"ts": int(now), "bid": float(bid),
+                               "p_up": p_up, "reason": str(reason or "")[:60]}
+        state["skip_streak"] = _skip_step(state.get("skip_streak"), act, bid, now)
+    else:
+        state["prev_entry"] = None
+        state["skip_streak"] = None
+
+
 def _wait_step(wait: dict | None, reason: str, act, price: float, atr: float,
                now: int, side: int, ttl: int = WAIT_TTL_SEC,
                tol_atr: float = WAIT_DRIFT_ATR,
@@ -2677,7 +2802,8 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
                        ticks_text: str = "", zone_edge: float = 0.35,
                        mtf_text: str = "",
                        recent_close: dict | None = None,
-                       wait_note: str = "", trend_follow: bool = True) -> str:
+                       wait_note: str = "", skip_note: str = "",
+                       trend_follow: bool = True) -> str:
     w = visible_bars(rows)
     r1, r5, r13, span = _returns(w)
     st = stats or {}
@@ -2718,6 +2844,7 @@ def build_entry_prompt(rows: list[dict], bid: float, ask: float,
         lessons=lessons or "暂无复盘笔记。",
         recent_close=rc_text,
         wait_note=wait_note or "",
+        skip_note=skip_note or "",
         mtf=mtf_text or "",
         ma=(ma_text + "\n") if ma_text else "",
         ticks=ticks_text or "（tick 数据暂不可用，只能依据上面的 K 线判断）",
@@ -3713,7 +3840,7 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
               stats: dict | None = None, login: int | str | None = None,
               ticks_text: str = "", mtf_text: str = "",
               recent_close: dict | None = None,
-              wait_note: str = "") -> dict:
+              wait_note: str = "", skip_note: str = "") -> dict:
     """让模型给上涨概率。**模型没答上来就不做**，不拿规则替它下单。"""
     prompt = build_entry_prompt(rows, bid, ask, cfg.symbol, cfg.tf,
                                 _point(cfg.symbol), stats,
@@ -3726,6 +3853,7 @@ def ask_entry(rows: list[dict], bid: float, ask: float, cfg: Cfg,
                                 mtf_text=mtf_text,
                                 recent_close=recent_close,
                                 wait_note=wait_note,
+                                skip_note=skip_note,
                                 trend_follow=cfg.trend_follow)
     try:
         text, usage = _chat(prompt, system_for(ENTRY_SYSTEM, cfg))
@@ -4980,11 +5108,19 @@ def _tick_body(cfg: Cfg, login, now: int,
     atr_now = float(_atr(bars).get("atr") or 0.0)
     wait_note = (_wait_note(wait_prev, bid, atr_now, cfg.symbol, now)
                  if wait_prev else "")
+    # 上一轮判断回灌（2026-11-13）。趋势市里锚点是停用的，这段是趋势市
+    # 唯一能告诉它「你刚才没做、之后价格走了多远」的东西——没有它，连续
+    # act=false 在模型眼里每轮都是独立的第一次观察。顺序：先整段、再上一轮。
+    skip_note = (_skip_streak_note(state.get("skip_streak"), bid, atr_now,
+                                   cfg.symbol, now, regime)
+                 + _skip_note(state.get("prev_entry"), bid, atr_now,
+                              cfg.symbol, now))
     decision = ask_entry(bars, bid, ask, cfg, state, login,
                          ticks_text=_ticks_text(cfg, bars),
                          mtf_text=mtf["text"],
                          recent_close=recent_close,
-                         wait_note=wait_note)
+                         wait_note=wait_note,
+                         skip_note=skip_note)
     # 特征快照：决策当下就走一次，后面所有分支（skip / open / failed）都带上。
     # 不存它的话，事后想问「ER 高的单更容易赢吗」只能靠重建，而重建必然失败。
     feat = feature_snapshot(bars, cfg, mtf=mtf["info"])
@@ -5008,6 +5144,11 @@ def _tick_body(cfg: Cfg, login, now: int,
         "wait": state.get("wait"), "wait_flag": wait_flag,
         "regime": regime,
     }
+    # 记下这一轮的结论，下一轮 prompt 要用。放在这里（而不是各个 return
+    # 分支）是因为下面每一条出口都经过这一行，漏一处的效果是"回灌停在两轮前"，
+    # 比不写更难查。
+    _remember_skip(state, act, bid, now, p_up, decision.get("reason"),
+                   ok=decision.get("source") == "llm")
 
     # 模型明确说不做，就别做。以前只能靠 p_up≈0.5 暗示，结果常常
     # "理由写不追、数值 0.38 照开"——现在听它自己的。
