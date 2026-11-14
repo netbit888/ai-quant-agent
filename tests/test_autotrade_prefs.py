@@ -84,7 +84,7 @@ class PrefsFileCase(unittest.TestCase):
     def test_save_roundtrip(self):
         res = prefs.save_prefs({
             "symbol": "XAUUSDc", "interval_sec": 30,
-            "mode": "assist", "assist_paper": True, "lots": 0.03,
+            "mode": "assist", "assist_paper": True, "lots": 0.2,
         }, symbols=SYMBOLS)
         self.assertTrue(res["ok"], res)
         got = prefs.load_prefs(SYMBOLS)
@@ -92,7 +92,7 @@ class PrefsFileCase(unittest.TestCase):
         self.assertEqual(got["interval_sec"], 30)
         self.assertEqual(got["mode"], "assist")
         self.assertTrue(got["assist_paper"])
-        self.assertAlmostEqual(got["lots"], 0.03)
+        self.assertAlmostEqual(got["lots"], 0.2)
         self.assertIn("updated_at", got)
 
     def test_partial_update_keeps_other_fields(self):
@@ -124,13 +124,13 @@ class PrefsFileCase(unittest.TestCase):
         0.013 尤其危险：券商 round(0.013, 2) 会静默变成 0.01，
         界面说 0.013、账本按 0.01 走，还不报错。
         """
-        prefs.save_prefs({"lots": 0.02}, symbols=SYMBOLS)
-        for bad in (0.013, 0.1, "一手", None):
+        prefs.save_prefs({"lots": 0.2}, symbols=SYMBOLS)
+        for bad in (0.013, 0.07, "一手", None):
             with self.subTest(bad=bad):
                 res = prefs.save_prefs({"lots": bad}, symbols=SYMBOLS)
                 self.assertFalse(res["ok"])
                 self.assertTrue(res["errors"])
-                self.assertAlmostEqual(prefs.load_prefs(SYMBOLS)["lots"], 0.02)
+                self.assertAlmostEqual(prefs.load_prefs(SYMBOLS)["lots"], 0.2)
 
     def test_reject_symbol_outside_whitelist(self):
         """没测过 point/contract 的品种不能记下来：启动时必然被 validate_cfg 拒。"""
@@ -187,14 +187,14 @@ class PrefsFileCase(unittest.TestCase):
         """/api/autotrade 的响应里必须带上 prefs，否则前端无从回填。"""
         prefs.save_prefs({"symbol": "XAUUSDc", "mode": "assist",
                           "interval_sec": 30, "assist_paper": True,
-                          "lots": 0.03},
+                          "lots": 0.2},
                          symbols=SYMBOLS)
         d = autotrade.summary()
         self.assertIn("prefs", d)
         self.assertEqual(d["prefs"]["mode"], "assist")
         self.assertEqual(d["prefs"]["symbol"], "XAUUSDc")
         self.assertEqual(d["prefs"]["interval_sec"], 30)
-        self.assertAlmostEqual(d["prefs"]["lots"], 0.03)
+        self.assertAlmostEqual(d["prefs"]["lots"], 0.2)
 
     # ------------------------------------------------- 老用户的一次性迁移
 

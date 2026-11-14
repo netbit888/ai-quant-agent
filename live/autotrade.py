@@ -5644,8 +5644,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="AI 实时做单（默认真实下单；加 --paper 只记账）")
     parser.add_argument("--symbol", default="XAUUSDm")
+    # 档位列表只有 prefs.LOTS 一份，help 里手写会跟白名单漂开
+    from live import prefs as _prefs
+    _lot_menu = "/".join(f"{x:g}" for x in _prefs.LOTS)
     parser.add_argument("--lots", type=float, default=0.01,
-                        help="开仓手数（只接受 0.01/0.02/0.03/0.05；出场金额阈值会等比缩放）")
+                        help=f"开仓手数（只接受 {_lot_menu}；出场金额阈值会等比缩放）")
     parser.add_argument("--interval", type=int, default=Cfg.interval_sec,
                         help="决策间隔秒数（最小 3，模型单次约 2.6 秒）")
     parser.add_argument("--cooldown", type=int, default=Cfg.cooldown_sec,

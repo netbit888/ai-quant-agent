@@ -57,9 +57,10 @@
           <label class="mini at-int" title="每笔开仓手数。止损/止盈/保本的金额阈值会随手数等比缩放，价格距离不变；上限 0.05 手，再大点差会吃掉止损">
             <select id="atLots" onchange="updateModeHint(); saveAtPrefs()">
               <option value="0.01" selected>0.01 手</option>
-              <option value="0.02">0.02 手</option>
-              <option value="0.03">0.03 手</option>
               <option value="0.05">0.05 手</option>
+              <option value="0.1">0.10 手</option>
+              <option value="0.2">0.20 手</option>
+              <option value="0.5">0.50 手</option>
             </select>
           </label>
         </div>

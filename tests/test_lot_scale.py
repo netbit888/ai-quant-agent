@@ -75,7 +75,9 @@ class TestMoneyScale(unittest.TestCase):
         """
         with mock.patch.object(autotrade, "_symbol_contract", return_value=100.0), \
              mock.patch.object(autotrade, "_acct_factor", return_value=1.0):
-            for cfg_lots, pos_lots in ((0.01, 0.03), (0.05, 0.01), (0.02, 0.02)):
+            # cfg 用当前合法档位，pos 用历史真实单出现过的手数（0.03 已下线，
+            # 但账本里还有那个手数开出来的仓，换算仍必须只认 cfg）
+            for cfg_lots, pos_lots in ((0.01, 0.03), (0.05, 0.01), (0.1, 0.2)):
                 with self.subTest(cfg_lots=cfg_lots, pos_lots=pos_lots):
                     cfg = autotrade.Cfg(lots=cfg_lots)
                     pos = {"direction": 1, "lots": pos_lots, "price_open": 4000.0}
@@ -164,7 +166,9 @@ class TestLotWhitelist(unittest.TestCase):
             with self.subTest(lots=lots):
                 issues = "；".join(autotrade.validate_cfg(autotrade.Cfg(lots=lots)))
                 self.assertNotIn("开仓手数", issues)
-        for bad in (0.001, 0.013, 0.1, 1.5):
+        # 0.1 在 2026-11-14 进了白名单，不再是非法值；用档位之间的空隙代替，
+        # 断言的意图不变：面板上没有的数一律拒。
+        for bad in (0.001, 0.013, 0.07, 0.3, 1.5):
             with self.subTest(bad=bad):
                 issues = "；".join(autotrade.validate_cfg(autotrade.Cfg(lots=bad)))
                 self.assertIn("开仓手数只接受", issues)
@@ -190,8 +194,8 @@ class TestLotWhitelist(unittest.TestCase):
     def test_prefs_clean_rejects_unknown_lots(self):
         self.assertIsNone(prefs.clean_lots("一手"))
         self.assertIsNone(prefs.clean_lots(0.013))
-        self.assertAlmostEqual(prefs.clean_lots(0.03), 0.03)
-        self.assertTrue(prefs.valid_lots("0.05"))
+        self.assertAlmostEqual(prefs.clean_lots(0.2), 0.2)
+        self.assertTrue(prefs.valid_lots("0.5"))
 
 
 class TestSummaryShowsEffectiveAmounts(unittest.TestCase):

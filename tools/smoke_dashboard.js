@@ -239,7 +239,7 @@ try {
     // 停滞唤醒（2026-10-29）：默认开、180 秒。面板必须把它画出来，
     // 否则「面板显示 3.25、实际还多一条放行规则」又是两套口径。
     stale_wake: true, stale_sec: 180,
-    max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60, lots: 0.03 },
+    max_hold_sec: 3600, guard_sec: 5.0, cfg: { interval_sec: 60, lots: 0.2 },
     pending_reviews: 1, next_review_ts: Math.floor(Date.now() / 1000) + 240,
     dir_recent: { n: 10, long: 9, short: 1, skew: true },
     cache: { calls: 3, hit_tokens: 896, miss_tokens: 1094, hit_rate: 0.4503 },
@@ -338,18 +338,18 @@ try {
   if (!costOk) failed = true;
   // 手数（2026-11-09）：界面上说几手，就必须发几手。三件事都要对上——
   // 运行中锁住、对齐到实际在跑的那一档、点差估算按这一档算。
-  // 少了任何一条，界面说 0.01 而实际发 0.03 手，止损金额也差 3 倍。
+  // 少了任何一条，界面说 0.01 而实际发 0.2 手，止损金额也差 20 倍。
   console.log(`  运行中锁定手数 ${made.atLots.disabled === true ? '✓' : '✗'}`);
   if (made.atLots.disabled !== true) failed = true;
-  console.log(`  对齐到实际手数 ${made.atLots.value === '0.03' ? '✓' : '✗'}（${made.atLots.value}）`);
-  if (made.atLots.value !== '0.03') failed = true;
-  const bigCost = api.atSpreadCostUsd(0.03);
-  const costScales = bigCost != null && Math.abs(bigCost - 0.064 * 3) < 1e-9;
+  console.log(`  对齐到实际手数 ${made.atLots.value === '0.2' ? '✓' : '✗'}（${made.atLots.value}）`);
+  if (made.atLots.value !== '0.2') failed = true;
+  const bigCost = api.atSpreadCostUsd(0.2);
+  const costScales = bigCost != null && Math.abs(bigCost - 0.064 * 20) < 1e-9;
   console.log(`  点差成本随手数放大 ${costScales ? '✓' : '✗'}（${bigCost}）`);
   if (!costScales) failed = true;
   const lotsHint = String(made.atModeHint.textContent || '');
-  console.log(`  提示条写明手数 ${lotsHint.includes('0.03 手') ? '✓' : '✗'}（${lotsHint}）`);
-  if (!lotsHint.includes('0.03 手')) failed = true;
+  console.log(`  提示条写明手数 ${lotsHint.includes('0.2 手') ? '✓' : '✗'}（${lotsHint}）`);
+  if (!lotsHint.includes('0.2 手')) failed = true;
   // 兜底：控件被摘掉时不能按 0 手发单（0 手 = 券商直接拒），必须回落到 0.01
   const keepLots = made.atLots.value;
   made.atLots.value = '';
