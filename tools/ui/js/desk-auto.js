@@ -77,7 +77,10 @@ function renderAutoTrade(a) {
   fillFeedback(a);
   const p = a.position;
   renderRing(a, p);
-  renderPos(a, p);
+  // 第三个参数：程序没仓时的「手工单」只读视图（用户在 MT5 里自己开的）。
+  // 只给持仓面板用——决策环和闸门灯必须继续按「程序无仓」来画，
+  // 否则页面会暗示程序在管这笔单。
+  renderPos(a, p, a.manual_position);
   renderGateLeds(a, p);
 
   const ld = a.last_decision;

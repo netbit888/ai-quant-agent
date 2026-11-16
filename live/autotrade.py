@@ -5355,6 +5355,73 @@ def playbook_of(state: dict, rows: list[dict],
     }
 
 
+_MANUAL_POS_CACHE: dict = {"ts": 0.0, "view": None}
+
+
+def _manual_position(saved_cfg: dict, defaults=None) -> dict | None:
+    """账户上那笔「不是程序开的」持仓，做成**只读**视图给做单台。
+
+    为什么需要：程序只记录自己开的单（`state["position"]`），手工单在它眼里
+    等于空仓，于是做单台说「空仓」而复盘页「当前持仓」里有这笔——两个页面
+    互相打脸。用户在 MT5 里手动做单是这个面板的常态（magic=0）。
+
+    **只读**是硬约束：绝不写进 state。写进去就等于把手工单纳入出场闸门
+    （挂券商端止损、保本、超时平仓），那是另一个决定。
+
+    每 3 秒最多读一次持仓：summary 是 1 秒一次轮询，而 positions_get 要走
+    MT5 锁，会和做单线程抢；空仓又是常态，1 秒一读纯属浪费。
+    """
+    now_t = time.time()
+    if now_t - float(_MANUAL_POS_CACHE.get("ts") or 0.0) < 3.0:
+        return _MANUAL_POS_CACHE.get("view")
+
+    view = None
+    try:
+        from live.journal import open_positions
+
+        sym = str(saved_cfg.get("symbol") or "")
+        rows = [x for x in open_positions()
+                if sym and str(x.get("symbol")) == sym]
+        if rows:
+            m = rows[0]
+            try:
+                cfg_now = Cfg(**{k: v for k, v in saved_cfg.items()
+                                 if k in Cfg.__dataclass_fields__})
+            except (TypeError, ValueError):
+                cfg_now = defaults
+            pnl = None
+            if cfg_now is not None:
+                q = _quote(cfg_now.symbol)
+                if q:
+                    # 用同一个 _realized_pnl，别在前端另算一套口径
+                    pnl = _realized_pnl(
+                        cfg_now,
+                        {"direction": m.get("direction"),
+                         "lots": m.get("volume"),
+                         "price_open": m.get("price_open")},
+                        q[0], q[1])
+            view = {
+                "manual": True,
+                "ticket": m.get("ticket"),
+                "symbol": m.get("symbol"),
+                "direction": int(m.get("direction") or 0),
+                "lots": m.get("volume"),
+                "price_open": m.get("price_open"),
+                "price_current": m.get("price_current"),
+                "sl": m.get("sl"),
+                "tp": m.get("tp"),
+                "opened_at": m.get("open_time"),
+                "float_pnl": pnl,
+                # 同品种多笔手工单：只展示第一笔，但把总数带出去别装作只有一笔
+                "count": len(rows),
+            }
+    except Exception:  # noqa: BLE001
+        view = None
+
+    _MANUAL_POS_CACHE.update({"ts": now_t, "view": view})
+    return view
+
+
 def summary(login: int | str | None = None, recent: int = 30) -> dict:
     """给面板用。全部从 state + 日志现算，不做任何缓存，避免和实际不一致。"""
     state = load_state(login)
@@ -5462,6 +5529,20 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         if q:
             float_pnl = _realized_pnl(cfg_now, pos_now, q[0], q[1])
 
+    # ---- 手工单（2026-11-16）----
+    # 用户在 MT5 里自己开的仓，`state["position"]` 是空的：程序只记录**自己开的**
+    # 单。于是做单台的持仓面板显示「空仓」，而复盘页的「当前持仓」明明有这笔，
+    # 两个页面互相打脸（用户原话："我自己在 mt5 开单，程序不记录？？？？"）。
+    #
+    # 这里给一份**只读**视图，两个前提缺一不可：程序自己没仓 + 品种上确实有仓。
+    # **绝不写进 state**——写进去等于把手工单纳入出场闸门（挂券商端止损、保本、
+    # 超时平仓），那是完全另一个决定，用户要的是"看得见"，不是"被接管"。
+    # 前端据此渲染成「手工单 · 程序未接管」，刻度尺/保本/脉冲一律不画（那些线
+    # 只存在于程序的脑子里，画出来就是撒谎）。
+    manual_pos = None
+    if not pos_now:
+        manual_pos = _manual_position(saved_cfg, _defaults)
+
     # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
     # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。
     try:
@@ -5496,6 +5577,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "started_at": state.get("started_at"),
         "last_tick_ts": state.get("last_tick_ts"),
         "position": state.get("position"),
+        # 手工单只读视图（程序没仓位、品种上有仓时才有）。前端画在持仓面板里，
+        # 标「手工单·程序未接管」；不参与任何出场逻辑。
+        "manual_position": manual_pos,
         # 持仓浮动盈亏（USD）。None = 没仓或拿不到报价。状态带用它显示实时盈亏，
         # 和峰值 peak_pnl 一起看就能当场判断「是不是摸到过门槛又吐回去」。
         "float_pnl": float_pnl,

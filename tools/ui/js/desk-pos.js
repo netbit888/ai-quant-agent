@@ -27,7 +27,7 @@ function rulerTop(tp, hi) {
   return Math.max(tp, niceCeil(hi * 1.15));
 }
 
-function renderPos(a, p) {
+function renderPos(a, p, mp) {
   const nowS = serverNow(a);
   const plan = p ? (p.plan || 'range') : '';
   const tp = Number((plan === 'trend' ? a.tp_min_trend : a.tp_min_usd) || 0);
@@ -50,6 +50,56 @@ function renderPos(a, p) {
     e.style.color = color || '';
     e.classList.toggle('idle', text === '—');
   };
+
+  // ---- 手工单（2026-11-16）----
+  // 程序自己没仓、但品种上有仓 = 用户在 MT5 里手动开的。这类单在这个面板上
+  // 是常态（magic 恒 0），以前做单台直接显示「空仓」，和复盘页的「当前持仓」
+  // 互相打脸——用户原话："我自己在 mt5 开单，程序不记录？？？？"
+  //
+  // 只显示、不接管，所以刻度尺 / 止盈线 / 保本徽章 / 脉冲**一律不画**：
+  // 那些线只存在于程序的出场闸门里，画出来等于宣称程序在管这笔单。
+  if (!p && mp) {
+    if (side) {
+      side.className = 'pos-side ' + (mp.direction > 0 ? 'long' : 'short');
+      side.textContent = (mp.direction > 0 ? '多' : '空') + ' '
+        + (mp.lots == null ? '—' : mp.lots);
+    }
+    if (planEl) {
+      planEl.className = 'pos-plan';
+      planEl.textContent = '手工单 · 程序未接管'
+        + ((Number(mp.count) || 0) > 1 ? '（同向共 ' + mp.count + ' 笔）' : '');
+      planEl.title = '你在 MT5 里自己开的仓。程序不挂券商端止损、不管保本、'
+        + '不会超时平仓；出场全靠你自己。';
+    }
+    setV('posEntry', fmt(mp.price_open, 3));
+    const fpm = (mp.float_pnl == null) ? null : Number(mp.float_pnl);
+    setV('posPnl', fpm == null ? '—' : money(fpm),
+         fpm == null ? '' : (fpm > 0 ? 'var(--up)' : (fpm < 0 ? 'var(--down)' : '')));
+    setV('posPeak', '—');
+    const heldM = mp.opened_at ? Math.max(0, nowS - Number(mp.opened_at)) : 0;
+    setV('posHold', heldM ? durText(heldM) : '—');
+
+    ['rBe', 'rTp', 'rPeak'].forEach(id => {
+      const e = $(id);
+      if (e) e.classList.add('hidden');
+    });
+    const rFillM = $('rFill');
+    if (rFillM) { rFillM.style.width = '0'; rFillM.className = 'r-fill'; }
+    if ($('rulerLb')) $('rulerLb').textContent = '浮盈刻度 · 手工单不适用';
+    if ($('rulerV')) { $('rulerV').textContent = '—'; $('rulerV').style.color = ''; }
+
+    const beEl = $('beBadge');
+    if (beEl) beEl.className = 'be-badge off';
+    const beT = $('beText'), beN = $('beNote');
+    if (beT) beT.textContent = '手工单 · 无保本';
+    if (beN) {
+      beN.textContent = '程序不接管，止损由你在 MT5 里自己管'
+        + (Number(mp.sl) > 0 ? '（当前 SL ' + fmt(mp.sl, 3) + '）' : '（当前未挂 SL）');
+    }
+    const burstM = $('posBurst');
+    if (burstM) { burstM.classList.add('hidden'); burstM.textContent = ''; }
+    return;
+  }
 
   if (p) {
     if (side) {
