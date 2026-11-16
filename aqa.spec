@@ -66,6 +66,9 @@ datas = [
 hiddenimports = [
     # 原生扩展（.pyd），静态分析经常漏
     "MetaTrader5", "MetaTrader5._core",
+    # MT5 的 .pyd 内部依赖 numpy，但 PyInstaller 扫二进制里的 import 不可靠，
+    # 靠 hook-numpy 显式收进来（排除列表里已经不再排它）
+    "numpy",
     # 面板的函数内 import（PyInstaller 通常能扫到，列出来更保险）
     "live.paths", "live.journal", "live.advisor", "live.stats", "live.rules",
     "live.sessions", "live.autotrade", "live.positions",
@@ -113,7 +116,13 @@ excludes = [
     "tools.inspect_log",
     "tools.query",
     "tools.report",
-    "pandas", "numpy", "scipy", "statsmodels", "matplotlib", "dtale", "flask",
+    # numpy **绝对不能排**（v1.5.32 修的）：MetaTrader5 的 .pyd 内部 import numpy，
+    # 导入 MT5 就会拉它进来。排掉之后安装版起得来、有窗口、能看历史账本，但
+    # `mt5.initialize()` / 任何取数调用都抛
+    #   ImportError: numpy._core.multiarray failed to import
+    # 表现为「实盘同步失败」+ 账户列表永远空，而且 --web 源码态完全复现不出来。
+    # 代价是安装包 +约 15MB，值。
+    "pandas", "scipy", "statsmodels", "matplotlib", "dtale", "flask",
     "duckdb", "ruff", "quantstats",
 ]
 

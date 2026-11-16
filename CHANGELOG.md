@@ -2,6 +2,44 @@
 
 版本号的唯一来源是仓库根 `app_version.py` 的 `APP_VERSION`（构建/发版脚本与安装脚本都从它派生）。
 
+## v1.5.32 — 2026-11-16
+
+<!-- notes -->
+**安装版从来就读不到账户。**
+
+`MetaTrader5` 的 .pyd 内部 import numpy，而打包时把 numpy 排除了：窗口能开、历史账本能看，但每一次实盘同步都抛 `numpy._core.multiarray failed to import`，账户列表永远是空的。现在 numpy 随包打进去，安装包大约 +15MB。
+
+不需要改配置，装完重启面板即可。
+<!-- /notes -->
+
+### 改了什么
+
+#### 1. `aqa.spec` 不再排除 numpy
+
+`excludes` 里为了压体积排掉了 `pandas / numpy / scipy / ...`。numpy 这一条是错的：
+`MetaTrader5` 的 C 扩展内部 `import numpy`，导入 MT5 就会把它拉进来。
+
+后果是**安装版完全没有实盘能力**，而且症状极具误导性：
+
+| 看得到 | 看不到 |
+|---|---|
+| 窗口正常打开 | `mt5.initialize()` 抛 ImportError |
+| 页面、KPI、历史账本都在 | 实盘同步失败（`[live] 同步失败`） |
+| 配置、`.env` 都读得到 | 账户列表永远空 |
+
+源码态（`.venv` 里有 numpy）**完全复现不出来**，所以这个坑从第一个安装包起就在，
+只是从没被触发过——用户此前一直源码跑。
+
+修法：从 `excludes` 删掉 `numpy`，同时写进 `hiddenimports`（PyInstaller 对 .pyd
+里的 import 扫描不可靠，交给 `hook-numpy` 显式收）。`pandas / scipy / matplotlib`
+仍然排除。
+
+#### 2. 装版与源码态共用一份账本
+
+安装版的数据根是 exe 同级（`<安装目录>\data`），与仓库 `data/` 不是同一份，
+所以刚装完是空账本。用 `AQA_DATA_DIR` 指向仓库根即可共用，账本仍然只有一份
+（分叉比省事危险得多）。不设这个变量时行为不变。
+
 ## v1.5.31 — 2026-11-16
 
 <!-- notes -->
