@@ -133,7 +133,10 @@ function renderRing(a, p) {
   const adviceText = ld ? String(ld.advice_text || '').replace(/\s+/g, ' ').trim() : '';
   if (tagEl) {
     if (ld && ld.veto) {
-      tagEl.textContent = '程序拦下 · ' + String(ld.veto);
+      // code 是给统计和分桶用的，屏幕上是给人看的。能翻的翻成人话，
+      // 翻不出来的保留原码——比硬编一句错的解释强。
+      const VETO_LABEL = { manual_position: '手工单在场，不叠加' };
+      tagEl.textContent = '程序拦下 · ' + (VETO_LABEL[ld.veto] || String(ld.veto));
       tagEl.className = 'ring-tag bad';
     } else if (ld && ld.advice) {
       tagEl.textContent = '模型否决建议 · 程序未拦';

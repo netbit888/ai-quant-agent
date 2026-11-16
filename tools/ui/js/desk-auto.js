@@ -111,7 +111,10 @@ function renderAutoTrade(a) {
         const until = Number(ld.deny_until) || 0;
         if (a.running && until > nowS) tag += ' · 冷静期 ' + atMmSs(until - nowS);
       }
-      else if (ld.veto) { tag = '程序拦下'; cls = 'is-veto'; }
+      else if (ld.veto) {
+        tag = ld.veto === 'manual_position' ? '手工单在场·不叠加' : '程序拦下';
+        cls = 'is-veto';
+      }
       // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。
       // 这一格是事后分桶的关键——「听了程序」和「没听」要能分开算期望。
       else if (ld.advice) { tag = '模型否决建议'; cls = 'is-override'; }

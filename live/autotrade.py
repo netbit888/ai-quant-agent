@@ -2982,7 +2982,14 @@ def _tick_body(cfg: Cfg, login, now: int,
         return _finish(state, row, login, ts=now)
 
     # --- 空仓：先看闸门，过不了就不花 API 的钱 -------------------------------
-    ok, why = can_open(state, now, bool(live_positions), cfg)
+    # `has_position` 只认「程序自己账本上的仓」。走到这里 `pos` 必为空（有仓在
+    # 上面的持仓分支就返回了），所以原来的 `bool(live_positions)` 实际是在问
+    # 「实盘上有没有仓」——包括你手工开的。后果是**手工单一开，判断就停了**：
+    # 每轮直接 skip「品种上已有持仓，不叠加」，模型一次都不调，last_decision
+    # 冻在上一次，面板看着像死了（2026-11-16 实盘）。
+    # 手工单不归程序管，但它不该让程序闭嘴。判断照给，能不能真下单由下面
+    # `live_positions` 那道闸门挡（在 send_open 之前，两种模式共用）。
+    ok, why = can_open(state, now, False, cfg)
     if not ok:
         row = {"ts": now, "kind": "skip", "reason": why}
         return _finish(state, row, login, ts=now)
@@ -3123,6 +3130,23 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 开仓行也带 would_veto——事后能按这一格算「听了 vs 没听」的期望。
         state["last_decision"]["advice"] = advice_code
         state["last_decision"]["advice_text"] = advice[1]
+
+    # 品种上已经有别人的仓（你在终端里手工开的）：模型的判断、理由、特征照常
+    # 落盘——面板要看得到它现在怎么想，这是「只读展示」的另一半。但绝不叠加，
+    # 也不弹卡：弹了也只能在 90 秒后被作废，白让人盯一次屏。
+    # 位置放在 advice 闸门之后 = 只拦「模型真想开」的单子；它自己说不做的
+    # 那几轮停在上面的 act=False 分支，理由仍是它自己的原话，不掺这句。
+    if live_positions:
+        n = len(live_positions)
+        kind_txt = "多" if direction > 0 else "空"
+        state["last_decision"]["veto"] = "manual_position"
+        state["last_decision"]["manual_hold"] = n
+        row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
+               "prog_dir": prog_dir, "agree": agree, "feat": feat,
+               "act": act, "veto": "manual_position",
+               "reason": (f"模型判断做{kind_txt}（{decision.get('reason') or '未给理由'}），"
+                          f"但品种上已有 {n} 笔手工持仓（程序未接管），不叠加")}
+        return _finish(state, row, login, ts=now)
 
     # 辅助模式：**开仓前停住，等人点一下**。
     #

@@ -560,13 +560,27 @@ class TestTick(TempLedger):
         self.assertEqual(row["kind"], "open")
         self.assertEqual(row["direction"], -1)
 
-    def test_blocked_by_existing_position_does_not_call_llm(self):
-        with mock.patch.object(autotrade, "ask_entry") as m_entry:
+    def test_manual_position_still_asks_llm_but_never_opens(self):
+        """品种上有别人的仓（手工单）**不再是**「不必判断」的理由。
+
+        这条用例原来叫 `..._does_not_call_llm`，钉的是"实盘上有仓就不调模型"。
+        2026-11-16 实盘证明那个省 token 的做法等于让程序闭嘴：你在终端里开一
+        笔，辅助模式每轮直接 skip「品种上已有持仓，不叠加」，模型一次不调，
+        面板决策环冻在上一次。手工单不归程序管，但它不该让判断停摆——
+        模型照问，结论照落盘，只是不叠加开仓。
+        """
+        with mock.patch.object(autotrade, "ask_entry",
+                               return_value={"act": True, "p_up": 0.7,
+                                             "reason": "结构支持",
+                                             "source": "llm"}) as m_entry, \
+             mock.patch.object(autotrade, "send_open") as m_open:
             row = autotrade.tick(self.cfg, now=NOW, quote=(4000.0, 4000.24),
                                  rows=bars_up(),
                                  positions=[{"ticket": 1, "symbol": "XAUUSDm"}])
         self.assertEqual(row["kind"], "skip")
-        m_entry.assert_not_called()
+        m_entry.assert_called_once()
+        self.assertEqual(row["veto"], "manual_position")
+        m_open.assert_not_called()
 
     def test_hold_when_model_says_keep(self):
         state = autotrade._empty_state()
