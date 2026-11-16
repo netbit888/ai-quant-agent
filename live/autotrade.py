@@ -5086,6 +5086,10 @@ class Worker:
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # 线程代数 + 所有历史停止事件。两个都为了同一件事：**旧线程不能
+        # 影响新线程**（2026-11-16）。
+        self._gen = 0
+        self._evs: list[threading.Event] = []
         self.cfg: Cfg | None = None
         self.login = None
 
@@ -5101,7 +5105,17 @@ class Worker:
 
         self.cfg = cfg
         self.login = login
-        self._stop.clear()
+        # **每代线程用全新的 Event**，不再复用 `clear()`。
+        #
+        # 复用同一个 Event 时，`stop()` 把它 set 掉、`join(15)` 超时后
+        # `_thread` 被置空，用户马上又点开始 → `clear()` 把同一个 Event
+        # 复位 → 那个本该退出的旧线程被"叫醒"，于是**两个线程同时 tick、
+        # 同时下单**。新 Event + 代数是最小代价的隔离。
+        self._gen += 1
+        gen = self._gen
+        stop_ev = threading.Event()
+        self._stop = stop_ev
+        self._evs.append(stop_ev)
         # 上一轮异常退出可能留下残状态：清掉，免得新线程把旧信号当成自己在等
         DESK.close()
 
@@ -5114,16 +5128,19 @@ class Worker:
         state["cfg"] = cfg_to_dict(cfg)
         save_state(state, login)
 
-        self._thread = threading.Thread(target=self._loop, name="autotrade",
-                                        daemon=True)
+        self._thread = threading.Thread(target=self._loop, args=(gen, stop_ev),
+                                        name="autotrade", daemon=True)
         self._thread.start()
         return {"ok": True, "dry_run": cfg.dry_run, "symbol": cfg.symbol,
                 "lots": cfg.lots, "interval_sec": cfg.interval_sec,
                 "assist": cfg.assist}
 
-    def _loop(self) -> None:
+    def _loop(self, gen: int, stop_ev: threading.Event) -> None:
         cfg, login = self.cfg, self.login
-        while not self._stop.is_set():
+        # `gen == self._gen` 是"我还是现任"的判据：它不是冗余检查，而是
+        # 唯一阻止旧线程继续下单的东西。`stop_ev` 是这一代专属的，
+        # 即使上一代还没退出也收不到新的复位。
+        while not stop_ev.is_set() and gen == self._gen:
             started = time.time()
             try:
                 row = tick(cfg, login=login)
@@ -5134,11 +5151,15 @@ class Worker:
                 row = {}
             if row.get("stop"):
                 break
-            _wait_next(started, row, cfg, login, stop_wait=self._stop.wait)
+            _wait_next(started, row, cfg, login, stop_wait=stop_ev.wait)
 
-        state = load_state(login)
-        state["running"] = False
-        save_state(state, login)
+        # **只有现任线程才能改 running**。旧线程退出时若无条件写 False，
+        # 会把刚起来的新线程抹成"未启动"——用户点开始后看到面板还是已停止，
+        # 以为点了没用，其实程序在跑（2026-11-16）。
+        if gen == self._gen:
+            state = load_state(login)
+            state["running"] = False
+            save_state(state, login)
 
     def stop(self, login=None, cfg: Cfg | None = None,
              flatten: bool = False) -> dict:
@@ -5149,6 +5170,12 @@ class Worker:
         # 「已关闭并清仓」之后重新开一笔。取消让等待者立刻返回 cancelled，
         # 那条路径只落日志、绝不下单。
         DESK.cancel()
+        # **所有代**的停止事件都要 set：旧线程可能还卡在 `_wait_next` 的
+        # 60 秒长睡里，只 set 当前那一个会让它睡满一轮才醒——醒来时新一代
+        # 已经在跑了，两边的 tick 就撞在一起。
+        for ev in self._evs:
+            ev.set()
+        self._evs.clear()
         self._stop.set()
         thread = self._thread
         if thread and thread.is_alive():

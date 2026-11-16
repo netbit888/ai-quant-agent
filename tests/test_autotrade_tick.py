@@ -978,6 +978,46 @@ class TestWorker(TempLedger):
         self.assertFalse(second["ok"])
         self.assertIn("已经在跑", second["error"])
 
+    def test_restart_uses_fresh_stop_event(self):
+        """重启必须换新 Event。
+
+        复用同一个 Event 时，`stop()` set 掉、`join(15)` 超时后 `_thread`
+        被置空，用户马上点开始 → `clear()` 复位 → 本该退出的旧线程被叫醒，
+        于是**两个线程同时 tick、同时下单**（2026-11-16）。
+        """
+        cfg = autotrade.Cfg(interval_sec=9999, dry_run=True)
+        with mock.patch.object(autotrade, "tick",
+                               return_value={"kind": "skip", "reason": "mock"}):
+            autotrade.WORKER.start(cfg)
+            ev1 = autotrade.WORKER._stop
+            autotrade.WORKER.stop(flatten=False)
+            autotrade.WORKER.start(cfg)
+            ev2 = autotrade.WORKER._stop
+
+        self.assertTrue(ev1.is_set())     # 旧那一代被叫停
+        self.assertIsNot(ev1, ev2)        # 新那一代是新对象，不受复位影响
+        self.assertFalse(ev2.is_set())
+
+    def test_old_generation_does_not_touch_running(self):
+        """旧线程退出时不能把新线程的 running 抹成 False。
+
+        抹掉的后果：用户点了开始，面板却还是「未启动」，于是他以为点了没用。
+        """
+        state = autotrade._empty_state()
+        state["running"] = True
+        autotrade.save_state(state)
+
+        w = autotrade.Worker()
+        w._gen = 5
+        ev = autotrade.threading.Event()
+        ev.set()                     # 让循环直接不进，只走收尾
+
+        w._loop(4, ev)               # 上一代：不许写
+        self.assertTrue(autotrade.load_state()["running"])
+
+        w._loop(5, ev)               # 现任：该写
+        self.assertFalse(autotrade.load_state()["running"])
+
     def test_stale_running_flag_not_reported_as_running(self):
         """面板重启后磁盘上还留着 running=true，不能显示成还在做单。"""
         state = autotrade._empty_state()
