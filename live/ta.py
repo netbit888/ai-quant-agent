@@ -214,6 +214,9 @@ def _last_bar_shape(rows: list[dict]) -> dict:
         "lower_wick": round((min(c, o) - l) / rng, 4),
         "body": round(abs(c - o) / rng, 4),
         "bull": c > o,
+        # 绝对振幅：上面四个比例的分母都是它，所以比例永远分不出大小。
+        # 调用方拿它除以 ATR 才是可跨时段比较的量（见 2026-11-16 那次误判）。
+        "rng": round(rng, 6),
     }
 
 
@@ -609,11 +612,19 @@ def _structure_text(rows: list[dict], zone_edge: float = 0.35,
                 if a.get("ok") and a.get("atr", 0) > 0 else "")
     # 当前根形状：趋势打法就靠它分辨「强势推进」和「插针见顶」。
     # 只描述事实、不下结论——结论在上面 zone 里，两处必须说同一件事。
+    #
+    # 2026-11-16 补振幅（4979743277）：clv / body / 影线的分母都是这根
+    # 自己的振幅，于是「实体占 96%、上影 0%」既能形容一根 2 美元的 K 线，
+    # 也能形容一根 5 美分的。模型当时把后者读成「强势推进」追进去，26 分钟
+    # 峰值只有 0.45 倍 ATR 就被止损。补的是一个无量纲比值，不加结论、不改判定。
     sh = _last_bar_shape(rows)
     if sh.get("ok"):
+        bar_atr = (f"（= {sh['rng'] / a['atr']:.2f} 倍 ATR）"
+                   if a.get("ok") and a.get("atr", 0) > 0 else "")
         shape = (f"｜当前根：收盘在自身区间 {sh['clv']:.0%}"
                  f"（{'收阳' if sh['bull'] else '收阴'}，实体占 {sh['body']:.0%}，"
-                 f"上影 {sh['upper_wick']:.0%}，下影 {sh['lower_wick']:.0%}）")
+                 f"上影 {sh['upper_wick']:.0%}，下影 {sh['lower_wick']:.0%}），"
+                 f"这根振幅 {sh['rng']:.{d}f}{bar_atr}")
     else:
         shape = ""
     return (f"结构 ER={s['er']:.2f}（净移动 {drift:+.{d}f}（{dir_text}）/ 总行程 {s['path']:.{d}f}）"

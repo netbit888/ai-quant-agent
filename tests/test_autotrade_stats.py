@@ -13,7 +13,7 @@ from unittest import mock
 
 from live import autotrade
 from tests._autotrade_base import (
-    NOW, TempLedger, bars_up,
+    NOW, TempLedger, bar, bars_up,
 )
 
 
@@ -224,6 +224,39 @@ class TestAtr(unittest.TestCase):
         text = autotrade._structure_text(bars_up(14))
         self.assertIn("倍单根均幅", text)
         self.assertIn("7.5 倍", text)
+
+    def test_bar_shape_carries_its_own_size(self):
+        """当前根的形态必须带振幅，否则 5 美分和 2 美元在文案里长得一样。
+
+        2026-11-16 的实盘（4979743277）：模型只看到「收盘 100%、实体 96%、
+        上影 0%」，把它读成强势推进追多。那根实际只有 0.047 美元 ≈ 0.03 倍
+        ATR，26 分钟后峰值 0.45 倍 ATR 即被止损。
+
+        clv / body / 影线的分母都是这根自己的振幅，纯比例天生分不出大小；
+        这两根 K 线的三个比例**完全一致**，只有振幅差 40 倍，文案必须不同。
+        """
+        big = bars_up(14)
+        big_text = autotrade._structure_text(big)
+        self.assertIn("这根振幅", big_text)
+        self.assertIn("倍 ATR", big_text)
+        self.assertIn("1.00 倍 ATR", big_text)   # bars_up 每根振幅 2.0，ATR≈2.0
+
+        # 同样形状（clv .75 / 实体 .25 / 上影 .25 / 下影 .50）但振幅只有 0.02
+        # 美元：按比例构造，确保三个比例与 big 的最后一根逐位相同。
+        base = big[-2]["close"]
+        tiny = big[:-1] + [bar(base + 0.010, base + 0.020, base, base + 0.015,
+                               big[-1]["time"])]
+        tiny_text = autotrade._structure_text(tiny)
+
+        # 三个比例确实一模一样 —— 这才是旧文案的问题所在
+        def shape_seg(text):
+            return text.split("｜当前根：")[1].rsplit("，这根振幅", 1)[0]
+
+        self.assertEqual(shape_seg(big_text), shape_seg(tiny_text))
+        # 但振幅必须能把它拆开
+        self.assertIn("这根振幅 0.020", tiny_text)
+        self.assertNotIn("0.020", big_text)
+        self.assertNotEqual(big_text, tiny_text)
 
 
 class TestFeatureSnapshot(unittest.TestCase):
