@@ -29,6 +29,29 @@ MB_TOPMOST = 0x4000
 IDYES = 6
 
 
+def ensure_app_id() -> None:
+    """把本进程挂到固定的 AppUserModelID 上（必须在建窗口之前调）。
+
+    Windows 用 AUMID 决定三件事：任务栏图标归组、跳转列表、通知归属。
+    不设的话，源码态（python.exe）和安装版（AIQuant.exe）在任务栏上是
+    两个互不相干的图标，通知也归错组；设了之后无论怎么启动都是同一个
+    「SeatOne 实盘账本」。失败不影响运行，静默跳过。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        from tools.version_info import APP_ID
+
+        fn = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        fn.argtypes = [ctypes.c_wchar_p]
+        fn.restype = ctypes.c_long
+        fn(APP_ID)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def message_box(text: str, title: str = "SeatOne", style: int = MB_OK) -> bool:
     """Win32 消息框，返回 True 表示点了「是」。
 
@@ -125,6 +148,9 @@ def run_window(*, url: str, title: str, js_api, on_window, on_closing,
     没有 js_api、关掉不影响别人。
     """
     import webview
+
+    # 必须在 create_window 之前：AUMID 只对之后创建的窗口生效。
+    ensure_app_id()
 
     if storage_path is not None:
         storage_path.mkdir(parents=True, exist_ok=True)

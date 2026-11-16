@@ -14,11 +14,21 @@
 """
 
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH)
+# spec 是 exec 运行的，sys.path 里没有仓库根，取不到 app_version / tools.*
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.version_info import write_version_file  # noqa: E402
+
+# VERSIONINFO：没有它任务管理器只显示文件名（"AIQuant"），有了才显示
+# 「SeatOne 实盘账本」——这正是用户抱怨的「为什么显示成 Python」的根因之一。
+_VERSION_FILE = write_version_file(ROOT / "build" / "version_info.txt")
 
 
 def _subs(*names):
@@ -143,6 +153,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(_ICON) if _ICON.is_file() else None,
+    version=str(_VERSION_FILE),
 )
 
 coll = COLLECT(

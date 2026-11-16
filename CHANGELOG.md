@@ -2,6 +2,56 @@
 
 版本号的唯一来源是仓库根 `app_version.py` 的 `APP_VERSION`（构建/发版脚本与安装脚本都从它派生）。
 
+## v1.5.31 — 2026-11-16
+
+<!-- notes -->
+**任务管理器里不再叫「Python」或「AIQuant」，而是「SeatOne 实盘账本」+ 你自己的图标；任务栏固定项、通知也归到同一个身份。**
+
+顺带把「省内存」这条路测死了：空闲 CPU 0.03%，573MB 里 429MB 是 WebView2 运行时，调参实测零收益，改不掉。不需要改配置，重启面板即可。
+<!-- /notes -->
+
+### 改了什么
+
+#### 1. 应用身份（VERSIONINFO + AUMID）
+
+用户报的原始现象：任务管理器里躺着「Python（3）」和「WebView2 管理器（7）」，不像别的软件是一个整体。
+
+查下来第一条是硬伤：**exe 从来没有 VERSIONINFO 资源**。没有它，Windows 只能拿文件名当显示名，任务管理器/文件属性/跳转列表里看到的就是 `AIQuant`（安装版）或 `Python`（源码态）。
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| VERSIONINFO | 无 | `FileDescription` / `ProductName` = SeatOne 实盘账本 |
+| 版本号 | 只有 app_version.py | 同一来源派生到资源里（不重复维护） |
+| AUMID | 未设置 | `SeatOne.LiveDesk.1` |
+
+- `tools/version_info.py` 生成 PyInstaller 的 `VSVersionInfo`，`aqa.spec` 传 `version=`；
+- `tools/desktop.py::ensure_app_id()` 在 `create_window` **之前**调
+  `SetCurrentProcessExplicitAppUserModelID`——顺序反了就不生效。
+
+AUMID 定了就别改：改了等于任务栏固定项、通知归组全部断开，表现为「多出第二个图标」。
+
+#### 2. WebView2 调参：实测零收益，记下来别再试
+
+六个子进程（浏览器/GPU/渲染/存储/音频/crashpad）是 Chromium 的沙箱结构，不是 bug。
+
+写探针窗口，用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 塞进 `AudioServiceOutOfProcess`
+关闭、缓存上限、JS 堆上限，**确认参数真的到达了浏览器进程**（`disable-features` 合并成功、
+`disk-cache-size` 出现在子进程命令行），结果：
+
+| | 进程数 | 内存 |
+|---|---|---|
+| 基线 | 6 | 296.0 MB |
+| 调参后 | 6 | 295.8 MB |
+
+零收益。以后不要再往这个方向花时间——唯一有量级的杠杆是 `--web` 浏览器模式
+（WebView2 全部消失，只剩 Python 的 143MB），代价是变成浏览器标签页。
+
+#### 3. 不需要改配置
+
+装完直接重启面板。源码态跑的人（`python -m tools.dashboard`）名字仍是 Python，
+装上安装版才是 `SeatOne 实盘账本`；两者账本目录不同（安装版在
+`%LOCALAPPDATA%\Programs\AIQuant\data`），别互相指。
+
 ## v1.5.30 — 2026-11-16
 
 <!-- notes -->
