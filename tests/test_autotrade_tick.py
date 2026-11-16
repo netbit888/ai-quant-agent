@@ -790,7 +790,12 @@ class TestFatalOrderFailure(TempLedger):
         self.assertIsNotNone(autotrade.load_state()["stop_reason"])
 
     def test_close_rejected_stops_loop(self):
-        """平不掉还继续每分钟问一次要不要平，只会白烧钱。"""
+        """永久性拒绝立刻停机——重试不会自愈，只是反复白烧请求。
+
+        **只针对永久码**（这里是 10027 算法交易没开）。瞬时的 10029 走重试 +
+        连续失败计数，见 test_autotrade_close_retry.py：2026-11-16 硬止损被
+        一次 10029 打死，就是因为这两类混在一起处理。
+        """
         state = autotrade._empty_state()
         state["position"] = {"ticket": 42, "direction": 1, "lots": 0.01,
                              "price_open": 4000.0, "opened_at": NOW - 60,

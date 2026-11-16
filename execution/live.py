@@ -323,7 +323,11 @@ class Executor:
         with mt5lock.lock():
             positions = mt5.positions_get(ticket=ticket) or []
             if not positions:
-                return {"ok": False, "reason": "持仓不存在"}
+                # **这不是失败**：券商端的 SL/TP 抢先成交了，我们这张平仓单
+                # 本来就没必要发。调用方拿 `gone` 走「已平」记账，不能当报错
+                # 处理——否则每次硬止损被券商 SL 抢先，都会把做单线程停掉。
+                return {"ok": False, "gone": True, "retcode": None,
+                        "reason": "持仓已不在券商端"}
             pos = positions[0]
             tick = mt5.symbol_info_tick(pos.symbol)
         if tick is None:

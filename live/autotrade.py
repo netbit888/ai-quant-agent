@@ -282,6 +282,9 @@ def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
     # 之后 position 就被清了——所以必须在清仓之前记。
     state["last_close_dir"] = pos.get("direction")
     state["position"] = None
+    # 平掉了就清零"平仓连续失败"计数。不清的话它会跨笔累加：上一笔失败过
+    # 两次、最后被券商 SL 平掉，下一笔第一次失败就凑满 3 次直接停机。
+    state["close_fail_streak"] = 0
     if source in _SL_SOURCES:
         state["sl_closes"] = int(state.get("sl_closes") or 0) + 1
     elif source in _BE_SOURCES:
@@ -2152,7 +2155,30 @@ _RETCODE_HINT = {
     10014: "手数不合法（可能小于最小手数或精度不对）",
     10013: "请求参数无效",
     10009: "成交成功",
+    # 以下几个是**瞬时**状态，不是策略或配置问题，等一两秒重发就能过。
+    # 10029 在硬止损那一刻几乎必然出现：价格正好贴到止损价，终端把该持仓
+    # 判成 frozen（不能改单）；某些券商连平仓请求也一并拒掉。
+    10029: "持仓被冻结（价格贴近止损/止盈），券商暂时拒绝改动",
+    10004: "价格已变动（Requote），需按新价重发",
+    10020: "价格已变，需按新价重发",
+    10021: "该价格已失效（无此报价）",
+    10024: "请求过于频繁，被券商限流",
+    10028: "该品种被锁定，禁止交易",
 }
+
+# 平仓遇到这些码可以原地重试：它们描述的是"这一刻价格/通道的状态"，
+# 不是"这个请求本身错了"。放在这里而不是 `_send` 里，是因为重试要连
+# 持仓复查一起做（券商 SL 可能在我们重试的间隙成交了）。
+_CLOSE_RETRY_CODES = frozenset({10029, 10004, 10020, 10021, 10024})
+
+# 平仓重试的等待节奏（秒）。总阻塞不到 1 秒：平仓是最高优先级的动作，
+# 但也不能把 guard 快查（5 秒一格）拖垮。
+_CLOSE_RETRY_BACKOFF = (0.25, 0.6, 1.2)
+
+# 连续多少轮平不掉才停机。一轮是 60 秒 + 每轮内部已经重试 3 次，
+# 所以 3 轮 ≈ 12 次请求 ≈ 3 分钟——这个长度足以排除"券商瞬时冻结"，
+# 又不至于让仓位在无人管理下挂太久。
+_CLOSE_FAIL_STOP = 3
 
 
 def retcode_hint(rc: int | None) -> str | None:
@@ -2464,15 +2490,43 @@ def send_modify_sl(cfg: Cfg, ticket: int, sl: float) -> dict:
             pass
 
 
-def send_close(cfg: Cfg, ticket: int) -> dict:
+def send_close(cfg: Cfg, ticket: int, attempts: int = 3) -> dict:
+    """平掉一笔持仓。**瞬时拒绝原地重试**，并区分「已经平了」和「真平不掉」。
+
+    2026-11-16 的教训：硬止损那一刻价格正好压在止损价上，终端把持仓判成
+    frozen，平仓请求被 10029 拒掉。原来的代码把这一**次**拒绝当成终态，
+    直接 `_stop()` 停掉整个做单线程——而 10029 恰恰是硬止损时最容易撞见的
+    码，等于每次正常止损都有概率把系统打死，仓位从此无人管理。
+
+    现在分三档：
+    1. `gone`：券商端 SL/TP 抢先成交，仓已经没了 → 算成功（`already_closed`）
+    2. 瞬时码：换一次报价重发，最多 `attempts` 次
+    3. 其余码（10027 算法交易关了之类）：重试毫无意义，立刻返回
+    """
     ex = _executor(cfg)
     try:
         if not ex.connect():
             return {"ok": False, "reason": "MT5 连接失败"}
-        res = ex.close_position(ticket)
-        if not res.get("ok"):
-            hint = retcode_hint(res.get("retcode"))
-            res["reason"] = hint or res.get("comment") or f"retcode={res.get('retcode')}"
+        res: dict = {"ok": False, "reason": "未发起"}
+        for i in range(max(1, attempts)):
+            # 每次重试都重新读持仓和报价（close_position 内部做的事），
+            # 拿旧价重发只会再吃一次同样的拒绝。
+            res = ex.close_position(ticket)
+            if res.get("ok"):
+                return res
+            if res.get("gone"):
+                # 仓没了就是达成了目的。成交价由调用方从 deal 读（_settle_pnl），
+                # 这里给 0.0 是让调用方走不了「按回执价算」那条路。
+                return {"ok": True, "already_closed": True, "retcode": None,
+                        "price": 0.0,
+                        "reason": "券商端止损/止盈抢先成交"}
+            rc = res.get("retcode")
+            if rc not in _CLOSE_RETRY_CODES:
+                break
+            if i + 1 < attempts:
+                time.sleep(_CLOSE_RETRY_BACKOFF[min(i, len(_CLOSE_RETRY_BACKOFF) - 1)])
+        hint = retcode_hint(res.get("retcode"))
+        res["reason"] = hint or res.get("comment") or f"retcode={res.get('retcode')}"
         return res
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -2851,21 +2905,46 @@ def _tick_body(cfg: Cfg, login, now: int,
             res = send_close(cfg, int(pos["ticket"]))
         if not res.get("ok"):
             row = {"ts": now, "kind": "close_failed", "ticket": pos.get("ticket"),
-                   "reason": decision.get("reason"), "error": res.get("reason")}
+                   "reason": decision.get("reason"), "error": res.get("reason"),
+                   "retcode": res.get("retcode")}
             if sig_id:      # 人工点过同意的平仓：让面板能把这一笔对上号
                 row["signal_id"] = sig_id
+            # **一次拒绝不停机**（2026-11-16 硬止损被 10029 打死）：
+            # 券商在价格贴近止损时会短暂冻结持仓，`send_close` 已经在同一轮
+            # 里换价重试过了，还失败说明这一刻确实动不了。下一轮再试——最坏
+            # 的情况是券商端 SL 先成交，那会走上面「仓位已消失」的正常记账。
+            # 停机是最后手段：它让锁利/保本/超时全部失效，仓位只剩券商那条
+            # SL 在管，而人还可能根本没看到面板变红。
+            streak = int(state.get("close_fail_streak") or 0) + 1
+            state["close_fail_streak"] = streak
+            row["streak"] = streak
             _finish(state, row, login, ts=now)
-            # 平不掉还继续每分钟调模型问一次，只会白花钱；
-            # 仓位还在手上，必须停下来让人去终端处理。
-            return _stop(state, f"平仓失败（{res.get('reason')}），已自动停止", now, login)
+            # 永久性拒绝（算法交易没开、保证金不足、市场关闭）不会自愈，
+            # 重试只是每分钟白发一次必然失败的请求 —— 立刻停，让人去处理。
+            # 只有瞬时码才给它 streak 的宽限。
+            transient = res.get("retcode") in _CLOSE_RETRY_CODES
+            if not transient or streak >= _CLOSE_FAIL_STOP:
+                return _stop(state,
+                             f"平仓失败（{res.get('reason')}），已自动停止", now, login)
+            return row
+
+        state["close_fail_streak"] = 0
 
         # 盈亏按**回执上的成交价**算，不用发单前的报价。dry_run 没有回执，
         # 按报价估（纸面本来就没有真实成交）。两者都拿不到才算 0，
         # 这与 _book_close 的约定一致：这一格出错会污染所有战绩统计。
-        fill_px = float(res.get("price") or 0.0)
-        exit_price = fill_px if fill_px > 0 else _exit_price(pos, bid, ask)
-        pnl = (_pnl_at_price(cfg, pos, fill_px) if fill_px > 0
-               else _realized_pnl(cfg, pos, bid, ask))
+        if res.get("already_closed"):
+            # 平仓单根本没发出去（发之前仓就没了，或者券商 SL/TP 在重试的
+            # 间隙成交了）。成交价只能从 deal 读——按此刻报价估会把滑点整段
+            # 吞掉，"保本止损"那种刚好压在开仓价的单子尤其经不起。
+            pnl, exit_price, fills = _settle_pnl(cfg, pos, bid, ask)
+            pnl_src = "deal" if fills is not None else "quote"
+        else:
+            fill_px = float(res.get("price") or 0.0)
+            exit_price = fill_px if fill_px > 0 else _exit_price(pos, bid, ask)
+            pnl = (_pnl_at_price(cfg, pos, fill_px) if fill_px > 0
+                   else _realized_pnl(cfg, pos, bid, ask))
+            pnl_src = "fill" if fill_px > 0 else "quote"
         # 计数 / 清仓位 / close 行统一走 _book_close（含 sl_closes / be_closes
         # 分桶）。这里只补这条路径特有的字段。
         row = _book_close(state, pos, pnl, now,
@@ -2873,7 +2952,12 @@ def _tick_body(cfg: Cfg, login, now: int,
                           reason=decision.get("reason"),
                           held_sec=held_sec, dry_run=cfg.dry_run)
         row["exit_price"] = round(float(exit_price), 5)
-        row["pnl_src"] = "fill" if fill_px > 0 else "quote"
+        row["pnl_src"] = pnl_src
+        if res.get("already_closed"):
+            # 留痕：这一笔不是程序平掉的，是券商 SL/TP 抢先成交。
+            # 统计"程序平仓的滑点"时必须把它排除，否则会把券商的成交记成
+            # 我们的执行质量。
+            row["fill_via"] = "broker"
         # 这笔是不是"峰值停滞唤醒"之后才平的。统计「靠唤醒救回来的单」时
         # 只能靠这个字段，否则它和"浮盈到门槛后正常平"在流水里长得一模一样。
         if decision.get("via"):
