@@ -5393,10 +5393,13 @@ def _manual_position(saved_cfg: dict, defaults=None) -> dict | None:
             if cfg_now is not None:
                 q = _quote(cfg_now.symbol)
                 if q:
-                    # 用同一个 _realized_pnl，别在前端另算一套口径
+                    # 用同一个 _realized_pnl，别在前端另算一套口径。
+                    # 带上 ticket：手工单如果部分平过，_close_fills 能找到真实
+                    # 成交，比按报价估算准。
                     pnl = _realized_pnl(
                         cfg_now,
-                        {"direction": m.get("direction"),
+                        {"ticket": m.get("ticket"),
+                         "direction": m.get("direction"),
                          "lots": m.get("volume"),
                          "price_open": m.get("price_open")},
                         q[0], q[1])
