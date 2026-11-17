@@ -399,4 +399,8 @@
   .gate-leds { cursor: help; }
   .sb-alarm { color: var(--dim); white-space: nowrap; }
   .sb-alarm:not(:empty) { color: var(--warn); }
+  /* 「停止时没读到持仓」的常驻告警。比普通 alarm 更重（红 + 可点），因为这条
+     代表「可能有一笔没人管的仓位」，只出现一次会被后续刷新盖掉。 */
+  .sb-unman:not(:empty) { color: var(--bad); cursor: pointer; text-decoration: underline dotted; }
+  .sb-unman:not(:empty):hover { color: var(--bad-lit, var(--bad)); }
 

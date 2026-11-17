@@ -27,6 +27,8 @@ function renderAutoTrade(a) {
   renderStatusBar(a);
   const st = $('atState');
   st.style.display = '';
+  // 每轮先复位着色，否则上一轮留下的红字会一直挂着（className 不重置 color）。
+  st.style.color = '';
   if (!a || !a.ok) {
     st.textContent = '读取失败';
     st.className = 'badge-off';
@@ -41,8 +43,10 @@ function renderAutoTrade(a) {
     st.textContent = '已停止（面板曾重启）';
     st.className = 'badge-off';
   } else if (a.stop_reason) {
-    st.textContent = '已停止';
+    // 停止时没读到持仓 = 可能还留着一笔没人看的仓，状态词本身就是警告位。
+    st.textContent = a.unmanaged ? '已停止 · ⚠ 未确认平仓' : '已停止';
     st.className = 'badge-off';
+    if (a.unmanaged) st.style.color = 'var(--bad)';
   } else {
     st.textContent = '未启动';
     st.className = 'badge-off';
@@ -166,6 +170,28 @@ function renderAutoTrade(a) {
   $('atFail').textContent = a.model_failures
     ? `⚠ 模型调用失败 ${a.model_failures} 次（免费额度/限速？）` : '';
   $('atFail').style.color = a.model_failures ? 'var(--bad)' : '';
+
+  // 「停止时读不到持仓」的悬案（2026-11-17 实盘）：那一刻可能有一笔仓位还挂在
+  // 券商端，而 AI 已经不看它了。这条**不能只出现一次**——atSay 的提示会被下一轮
+  // 刷新盖掉，人以为平完了，实际仓位裸挂了 10 小时。所以在吸顶带上一直亮着，
+  // 只有用户去终端确认过、点掉它才消失。
+  const unman = $('atUnman');
+  if (unman) {
+    const um = a.unmanaged;
+    if (um) {
+      const t = Number(um.ts || 0);
+      const hhmm = t ? new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+      unman.textContent = `⚠ ${hhmm} 停止时没读到持仓，仓位可能还在券商端 · 点此确认`;
+      unman.title = '「关闭并清仓」时 MT5 读不到持仓，程序没有平掉任何仓位。'
+        + '请去 MT5 终端确认仓位已平，然后点掉这条提示。'
+        + (um.error ? ('\n原因：' + um.error) : '')
+        + (um.tries ? `\n重试 ${um.tries} 次` : '');
+      unman.style.display = '';
+    } else {
+      unman.textContent = '';
+      unman.style.display = 'none';
+    }
+  }
 
   // 程序止损笔数：这个数和"模型平仓"要分开看。止损多说明入场方向差，
   // 模型平得差是另一回事——两者的处理方式完全不同，混在一起看不出问题。
@@ -417,3 +443,41 @@ function renderAutoTrade(a) {
   fitActive();
 }
 
+
+/* 「停止并清仓」时读不到持仓 → 可能有一笔仓位还挂在券商端，程序已经不管它了。
+ * 这条提示挂在吸顶带上一直在，直到用户去终端确认过再点掉（2026-11-17 实盘：
+ * 提示只在 atSay 里闪了一次，被下一轮刷新盖掉，仓位裸挂了 10 小时 44 分）。
+ *
+ * 点这个**不碰任何仓位**，只是把标记清掉，所以不用 confirm=true；但还是要
+ * 弹一次确认，因为它唯一的作用就是「我确认看过了」，误点等于把风险抹掉。 */
+async function ackUnmanaged() {
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: '确认那笔仓位已经平掉了？',
+      desc: '点掉这条提示只代表你已经去 MT5 终端看过、并且仓位确实平了。'
+        + '它不会替你平仓——如果仓位还在，请先在终端里手动平掉。',
+      cost: '不改变任何仓位',
+      okText: '已确认，清除提示',
+    });
+  } catch (e) {
+    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
+    return;
+  }
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/autotrade/ack', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account: curLogin || undefined }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      atSay('<b>已确认</b>：停止时的未平仓提示已清除', 'ok');
+    } else {
+      atSay('<b>清除失败：</b>' + esc(j.error || '未知错误'), 'err');
+    }
+  } catch (e) {
+    atSay('<b>清除请求失败：</b>' + esc(String(e)), 'err');
+  }
+  loadAutoTrade();
+}

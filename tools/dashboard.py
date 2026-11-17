@@ -468,6 +468,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/autotrade/start": self._post_autotrade_start,
             "/api/autotrade/prefs": self._post_autotrade_prefs,
             "/api/autotrade/stop": self._post_autotrade_stop,
+            "/api/autotrade/ack": self._post_autotrade_ack,
             "/api/autotrade/signal": self._post_autotrade_signal,
             "/api/autotrade/reset": self._post_autotrade_reset,
             "/api/autotrade/reset_lessons": self._post_autotrade_reset_lessons,
@@ -623,6 +624,25 @@ class Handler(BaseHTTPRequestHandler):
                 paths.set_login(login)
             flatten = bool(body.get("flatten", True))
             result = autotrade.WORKER.stop(login=login, flatten=flatten)
+            result["login"] = login
+            self._json(200, result)
+        except Exception as exc:  # noqa: BLE001
+            self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _post_autotrade_ack(self, body: dict) -> None:
+        """确认「停止时没平掉的仓位」已经处理过。
+
+        只清标记，不下单、不平仓，所以不要 confirm——误点的代价只是红条没了，
+        而不是动钱。真正动钱的入口在 `/stop` 与 `/signal`。
+        """
+        try:
+            from live import autotrade, paths
+            from live.journal import probe_login
+
+            login = probe_login()
+            if login is not None:
+                paths.set_login(login)
+            result = autotrade.ack_unmanaged(login=login)
             result["login"] = login
             self._json(200, result)
         except Exception as exc:  # noqa: BLE001

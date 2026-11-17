@@ -4966,14 +4966,37 @@ def run(cfg: Cfg, login=None) -> None:
 # 但这也意味着它会动你手动开的单，所以面板那边必须带 confirm 才允许调用。
 
 
+# 上一次「读持仓」失败的原因。`_all_positions()` 吞异常是为了让上层用 None
+# 表示「不知道」，但"不知道"这个结论没法排查——2026-11-17 实盘停止面板时
+# 只留下一句「失败：读不到持仓」，连是 MT5Busy 还是终端掉线都分不清。这里
+# 把原因留下来，日志和面板提示都带上它。
+_last_pos_err = ""
+
+
 def _all_positions() -> list[dict] | None:
     """账户上所有持仓。读失败返回 None（含义同 `_positions`）。"""
+    global _last_pos_err
     try:
         from live.journal import open_positions
 
-        return open_positions()
-    except Exception:  # noqa: BLE001
+        rows = open_positions()
+        _last_pos_err = ""
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        _last_pos_err = f"{type(exc).__name__}: {exc}"[:300]
         return None
+
+
+# 「停止并清仓」读持仓失败时的重试次数与间隔。
+#
+# 为什么必须重试：读失败绝大多数是**瞬时态**——MT5 连接期闸门（`connecting`）
+# 或别处正要锁（`MT5Busy`），这两个都是"等一两秒就好"；终端刚重连也会抖一下。
+# 2026-11-17 11:21 那次停止：账户上明明还挂着 0.1 手多单，`positions_get()`
+# 返回 None，代码按设计"读不到就不动"，于是仓位脱管、只剩券商端那条固定
+# 止损兜着，直到 22:05 人工发现才平（10 小时 44 分）。一次失败就放弃，
+# 代价是把仓位丢在无人看管的地方，重试 2 秒换一个「真的平掉了」值得。
+_FLATTEN_READ_RETRIES = 2
+_FLATTEN_READ_GAP = 1.0
 
 
 def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
@@ -4994,6 +5017,16 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
     # 早就不在了」。`_positions(symbol)` 本身就是 `open_positions()` 再按品种过
     # 一遍，所以这里不用再多读一次。
     account = _all_positions()
+    # 重试只在真实模式下有意义：纸面模式本来就不碰券商仓位，`untouched`
+    # 拿不到数也不影响安全（真正要防的是"以为平了其实没平"）。
+    tries = 1
+    if account is None and not cfg.dry_run:
+        for _ in range(_FLATTEN_READ_RETRIES):
+            time.sleep(_FLATTEN_READ_GAP)
+            account = _all_positions()
+            tries += 1
+            if account is not None:
+                break
 
     if cfg.dry_run:
         untouched = len(account or [])
@@ -5003,10 +5036,22 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
             state = load_state(login)
             state["running"] = False
             state["stop_reason"] = why
+            # **留一个待确认标记**。日志只在用户翻账本时看得见，而这件事的
+            # 性质是「可能有一个没人管的仓位在券商端」，必须在面板上一直亮着，
+            # 直到用户去终端确认过（点掉提示）。字段里存原因和重试次数，
+            # 下次复现就能判断是不是终端掉线，不用再靠猜。
+            state["unmanaged"] = {"ts": now, "why": why,
+                                  "error": _last_pos_err or "未知原因",
+                                  "tries": tries}
             save_state(state, login)
+            detail = (f"（失败：重试 {tries - 1} 次仍读不到持仓 —— "
+                      f"{_last_pos_err or '未知原因'}）") if tries > 1 \
+                else "（失败：读不到持仓）"
             append_log({"ts": now, "kind": "flatten",
-                        "reason": f"{why}（失败：读不到持仓）"}, login)
+                        "reason": f"{why}{detail}",
+                        "tries": tries, "error": _last_pos_err or ""}, login)
             return {"ok": False, "closed": [], "failed": [], "count": 0,
+                    "unmanaged": True, "tries": tries,
                     "error": "读不到持仓（MT5 未连接？）。AI 已停止，但**没有平掉任何仓位**，"
                              "请回终端手动确认。"}
 
@@ -5072,6 +5117,8 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
 
     state["running"] = False
     state["stop_reason"] = why
+    # 这次读到了持仓、也平完了，旧的「未确认平仓」标记到此失效。
+    state.pop("unmanaged", None)
     save_state(state, login)
 
     append_log({"ts": now, "kind": "flatten", "reason": why,
@@ -5094,6 +5141,23 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
     if notes:
         out["note"] = "；".join(notes)
     return out
+
+
+def ack_unmanaged(login=None) -> dict:
+    """用户确认「停止时没平掉的那笔仓位」已经处理了。
+
+    只清标记，**不动任何仓位**——这是"我知道了"，不是"帮我平"。之所以要这个
+    动作而不是让标记自己消失：标记说的是"可能有一笔没人管的仓位在券商端"，
+    只有人能去看。自动清掉等于把风险提示变成一次性的弹窗。
+    """
+    state = load_state(login)
+    mark = state.pop("unmanaged", None)
+    if mark is None:
+        return {"ok": True, "cleared": False}
+    save_state(state, login)
+    append_log({"ts": int(time.time()), "kind": "ack_unmanaged",
+                "reason": "用户已确认停止时的未平仓位", "mark": mark}, login)
+    return {"ok": True, "cleared": True}
 
 
 # ------------------------------------------------------------------ 面板控制线程
@@ -5147,6 +5211,9 @@ class Worker:
         state["running"] = True
         state["started_at"] = int(time.time())
         state["stop_reason"] = None
+        # 上一次「停止时没平掉仓位」的悬案：用户已经重新启动，说明他处理过了
+        # （或者至少知道了），标记跟着清掉，免得红条一直挂着变成噪音。
+        state.pop("unmanaged", None)
         state["owner"] = "panel"
         state["pid"] = os.getpid()
         state["cfg"] = cfg_to_dict(cfg)
@@ -5601,6 +5668,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "dry_run": dry_run,
         "cfg": saved_cfg,
         "stop_reason": state.get("stop_reason"),
+        # 停止时读不到持仓 → 可能有仓位没平掉、AI 已经不看了。面板必须一直
+        # 亮着这条，直到用户去终端确认（ack_unmanaged）。
+        "unmanaged": state.get("unmanaged"),
         "started_at": state.get("started_at"),
         "last_tick_ts": state.get("last_tick_ts"),
         "position": state.get("position"),

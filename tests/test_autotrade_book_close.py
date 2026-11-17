@@ -312,7 +312,8 @@ class TestFlattenAfterManualClose(TempLedger):
         state["position"] = _pos(ticket=4323, opened_at=int(time.time()) - 40)
         autotrade.save_state(state)
 
-        with mock.patch.object(autotrade, "_all_positions", return_value=None):
+        with mock.patch.object(autotrade, "_all_positions", return_value=None), \
+             mock.patch.object(autotrade, "_FLATTEN_READ_GAP", 0):
             res = autotrade.close_all(self.cfg, why="面板停止并清仓")
 
         self.assertFalse(res["ok"])
