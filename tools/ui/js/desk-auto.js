@@ -321,7 +321,7 @@ function renderAutoTrade(a) {
   // 而且一笔持仓最多出现一次——藏进"显示跳过"里，用户就没法一眼确认
   // 「这笔的保本线到底挂上没挂上」。失败尤其要看得见。
   const EXEC_KINDS = ['open', 'close', 'review', 'open_failed', 'stop', 'error',
-                      'be', 'be_fail'];
+                      'be', 'be_fail', 'manual_close', 'manual_sl'];
   // 被否决/超时/作废的信号要留在默认视图里（那是"为什么没做"的答案）；
   // 同意的那些不重复占行——open/close 行里已经有 signal_id。
   const rows = showSkip ? allRows : allRows.filter(
@@ -337,9 +337,10 @@ function renderAutoTrade(a) {
   const SRC = {
     llm: '模型', fallback: '规则兜底', external: '终端外平仓', panel: '面板',
     sl: '硬止损', be: '券商保本', be_local: '程序保本', tp: '券商止盈',
+    manual: '手工单',
   };
   const badgeCls = k => (k === 'open' ? 'open'
-    : k === 'close' ? 'close'
+    : (k === 'close' || k === 'manual_close') ? 'close'
     : k === 'review' ? 'review'
     : (k === 'open_failed' || k === 'close_failed' || k === 'error') ? 'bad'
     : '');
@@ -363,9 +364,14 @@ function renderAutoTrade(a) {
       ? `<b class="burst-tag" title="3 分钟内走满 5 个 ATR${
         r.t5 == null ? '' : '（用了 ' + fmt(r.t5, 1) + ' 分钟）'}">脉冲</b>`
       : '';
+    // R 倍数只对手工单有意义（程序单的成本口径是 USD 阈值，不按 R 记）。
+    // 手工单的 R 基准 = 开仓时那笔 SL 的最坏亏损：+74.2 / −30 和 +74.2 / −100
+    // 是完全不同的两笔交易，只写美元数看不出来。
+    const rMult = (r.r_mult == null) ? null : Number(r.r_mult);
     const peakLine = (r.peak_pnl == null) ? ''
       : `<div class="mini" style="opacity:.7">峰 ${money(r.peak_pnl)}`
         + (atrPeak == null ? '' : ' · ' + fmt(atrPeak, 1) + '×')
+        + (rMult == null ? '' : ' · ' + fmt(rMult, 2) + 'R')
         + burstTag + '</div>';
     // p_up 微条：中轴 0.50，往哪边偏就往哪边填。数字保留（要能对上账本），
     // 但「偏了多少」交给条——读 0.62 再心算减 0.5 是每轮都要做一遍的负担。
@@ -388,12 +394,15 @@ function renderAutoTrade(a) {
       : (r.entry_reason
          || ((r.kind === 'skip' || r.kind === 'hold') ? (r.reason || '') : ''));
     let whyOut = '';
-    if (r.kind === 'close') whyOut = r.reason || '';
+    if (r.kind === 'close' || r.kind === 'manual_close') whyOut = r.reason || '';
     else if (r.kind === 'review') whyOut = '💡 ' + (r.lesson || r.error || '');
-    else if (r.kind === 'be' || r.kind === 'be_fail') whyOut = r.reason || r.error || '';
+    else if (r.kind === 'be' || r.kind === 'be_fail'
+             || r.kind === 'manual_sl') whyOut = r.reason || r.error || '';
     const isSkip = r.kind === 'skip' || r.kind === 'hold';
     const srcTitle = [SRC[r.source] || r.source || '', r.ticket ? 'ticket ' + r.ticket : '']
       .filter(Boolean).join(' · ');
+    // 手工单不给链接：`trade_detail` 靠 `kind="open"` 找起点，而手工单只有
+    // manual_close 一行（程序没参与开仓）。挂上去点开就是"找不到开仓记录"。
     const tCell = (r.ticket && (r.kind === 'open' || r.kind === 'close'))
       ? `<button class="link-btn" onclick="tradeDetailShow(${r.ticket})"
                  title="看这一笔的完整档案">${hhmmss(r.ts)}</button>`

@@ -107,6 +107,39 @@ class ManualPositionTest(TempLedger):
             view = autotrade._manual_position({"symbol": "XAUUSDc"})
         self.assertEqual(view["count"], 2)
 
+    def test_peak_fields_rise_and_never_fall(self):
+        """峰值浮盈必须真的跟着价格涨，且回落时不缩（2026-11-17 补 MFE）。
+
+        为什么这条重要：手工单以前只看得到当前浮盈，"我刚才是不是跑早了"
+        无法回答——那一问的依据是**峰值**，而峰值必须逐轮记，事后补不出来。
+        """
+        from tests._autotrade_base import bars_up
+
+        quotes = iter([(3865.0, 3865.24), (3875.0, 3875.24), (3870.0, 3870.24)])
+        with mock.patch("live.journal.open_positions",
+                        return_value=[_pos(direction=1)]), \
+                mock.patch.object(autotrade, "_quote",
+                                  side_effect=lambda s: next(quotes)), \
+                mock.patch.object(autotrade, "_bars", return_value=bars_up(40)):
+            v1 = autotrade._manual_position({"symbol": "XAUUSDc"})
+            autotrade._MANUAL_POS_CACHE.update({"ts": 0.0, "view": None})
+            v2 = autotrade._manual_position({"symbol": "XAUUSDc"})
+            autotrade._MANUAL_POS_CACHE.update({"ts": 0.0, "view": None})
+            v3 = autotrade._manual_position({"symbol": "XAUUSDc"})
+
+        for v in (v1, v2, v3):
+            self.assertIn("peak_pnl", v)
+            self.assertIn("atr_pnl", v)
+            self.assertIn("t3", v)
+        # 开仓即亏的那一轮，峰值是负的——不是 0，更不是空白
+        self.assertLess(float(v1["peak_pnl"]), 0.0)
+        # 涨上去之后峰值跟着涨
+        self.assertGreater(float(v2["peak_pnl"]), float(v1["peak_pnl"]))
+        # 回落之后峰值不许缩
+        self.assertAlmostEqual(float(v3["peak_pnl"]), float(v2["peak_pnl"]), places=2)
+        # ATR 折出的倍数算得出来
+        self.assertGreater(float(v3["atr_pnl"] or 0), 0.0)
+
 
 class SummaryWiringTest(TempLedger):
     """summary 必须把这个字段送出去，否则后端算了也没人用。"""

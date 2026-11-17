@@ -3668,6 +3668,21 @@ def _fmt(row: dict) -> str:
     if kind == "be_fail":
         return (f"{clock} 保本止损没挂上 #{row.get('ticket')}："
                 f"{row.get('error') or row.get('reason') or ''}")
+    if kind == "manual_close":
+        # 手工单的文本流水：一句话要能看出"赚了多少 / 峰值到过哪 / 吃到了几成"。
+        # 三者缺一个，"是不是跑早了"就得回去翻面板——而面板只显示最近几笔。
+        pnl = row.get("pnl")
+        pnl_txt = "盈亏没读到" if pnl is None else f"盈亏 {float(pnl):+.2f}"
+        peak = row.get("peak_pnl")
+        peak_txt = "" if peak is None else f" 峰值 {float(peak):+.2f}"
+        cap = row.get("mfe_capture")
+        cap_txt = "" if cap is None else f" 捕获 {float(cap) * 100:.0f}%"
+        return (f"{clock} 手工平仓 #{row.get('ticket')} {pnl_txt}{peak_txt}{cap_txt}"
+                f" {row.get('verdict') or row.get('reason') or ''}")
+    if kind == "manual_sl":
+        return (f"{clock} 手工改止损 #{row.get('ticket')} "
+                f"{float(row.get('sl_from') or 0):.3f} → "
+                f"{float(row.get('sl_to') or 0):.3f} {row.get('reason') or ''}")
     if kind == "skip":
         return f"{clock} 跳过：{row.get('reason')}"
     if kind == "stop":
@@ -5446,10 +5461,377 @@ def playbook_of(state: dict, rows: list[dict],
     }
 
 
+# ---------------------------------------------------------------
+# 手工单影子峰值（2026-11-17）
+# ---------------------------------------------------------------
+# 为什么要有这一层
+# ----------------
+# 手工单是只读视图（见 `_manual_position`），程序不接管它，于是 `state["position"]`
+# 是空的 —— 而 `_track_peak` / `_mark_burst` / `_peak_atr` 全都挂在那个 dict 上。
+# 后果不是"少几个字段"，是**用户永远回答不了"我刚才是不是跑早了"**：那一问的
+# 唯一依据是 MFE（最大浮盈），而 MFE 必须逐轮追踪，事后补不出来。
+#
+# 2026-11-17 那笔 4991040502 就是活例：3876.017 开多、3883.436 平掉 +74.2，
+# 平仓 7 秒后价格 3886.96、那一分钟高点约 3888.5。面板上峰值浮盈是一根横杠，
+# 用户只能凭感觉。
+#
+# 存储选择：独立文件，**不进 state**
+# --------------------------------
+# 进 state 有两个后果，都是坑：
+#   1. `_finish` 会整体重写 state，而影子更新发生在 summary 的只读路径上，
+#      两边一交错就是覆盖丢数（`_wait_next` 里"写前重读"那条注释踩过）；
+#   2. 更要命的是语义：state["position"] 一旦有值，`_exit_gate` 就会接管这笔单
+#      —— 挂券商端止损、保本、超时平仓。用户要的是"看得见"，不是"被接管"。
+# 所以单独一个 `manual_shadow.json`，键是 ticket，生命周期与持仓一致。
+#
+# 为什么复用 `_track_peak` / `_mark_burst` 而不另写一份
+# ----------------------------------------------------
+# 峰值口径、ATR 档位、t3/t5 的定义只要分叉一次，面板上的"几倍 ATR"和流水里的
+# `atr_peak` 就会是两个数（UI 分片和 Python 各算一套的坑踩过）。这两个函数只吃
+# dict、不认 state，借过来用零成本。
+_MANUAL_SHADOW_FILE = "manual_shadow.json"
+# 平仓成交还没落地的等待轮数（每轮 ≈ 3 秒，因为 `_manual_position` 有 3 秒缓存）。
+# 超过就不再等，落一行 pnl=None —— 宁可承认"没读到"，也不按报价估一个数出来
+# （2026-11-06 那笔保本单被估成 -0.96 就是这么来的）。
+_MANUAL_SHADOW_MISS_MAX = 30
+# 影子条目最长保留 24 小时：账户上手工单被反复开关、程序又停了几天，
+# 文件里会攒一堆永远等不到成交的僵尸条目。
+_MANUAL_SHADOW_TTL_SEC = 86400
+
+
+def _manual_shadow_path(login=None) -> Path:
+    return paths.account_dir(paths.resolve_login(login)) / _MANUAL_SHADOW_FILE
+
+
+def _load_manual_shadow(login=None) -> dict:
+    """读影子表。坏了就当空表——这一层只做记录，读不到不能拖垮整个面板。"""
+    try:
+        raw = _manual_shadow_path(login).read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_manual_shadow(data: dict, login=None) -> None:
+    """原子写。面板每秒轮询，写一半被读到就是整块「峰值 —」。"""
+    try:
+        p = _manual_shadow_path(login)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _manual_shadow_new(m: dict, cfg) -> dict:
+    """给一笔刚看到的手工单建影子条目。
+
+    ATR 用**此刻**的 K 线算一次然后锁死（`_atr_pnl_unit` 同样只算一次）：
+    和程序单"开仓时锁 atr"一个口径，否则同一笔单前后会被两套门槛换算。
+    首次观测可能比真实开仓晚几秒到几十秒，`opened_at` 仍然用券商给的开仓时间，
+    所以 held_sec / t3 / t5 的基准是对的，只有 ATR 可能略微偏新。
+    """
+    atr = 0.0
+    try:
+        bars = _bars(cfg.symbol, cfg.tf, max(int(cfg.bars or 0), MA_PERIOD + 6))
+        if bars:
+            # _atr 返回的是 dict（{"ok","atr","n_tr","span",...}），不是数字。
+            atr = float((_atr(bars) or {}).get("atr") or 0.0)
+    except Exception:  # noqa: BLE001
+        atr = 0.0
+    lots = float(m.get("volume") or m.get("lots") or 0.0)
+    unit = _atr_pnl_unit(atr, lots, cfg.symbol)
+    return {
+        "ticket": int(m.get("ticket") or 0),
+        "direction": int(m.get("direction") or 0),
+        "lots": lots,
+        "price_open": float(m.get("price_open") or 0.0),
+        # journal.open_positions() 的字段叫 open_time（MT5 原样），不是 opened_at
+        "opened_at": int(m.get("open_time") or 0),
+        "atr": round(atr, 5) if atr > 0 else None,
+        "atr_pnl": unit if unit > 0 else None,
+        # 和程序单手写 pos 同名的键：借用 _track_peak / _mark_burst / _peak_atr
+        "peak_pnl": None, "peak_ts": None,
+        "mae_pnl": None, "mae_ts": None,   # 最大不利浮盈：回答"止损挪得对不对"
+        "t3": None, "t5": None,
+        # ---- 风险基线（2026-11-17）----
+        # `sl0`/`risk0` = **第一次看到 SL 时**的止损价和最坏亏损，之后不再改。
+        # 有了这个基线，面板才能说"止损从 −30 放宽到 −100"——用户 11-17 那笔
+        # 手工单真这么干过（3869.447 → 3866.022）。没有基线时，"现在最坏亏 100"
+        # 只是一个数字，看不出是它自己走坏的还是人改坏的。
+        "sl": float(m.get("sl") or 0.0),
+        "sl0": None, "risk0": None,
+        "seen_ts": int(time.time()),
+    }
+
+
+def _manual_risk_usd(cfg, sh: dict, sl: float) -> float | None:
+    """按给定止损价算这笔手工单的**最坏亏损**（账户货币，负数）。
+
+    返回 None 表示"算不出来 / 压根没挂止损"——两者在面板上都显示成警示，
+    但绝不能混成 0：0 看起来像"打止损刚好不亏"，是最坏的一种谎。
+    """
+    sl = float(sl or 0.0)
+    if sl <= 0:
+        return None
+    try:
+        return round(_pnl_at_price(cfg, {"direction": sh.get("direction"),
+                                         "price_open": sh.get("price_open"),
+                                         "lots": sh.get("lots")}, sl), 2)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _manual_sl_row(cfg, sh: dict, sl_from: float, sl_to: float,
+                   now: int) -> dict:
+    """手工单改止损的流水行。
+
+    为什么值得单独记：这笔单的止损是**人**在挪，程序不插嘴；但"挪了多少"
+    这件事以前在面板上完全不可见——11-17 那笔从 30 美元风险扩到 100 美元，
+    账本里只有一个结果 +74.2，看不出中间做过什么。
+    """
+    risk_from = _manual_risk_usd(cfg, sh, sl_from)
+    risk_to = _manual_risk_usd(cfg, sh, sl_to)
+    if risk_from is None or risk_to is None:
+        # 没有 SL 或者算不出钱：按**离入场价的距离**判宽窄（多空方向统一成
+        # "止损离入场多远"，距离变大就是放宽）。撤掉止损一律算放宽。
+        direction = int(sh.get("direction") or 1)
+        entry = float(sh.get("price_open") or 0.0)
+        dist_from = (entry - float(sl_from or 0.0)) * direction
+        dist_to = (entry - float(sl_to or 0.0)) * direction
+        widened = sl_to <= 0 or dist_to > dist_from + 1e-9
+    else:
+        # 两个负数比绝对值：risk_to 更负 = 亏更多 = 放宽
+        widened = risk_to < risk_from - 0.01
+    if sl_to <= 0:
+        verdict = "止损被撤掉（风险无上限）"
+    elif widened:
+        verdict = ("止损放宽：最坏 %.2f → %.2f" % (risk_from, risk_to)
+                   if risk_from is not None and risk_to is not None
+                   else "止损放宽：%.3f → %.3f" % (sl_from, sl_to))
+    else:
+        verdict = ("止损收紧：最坏 %.2f → %.2f" % (risk_from, risk_to)
+                   if risk_from is not None and risk_to is not None
+                   else "止损收紧：%.3f → %.3f" % (sl_from, sl_to))
+    return {
+        "ts": now, "kind": "manual_sl", "ticket": int(sh.get("ticket") or 0),
+        "direction": sh.get("direction"), "lots": sh.get("lots"),
+        "price_open": sh.get("price_open"),
+        "sl_from": round(float(sl_from or 0.0), 5),
+        "sl_to": round(float(sl_to or 0.0), 5),
+        "risk_from": risk_from, "risk_to": risk_to,
+        "widened": bool(widened), "reason": verdict,
+        "source": "manual", "dry_run": False,
+    }
+
+
+def _manual_close_verdict(sh: dict, pnl) -> tuple[str, float | None]:
+    """平仓之后自动给一句判语 + 峰值捕获率（realized / peak）。
+
+    为什么不用模型：这句话的判据只有两个数（峰值、结果），规则算得出来，
+    而且**必须每笔都给**。手工单本来就不进程序的复盘队列（那会把用户自己
+    的判断混进模型的教训库），所以"这笔到底跑早没跑早"以前没人回答。
+
+    捕获率是这一层的核心指标：长期均值 0.6 就意味着平均吐掉 40% 的峰值。
+    它只在现在才开始有数据（影子峰值是 2026-11-17 才落的），所以别急着
+    拿一两笔下结论——单笔的 100% 也可能只是刚好摸到就走。
+    """
+    peak = sh.get("peak_pnl")
+    peak = None if peak is None else float(peak)
+    if pnl is None:
+        return ("成交没读到" + ("（峰值 %+.2f）" % peak if peak is not None else ""),
+                None)
+    pnl = float(pnl)
+    if peak is None:
+        return ("峰值没记到", None)   # 首次观测太晚 / ATR 缺失，别硬编一个率
+    if peak <= 0:
+        # 全程没正过：这是入场问题，不是出场问题——和"跑早了"是两件事，
+        # 分开说才对得上账（227 笔回放的老结论：根子在入场）。
+        return ("全程没正过（入场即错）", 0.0)
+    cap = max(0.0, min(1.5, pnl / peak))
+    pct = int(round(cap * 100))
+    if pnl <= 0:
+        return ("到过 %+.2f 又平 %+.2f（该走没走）" % (peak, pnl), round(cap, 3))
+    if cap >= 0.8:
+        text = "基本吃到整段（捕获 %d%%）" % pct
+    elif cap >= 0.5:
+        text = "平在峰值的 %d%%" % pct
+    else:
+        text = "平在峰值的 %d%%（跑得早）" % pct
+    if _is_burst(sh) and cap < 0.5:
+        text = "脉冲后只吃到 %d%%（跑得早）" % pct
+    return (text, round(cap, 3))
+
+
+def _manual_close_row(sh: dict, now: int) -> dict | None:
+    """一笔手工单平掉之后的流水行。成交读不到 → None（调用方继续等）。
+
+    `kind` 故意叫 `manual_close` 而不是 `close`：`summary` / `daily` 的战绩、
+    胜率、`pnl` 全部按 `kind == "close"` 统计，混进去等于把用户自己的单记进
+    程序成绩单——那正是"这个面板到底是复盘工具还是交易系统"的分界。
+    """
+    ticket = int(sh.get("ticket") or 0)
+    fills = None
+    try:
+        fills = _close_fills({"ticket": ticket,
+                              "direction": sh.get("direction"),
+                              "lots": sh.get("lots")})
+    except Exception:  # noqa: BLE001
+        fills = None
+    if fills is None:
+        return None
+    exit_ts = int(fills.get("time") or now)
+    opened = int(sh.get("opened_at") or exit_ts)
+    pnl = fills.get("pnl")
+    verdict, capture = _manual_close_verdict(sh, pnl)
+    risk0 = sh.get("risk0")
+    return {
+        "ts": exit_ts or now, "kind": "manual_close", "ticket": ticket,
+        "direction": sh.get("direction"), "lots": sh.get("lots"),
+        "price_open": sh.get("price_open"),
+        "exit_price": round(float(fills.get("price") or 0.0), 5),
+        "pnl": pnl, "pnl_src": "deal",
+        "held_sec": max(0, exit_ts - opened),
+        # 四个要回答"跑早了吗"的数：峰值多少、第几秒、几倍 ATR、最差到过哪
+        "peak_pnl": sh.get("peak_pnl"), "peak_ts": sh.get("peak_ts"),
+        "mae_pnl": sh.get("mae_pnl"), "mae_ts": sh.get("mae_ts"),
+        "atr": sh.get("atr"), "atr_pnl": sh.get("atr_pnl"),
+        "atr_peak": _peak_atr(sh), "t3": sh.get("t3"), "t5": sh.get("t5"),
+        "burst": _is_burst(sh),
+        # 峰值捕获率 + 自动判语（2026-11-17）：手工单没有复盘队列，
+        # 这一句就是它的复盘。
+        "mfe_capture": capture, "verdict": verdict,
+        # 风险基线：R 倍数 = 结果 / 开仓时的最坏亏损。手工单最标准的刻度，
+        # 比"赚了 74 美元"有用得多（74 美元在 30 风险上和在 100 风险上是两回事）。
+        "sl0": sh.get("sl0"), "risk0": risk0,
+        "r_mult": (round(float(pnl) / abs(float(risk0)), 2)
+                   if pnl is not None and risk0 else None),
+        "reason": verdict,
+        "source": "manual", "dry_run": False,
+    }
+
+
+def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
+    """推进手工单影子：更新峰值、发现平仓、落 manual_close 行。
+
+    返回影子表（键是 ticket 字符串）。`fps` = {ticket: 当前浮盈}，由调用方
+    算好传进来——那边已经拿到报价了，这里再读一次等于白跑一趟 MT5。
+
+    **只写 `manual_shadow.json`，一个字都不写 state。** 这条是硬约束，
+    `tests/test_manual_shadow.py` 里钉着。
+    """
+    shadow = _load_manual_shadow(login)
+    now = int(time.time())
+    live = {}
+    for m in rows or []:
+        t = int(m.get("ticket") or 0)
+        if t > 0:
+            live[t] = m
+
+    changed = False
+    for t, m in live.items():
+        key = str(t)
+        sh = shadow.get(key)
+        if not isinstance(sh, dict):
+            sh = _manual_shadow_new(m, cfg)
+            shadow[key] = sh
+            changed = True
+        # ---- 止损基线 + 改止损留痕（2026-11-17）----
+        # 放在 fp 判空**之前**：拿不到浮盈也必须记止损变化——那是"这一刻人对
+        # 这笔单做了什么"，和"这笔现在赚多少"没有关系。11-17 那笔把 SL 从
+        # 3869.447 挪到 3866.022（风险 30 → 100），账本里只剩一个 +74.2。
+        sl_now = float(m.get("sl") or 0.0)
+        if sl_now > 0 and not sh.get("sl0"):
+            # 基线只在**第一次看到 SL** 时定一次。用户常常先开仓、几秒后才挂
+            # SL，所以不能在建条目那一刻就锁死（那时 sl 往往是 0）。
+            sh["sl0"] = round(sl_now, 5)
+            sh["risk0"] = _manual_risk_usd(cfg, sh, sl_now)
+            changed = True
+        sl_old = sh.get("sl")
+        moved = sl_old is not None and abs(float(sl_old) - sl_now) > 1e-6
+        if moved:
+            try:
+                append_log(_manual_sl_row(cfg, sh, float(sl_old), sl_now, now),
+                           login)
+            except Exception:  # noqa: BLE001
+                pass   # 留痕失败不能挡住峰值推进，否则一次写盘异常就丢 MFE
+        if sl_old is None or moved:
+            sh["sl"] = round(sl_now, 5)
+            changed = True
+        fp = fps.get(t)
+        if fp is None:
+            continue
+        # 峰值 + t3/t5：和程序单同一套（_track_peak 内部会调 _mark_burst）
+        if _track_peak(sh, float(fp), now):
+            changed = True
+        mae = sh.get("mae_pnl")
+        if mae is None or float(fp) < float(mae):
+            sh["mae_pnl"] = round(float(fp), 2)
+            sh["mae_ts"] = now
+            changed = True
+
+    # ---- 已经不在持仓里 = 平了 --------------------------------------
+    for key in list(shadow.keys()):
+        if int(key or 0) in live:
+            continue
+        sh = shadow[key]
+        if not isinstance(sh, dict):
+            shadow.pop(key, None)
+            changed = True
+            continue
+        # 开仓那一瞬间可能还没有平仓成交（deals 落盘有延迟）——等，别按报价估。
+        row = _manual_close_row(sh, now)
+        if row is None:
+            miss = int(sh.get("_miss") or 0) + 1
+            sh["_miss"] = miss
+            changed = True
+            if miss < _MANUAL_SHADOW_MISS_MAX:
+                continue
+            row = {
+                "ts": now, "kind": "manual_close",
+                "ticket": int(sh.get("ticket") or 0),
+                "direction": sh.get("direction"), "lots": sh.get("lots"),
+                "price_open": sh.get("price_open"),
+                "exit_price": None, "pnl": None, "pnl_src": "unread",
+                "held_sec": max(0, now - int(sh.get("opened_at") or now)),
+                "peak_pnl": sh.get("peak_pnl"), "peak_ts": sh.get("peak_ts"),
+                "mae_pnl": sh.get("mae_pnl"), "mae_ts": sh.get("mae_ts"),
+                "atr": sh.get("atr"), "atr_pnl": sh.get("atr_pnl"),
+                "atr_peak": _peak_atr(sh), "t3": sh.get("t3"),
+                "t5": sh.get("t5"), "burst": _is_burst(sh),
+                "mfe_capture": None,
+                "verdict": _manual_close_verdict(sh, None)[0],
+                "sl0": sh.get("sl0"), "risk0": sh.get("risk0"), "r_mult": None,
+                "reason": "手工单已平仓（券商成交没读到，盈亏未知）",
+                "source": "manual", "dry_run": False,
+            }
+        try:
+            append_log(row, login)
+        except Exception:  # noqa: BLE001
+            pass
+        shadow.pop(key, None)
+        changed = True
+
+    # ---- 清僵尸：超过 24 小时还在等的条目 ---------------------------
+    for key in list(shadow.keys()):
+        sh = shadow.get(key)
+        seen = int((sh or {}).get("seen_ts") or 0) if isinstance(sh, dict) else 0
+        if seen and now - seen > _MANUAL_SHADOW_TTL_SEC:
+            shadow.pop(key, None)
+            changed = True
+
+    if changed:
+        _save_manual_shadow(shadow, login)
+    return shadow
+
+
 _MANUAL_POS_CACHE: dict = {"ts": 0.0, "view": None}
 
 
-def _manual_position(saved_cfg: dict, defaults=None) -> dict | None:
+def _manual_position(saved_cfg: dict, defaults=None,
+                     login=None) -> dict | None:
     """账户上那笔「不是程序开的」持仓，做成**只读**视图给做单台。
 
     为什么需要：程序只记录自己开的单（`state["position"]`），手工单在它眼里
@@ -5480,20 +5862,45 @@ def _manual_position(saved_cfg: dict, defaults=None) -> dict | None:
                                  if k in Cfg.__dataclass_fields__})
             except (TypeError, ValueError):
                 cfg_now = defaults
-            pnl = None
+            fps: dict = {}
+            sh_all: dict = {}
             if cfg_now is not None:
                 q = _quote(cfg_now.symbol)
                 if q:
                     # 用同一个 _realized_pnl，别在前端另算一套口径。
                     # 带上 ticket：手工单如果部分平过，_close_fills 能找到真实
                     # 成交，比按报价估算准。
-                    pnl = _realized_pnl(
-                        cfg_now,
-                        {"ticket": m.get("ticket"),
-                         "direction": m.get("direction"),
-                         "lots": m.get("volume"),
-                         "price_open": m.get("price_open")},
-                        q[0], q[1])
+                    for x in rows:
+                        fps[int(x.get("ticket") or 0)] = _realized_pnl(
+                            cfg_now,
+                            {"ticket": x.get("ticket"),
+                             "direction": x.get("direction"),
+                             "lots": x.get("volume"),
+                             "price_open": x.get("price_open")},
+                            q[0], q[1])
+                # 影子峰值（2026-11-17）：借这 3 秒一次的缓存推进，不新增线程。
+                # 为什么不在 tick 里做：手工单只在"程序没仓"时存在，那时 tick
+                # 每 60 秒才醒一次，MFE 会漏掉大半——而 MFE 正是这一层的全部意义。
+                sh_all = _manual_shadow_sync(cfg_now, rows, fps, login)
+            pnl = fps.get(int(m.get("ticket") or 0))
+            sh = sh_all.get(str(int(m.get("ticket") or 0))) or {}
+            # ---- 风险读数（2026-11-17）----
+            # 手工单面板以前只有"浮盈"，没有"打到止损会亏多少"。于是把 SL 从
+            # 3869.447 挪到 3866.022（最坏 30 → 100）这件事，在界面上没有任何痕迹。
+            # 这里只算、只显示：程序仍然不挂 SL、不拦、不改单。
+            sl_now = float(m.get("sl") or 0.0)
+            sl_risk = _manual_risk_usd(cfg_now, sh, sl_now) if cfg_now is not None else None
+            risk0 = sh.get("risk0")
+            risk_mult = (round(sl_risk / float(risk0), 2)
+                         if sl_risk is not None and risk0 and float(risk0) < 0
+                         else None)
+            sl_atr = None
+            if sl_now > 0:
+                atr0 = float(sh.get("atr") or 0.0)
+                if atr0 > 0:
+                    # 止损离入场几个 ATR：太近（<0.5）等于随便一个噪声就扫掉，
+                    # 太远（>3）等于"止损只是个心理安慰"。只给数字，不判对错。
+                    sl_atr = round(abs(float(m.get("price_open") or 0.0) - sl_now) / atr0, 2)
             view = {
                 "manual": True,
                 "ticket": m.get("ticket"),
@@ -5506,6 +5913,24 @@ def _manual_position(saved_cfg: dict, defaults=None) -> dict | None:
                 "tp": m.get("tp"),
                 "opened_at": m.get("open_time"),
                 "float_pnl": pnl,
+                # ---- 影子峰值（2026-11-17）----
+                # 这四个数以前是空的，于是"我刚才是不是跑早了"完全无法回答。
+                # 口径和程序单**完全一致**（同一个 _track_peak / _peak_atr），
+                # 前端才能用同一套刻度尺。
+                "peak_pnl": sh.get("peak_pnl"),
+                "peak_ts": sh.get("peak_ts"),
+                "mae_pnl": sh.get("mae_pnl"),      # 最大不利浮盈，专看止损挪得对不对
+                "atr": sh.get("atr"),
+                "atr_pnl": sh.get("atr_pnl"),
+                "atr_peak": _peak_atr(sh),
+                "t3": sh.get("t3"),
+                "t5": sh.get("t5"),
+                # ---- 风险（2026-11-17）----
+                "sl_risk": sl_risk,        # 打 SL 时最坏亏多少（负数）；None=没挂止损
+                "sl0": sh.get("sl0"),      # 第一次看到 SL 时的价格（基线）
+                "risk0": risk0,            # 当时的风险，用来算"放宽了几倍"
+                "risk_mult": risk_mult,    # >1 = 人把风险放大了
+                "sl_atr": sl_atr,          # 止损离入场几个 ATR
                 # 同品种多笔手工单：只展示第一笔，但把总数带出去别装作只有一笔
                 "count": len(rows),
             }
@@ -5635,7 +6060,7 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 只存在于程序的脑子里，画出来就是撒谎）。
     manual_pos = None
     if not pos_now:
-        manual_pos = _manual_position(saved_cfg, _defaults)
+        manual_pos = _manual_position(saved_cfg, _defaults, login)
 
     # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
     # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。

@@ -79,25 +79,147 @@ function renderPos(a, p, mp) {
     const heldM = mp.opened_at ? Math.max(0, nowS - Number(mp.opened_at)) : 0;
     setV('posHold', heldM ? durText(heldM) : '—');
 
-    ['rBe', 'rTp', 'rPeak'].forEach(id => {
-      const e = $(id);
-      if (e) e.classList.add('hidden');
-    });
-    const rFillM = $('rFill');
-    if (rFillM) { rFillM.style.width = '0'; rFillM.className = 'r-fill'; }
-    if ($('rulerLb')) $('rulerLb').textContent = '浮盈刻度 · 手工单不适用';
-    if ($('rulerV')) { $('rulerV').textContent = '—'; $('rulerV').style.color = ''; }
+    // 峰值浮盈 / ATR 倍数（2026-11-17）
+    // 程序仍然**不接管**（不挂券商端 SL、不保本、不超时平仓），但 MFE 必须记。
+    // 那笔 4991040502 平在 3883.436，7 秒后 3886.96、当分钟高点约 3888.5，
+    // 而面板上峰值是一根横杠——"我刚才是不是跑早了"当场无解。
+    // 口径和后端 `_track_peak` / `_peak_atr` 完全一致，不在前端另算一套。
+    const munit = Number(mp.atr_pnl || 0);      // 1 个 ATR 折多少浮盈
+    const mpeak = (mp.peak_pnl == null) ? null : Number(mp.peak_pnl);
+    const mfp = (mp.float_pnl == null) ? null : Number(mp.float_pnl);
+    const mmae = (mp.mae_pnl == null) ? null : Number(mp.mae_pnl);
+    setV('posPeak', mpeak == null ? '—'
+         : money(mpeak) + (munit > 0 ? ' · ' + fmt(mpeak / munit, 1) + '×ATR' : ''),
+         mpeak == null ? '' : (mpeak > 0 ? 'var(--good-lit)' : ''));
+
+    // ---- 浮盈刻度尺 ----
+    // 参照系是 **5×ATR**（后端 `_BURST_ATR`，脉冲成立的那条线），不是
+    // tp_min_usd：手工单没有 plan，也就没有"止盈门槛"这回事，硬套 3.25
+    // 会让一笔趋势单看起来早就该跑了。轴顶随峰值放大（rulerTop 的阶梯），
+    // "满格多少"写进标签，否则线左移看起来像 bug。
+    if (munit > 0) {
+      const burstTop = munit * 5;
+      const cur0 = (mfp == null ? 0 : mfp);
+      const hi0 = Math.max(cur0, mpeak == null ? 0 : mpeak);
+      const top0 = rulerTop(burstTop, hi0) || burstTop;
+      const pct0 = v => Math.min(100, Math.max(0, (v / top0) * 100));
+      const rFillM = $('rFill');
+      if (rFillM) {
+        rFillM.className = 'r-fill' + (cur0 < 0 ? ' neg' : '');
+        rFillM.style.width = pct0(cur0).toFixed(1) + '%';
+      }
+      const rPeakM = $('rPeak');
+      if (rPeakM) {
+        if (mpeak != null && mpeak > 0) {
+          rPeakM.classList.remove('hidden');
+          rPeakM.style.left = pct0(mpeak).toFixed(1) + '%';
+        } else rPeakM.classList.add('hidden');
+      }
+      const rBeM = $('rBe');
+      if (rBeM) rBeM.classList.add('hidden');   // 手工单没有程序挂的保本线
+      const rTpM = $('rTp');
+      if (rTpM) {
+        rTpM.classList.remove('hidden');
+        const tpPct0 = pct0(burstTop);
+        rTpM.style.left = tpPct0.toFixed(1) + '%';
+        rTpM.style.right = (tpPct0 < 60) ? 'auto' : '4px';
+        const capM = $('rTpCap');
+        if (capM) {
+          capM.textContent = '脉冲 ' + fmt(burstTop, 2);
+          capM.title = '5 个 ATR = ' + fmt(burstTop, 2)
+            + '（假设入场即最高点，入场手数下的实际浮盈）';
+        }
+      }
+      if ($('rulerLb')) {
+        $('rulerLb').textContent = '浮盈刻度 · 手工单（程序不接管）'
+          + (top0 > burstTop + 1e-9 ? ' · 满格 ' + fmt(top0, 2) : '');
+      }
+      if ($('rulerV')) {
+        // 三种状态分开说：还没到 / 到了且在峰值 / **峰值到过但已经回吐**。
+        // 第三种是手工单最需要看的一格——"跑早了"和"拿过头"在这里分开：
+        // 峰值过 5×ATR 而当前掉下来了，说明曾经有一波没吃满。
+        const back0 = (mpeak == null ? 0 : mpeak) - cur0;
+        if (cur0 >= burstTop) {
+          $('rulerV').textContent = '已过 5×ATR ' + money(cur0)
+            + (back0 > 0.005 ? ' · 回吐 ' + fmt(back0, 2) : ' · 在峰值');
+          $('rulerV').style.color = 'var(--good-lit)';
+        } else if (mpeak != null && mpeak >= burstTop) {
+          $('rulerV').textContent = '峰值过 5×ATR · 回吐 ' + fmt(back0, 2);
+          $('rulerV').style.color = '';
+        } else {
+          $('rulerV').textContent = '还差 ' + fmt(burstTop - cur0, 2) + ' 到 5×ATR';
+          $('rulerV').style.color = '';
+        }
+      }
+    } else {
+      // 算不出 ATR（K 线不足 / 首次观测前）：宁可不画，也不猜一个轴出来。
+      ['rBe', 'rTp', 'rPeak'].forEach(id => {
+        const e = $(id);
+        if (e) e.classList.add('hidden');
+      });
+      const rFillM = $('rFill');
+      if (rFillM) { rFillM.style.width = '0'; rFillM.className = 'r-fill'; }
+      if ($('rulerLb')) $('rulerLb').textContent = '浮盈刻度 · 手工单（ATR 未知）';
+      if ($('rulerV')) { $('rulerV').textContent = '—'; $('rulerV').style.color = ''; }
+    }
 
     const beEl = $('beBadge');
-    if (beEl) beEl.className = 'be-badge off';
-    const beT = $('beText'), beN = $('beNote');
-    if (beT) beT.textContent = '手工单 · 无保本';
-    if (beN) {
-      beN.textContent = '程序不接管，止损由你在 MT5 里自己管'
-        + (Number(mp.sl) > 0 ? '（当前 SL ' + fmt(mp.sl, 3) + '）' : '（当前未挂 SL）');
+    // 手工单的保护状态 = 它自己的 SL。程序不接管，所以这一格只有三件事能说：
+    // 有没有挂止损、挂了之后最坏亏多少、以及**人有没有把风险放大**。
+    // 11-17 那笔手工单把 SL 从 3869.447 挪到 3866.022（30 → 100 美元），
+    // 面板当时一个字都没提——这一格就是为那件事准备的。
+    const rk = (mp.sl_risk == null) ? null : Number(mp.sl_risk);
+    const rk0 = (mp.risk0 == null) ? null : Number(mp.risk0);
+    const rmult = (mp.risk_mult == null) ? null : Number(mp.risk_mult);
+    const wide = rmult != null && rmult > 1.2;      // 放宽 20% 以上才提示，别为 1 个点刷屏
+    const slAtr = (mp.sl_atr == null) ? null : Number(mp.sl_atr);
+    if (beEl) {
+      beEl.className = 'be-badge ' + ((rk == null || wide) ? 'fail' : 'off');
+      beEl.title = '程序不接管：不挂券商端止损、不保本、不会超时平仓'
+        + (rk == null
+          ? '\n当前没有止损价——打反了没有下限'
+          : '\n打到当前 SL 的最坏结果 ' + money(rk)
+            + (slAtr != null ? '（离入场 ' + fmt(slAtr, 1) + '×ATR）' : ''))
+        + (wide && rk0 != null
+          ? '\n开仓时止损 ' + fmt(mp.sl0, 3) + '，最坏 ' + money(rk0)
+            + '；现在 ' + fmt(mp.sl, 3) + '，最坏 ' + money(rk) + '。'
+            : '')
+        + '\n这一格只读：程序不会替你改回去。';
     }
+    const beT = $('beText'), beN = $('beNote');
+    if (beT) beT.textContent = rk == null ? '手工单 · 无止损' : ('手工单 · 最坏 ' + money(rk));
+    if (beN) {
+      // 放宽时把两个数摆在一起，否则"最坏 −100"只是一个数字，看不出是谁弄的
+      const head = wide && rk0 != null
+        ? '⚠ 止损放宽 ' + fmt(rmult, 1) + '×：' + money(rk0) + ' → ' + money(rk)
+        : ('SL ' + fmt(mp.sl, 3) + (slAtr != null ? ' · ' + fmt(slAtr, 1) + '×ATR' : ''));
+      beN.textContent = head + (mmae == null ? '' : ' · 最深浮亏 ' + money(mmae));
+    }
+
+    // ---- 脉冲浮盈（手工单同样适用）----
+    // 3 倍起变色、5 倍算脉冲，阈值和后端 `_mark_burst` 严格对齐。
     const burstM = $('posBurst');
-    if (burstM) { burstM.classList.add('hidden'); burstM.textContent = ''; }
+    if (burstM) {
+      if (munit > 0 && mpeak != null) {
+        const multM = mpeak / munit;
+        const t3M = (mp.t3 == null) ? null : Number(mp.t3);
+        const t5M = (mp.t5 == null) ? null : Number(mp.t5);
+        const hitM = t5M != null || multM >= 5;
+        const nearM = !hitM && multM >= 3;
+        burstM.classList.remove('hidden');
+        burstM.className = 'pos-burst' + (hitM ? ' hit' : (nearM ? ' near' : ''));
+        burstM.textContent = (hitM ? '脉冲 ' : '') + fmt(multM, 1) + '×ATR';
+        burstM.title = '峰值 ' + fmt(multM, 2) + ' 倍 ATR'
+          + (t3M == null ? ' · 还没到 3 倍' : ' · 3 倍用了 ' + fmt(t3M, 1) + ' 分')
+          + (t5M == null ? ' · 5 倍算脉冲' : ' · 5 倍用了 ' + fmt(t5M, 1) + ' 分')
+          + (mp.peak_ts ? '\n峰值时刻 ' + hhmmss(mp.peak_ts) : '')
+          + '\n手工单：程序只记录，不平仓、不抬止损';
+      } else {
+        burstM.classList.add('hidden');
+        burstM.textContent = '';
+        burstM.title = '';
+      }
+    }
     return;
   }
 
