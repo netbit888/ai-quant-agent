@@ -15,7 +15,7 @@
     /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
     /api/autotrade/signal  回答一条待确认信号（AI 辅助模式；approve 会下单）
     /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
-    /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动
+    /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动（面板无入口，仅供 CLI/脚本）
     /api/autotrade/prefs   记住面板上的交易参数（品种/模式/间隔/手数；不下单、不花钱）
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
 
@@ -711,8 +711,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_autotrade_reset_lessons(self, body: dict) -> None:
         """只清 AI 攒的经验（教训库），战绩和持仓一律不动。
 
-        为什么要单独一个入口：清战绩只损失统计样本，清经验丢掉的是模型
-        唯一的历史。两件事代价差一个量级，不能绑在同一个按钮上。
+        **面板上已经没有入口了（2026-11-17）**：它和「删除这个包」语义重复，而且
+        清完会留下一个名字不变、看着在用、实际为空的废包。接口留着给 CLI / 脚本用，
+        面板的清理动作统一走 `/api/lesson_packs/delete`（软删除进 `_trash/`）。
         """
         if not body.get("confirm"):
             self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝清空经验"})

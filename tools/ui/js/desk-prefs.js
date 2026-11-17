@@ -312,11 +312,19 @@ async function startAutoTrade() {
   }
 }
 
-// 重置：清空战绩。经验（教训库）**默认保留**——它存在 lessons.jsonl 里，
-// 不随流水归档。清经验是旁边那个按钮的活。
+// 重置：清空战绩。经验（教训库）**完全保留**——它存在经验包的 .jsonl 里，
+// 不随流水归档，这里连碰都不碰。
 // 为什么需要重置：战绩会拼进提示词，之前的亏损样本会让它越来越保守
 // （实测空单 1 胜 8 负 → 两条铁律 → 干脆不做空）。换参数前要个干净起点。
 // 旧流水不是删除，是改名归档，随时能翻。
+//
+// **「清空经验」按钮已经删掉（2026-11-17）。** 它和「删除这个包」语义重复，
+// 而且更坏：清完包还在列表里、名字不变、可能还是 active，看着"在用"其实是空的
+// ——用户截图里那 4 个 0 条废包就是这么来的；归档文件还裸落在 packs/ 目录里，
+// 面板上没有任何入口能找回来。经验要清理就删整个包（软删除进 _trash/），
+// 想保住包名就「导出 → 新建同名 → 删旧包」。
+// 后端 reset_lessons() 与 /api/autotrade/reset_lessons 保留（CLI 和测试在用），
+// 只是面板不再给入口——那不是假开关，是没入口。
 async function resetAutoTrade() {
   let ok = false;
   try {
@@ -324,7 +332,7 @@ async function resetAutoTrade() {
       title: '清空战绩（经验保留）？',
       desc: '会停掉 AI，把「战绩统计 / 待复盘队列」清零，新流水从零开始。'
         + '旧流水改名成 autotrade_log.<时间戳>.jsonl 留在账户目录里，不删除。'
-        + 'AI 攒的复盘教训**不受影响**（要清经验用旁边的「清空经验」）。'
+        + 'AI 攒的复盘教训不受影响，一条都不会动。'
         + '已经平掉的仓位记录不受影响。',
       cost: '会停掉 AI（不平仓）',
       okText: '重置战绩',
@@ -360,45 +368,7 @@ async function resetAutoTrade() {
   }
 }
 
-// 只清经验：教训库里一条不留，战绩和持仓都不动。
-// 单独一个按钮的理由：清战绩只损失统计样本，清经验丢掉的是模型唯一的历史，
-// 代价差一个量级，不能绑在一起误触。
-async function resetLessons() {
-  let ok = false;
-  try {
-    ok = await confirmApiCall({
-      title: '清空 AI 攒的经验？',
-      desc: '会把教训库里所有复盘教训归档清空（改名成 lessons.<时间戳>.jsonl，不删除）。'
-        + '战绩、持仓、流水一律不动，AI 可以继续跑。'
-        + '清空后注入的会变成「暂无复盘笔记」，直到攒出新教训。',
-      cost: '不花钱、不下单',
-      okText: '清空经验',
-    });
-  } catch (e) {
-    atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
-    return;
-  }
-  if (!ok) return;
-
-  atSay('');
-  $('atResetLessons').disabled = true;
-  try {
-    const r = await fetch('/api/autotrade/reset_lessons', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirm: true }),
-    });
-    const j = await r.json();
-    if (j.ok) {
-      atSay(`<b>经验已清空</b>：归档 ${j.cleared || 0} 条教训`
-        + (j.archived ? `（${esc(j.archived)}）` : '') + '。战绩不受影响。', 'ok');
-    } else {
-      atSay('<b>清空经验失败：</b>' + esc(j.error || '未知错误'), 'err');
-    }
-  } catch (e) {
-    atSay('<b>清空经验请求失败：</b>' + esc(String(e)), 'err');
-  } finally {
-    $('atResetLessons').disabled = false;
-    loadAutoTrade();
-  }
-}
+// 只清经验（resetLessons）的按钮和函数已于 2026-11-17 移除：
+// 它和「删除这个包」重复，且清完留下一个名字不变、看着在用、实际为空的废包，
+// 归档文件还藏在 packs/ 目录里没有入口可找回。要清经验就删包。
 

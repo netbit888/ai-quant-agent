@@ -107,7 +107,7 @@ let failed = false;
 (async () => {
 try {
   const body = script.replace(/pollState\(\);[\s\S]*$/, '');
-  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, resetLessons, loadLessons, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions, atLots, paintAcctClock};');
+  const fn = new Function(body + '\n; return {renderLive, renderQuality, renderAutoTrade, atSay, atErrHtml, startAutoTrade, stopAutoTrade, resetAutoTrade, loadLessons, lpDeleteCurrent, enterTradingFullscreen, exitTradingFullscreen, updateCurtain, loadLlm, onLlmProviderChange, switchLlm, closeModal, reasonCn, mins, money, fmt, ts2str, renderTradeDetail, PROG_DIR_TEXT, atSpreadCostUsd, atSymbol, atSymbolLabel, fillSymbolOptions, atLots, paintAcctClock};');
   const api = fn();
   api.renderLive(liveJson);
   console.log(`renderLive 执行成功（账户 ${liveJson.account && liveJson.account.login}）`);
@@ -766,18 +766,29 @@ try {
   if (!otherHtml.includes('手数必须大于 0')) failed = true;
 
   // 按钮真的接上处理函数了吗？「点了没反应」有一半是 handler 没挂上/没定义。
+  //
+  // 「清空经验」已经删掉（2026-11-17）：它和「删除这个包」语义重复，而且清完
+  // 留下一个名字不变、看着在用、实际为空的废包。断言从 resetLessons 换成
+  // lpDeleteCurrent，同时钉死"清空经验不能再出现"——别哪天又被加回来。
   const wired = src.includes('onclick="startAutoTrade()"') &&
                 src.includes('onclick="stopAutoTrade()"') &&
                 src.includes('onclick="resetAutoTrade()"') &&
-                src.includes('onclick="resetLessons()"') &&
+                src.includes('onclick="lpDeleteCurrent()"') &&
                 src.includes('onclick="enterTradingFullscreen()"') &&
                 typeof api.startAutoTrade === 'function' &&
                 typeof api.stopAutoTrade === 'function' &&
                 typeof api.resetAutoTrade === 'function' &&
-                typeof api.resetLessons === 'function' &&
+                typeof api.lpDeleteCurrent === 'function' &&
                 typeof api.enterTradingFullscreen === 'function';
-  console.log(`  开始/关闭/重置战绩/清空经验/全屏按钮已接 handler ${wired ? '✓' : '✗'}`);
+  console.log(`  开始/关闭/重置战绩/删除经验包/全屏按钮已接 handler ${wired ? '✓' : '✗'}`);
   if (!wired) failed = true;
+  // 只看**实际接线**，不看注释：desk-prefs.js 里刻意留了一段说明，讲了为什么
+  // 删掉这个按钮、接口为什么保留，里面就带着那个路径——用 includes(路径) 判断
+  // 会把注释当成代码，报出假阳性。
+  const noClearLessons = !src.includes('onclick="resetLessons()"') &&
+                         !src.includes("fetch('/api/autotrade/reset_lessons'");
+  console.log(`  清空经验入口已移除（清经验=删包）${noClearLessons ? '✓' : '✗'}`);
+  if (!noClearLessons) failed = true;
   console.log(`  弹窗可用 ${typeof api.closeModal === 'function' ? '✓' : '✗'}`);
   if (typeof api.closeModal !== 'function') failed = true;
 

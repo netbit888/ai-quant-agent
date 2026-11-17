@@ -123,12 +123,12 @@
 
       <div class="setup-card">
         <h3>运维</h3>
-        <div class="sub">重置战绩只清数字，旧流水归档保留、可回看；清空经验只清教训库，战绩不动。</div>
+        <div class="sub">重置战绩只清数字，旧流水归档保留、可回看；经验完全不动。
+          经验要清理就直接删整个包（上面经验库那一排的「删除这个包」）——包是经验的
+          最小单位，删包语义更清楚，也不会留下一个"看着在用、其实是空的"废包。</div>
         <div class="row">
           <button class="btn-ghost" id="atReset" onclick="resetAutoTrade()"
                   title="清空 AI 的战绩统计（旧流水归档保留），换参数前用。经验不受影响">重置战绩</button>
-          <button class="btn-ghost" id="atResetLessons" onclick="resetLessons()"
-                  title="只清 AI 攒的复盘教训，战绩和持仓都不动">清空经验</button>
         </div>
         <div class="sub" style="margin:var(--sp2) 0 0">
           急停（关闭并清仓）有两处入口：顶部吸顶带、做单台操作条——都是同一个动作。

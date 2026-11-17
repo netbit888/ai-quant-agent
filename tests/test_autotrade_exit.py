@@ -965,8 +965,13 @@ class TestLessonStore(TempLedger):
         # 清完不许回退去读归档流水，否则"清空"立刻又长回来
         self.assertEqual(len(autotrade.read_log()), 2)
         self.assertIn("暂无", autotrade.recent_lessons())
-        # 归档文件确实留下了（改名不删除——教训是唯一副本）
+        # 归档文件确实留下了（改名不删除——教训是唯一副本），而且要落在
+        # _trash/：以前裸放在 packs/ 目录里，index 里没它、面板扫不到，
+        # 等于把用户唯一的经验藏进一个看不见的角落（2026-11-17 统一）。
         self.assertTrue(res.get("archived"))
+        from live import lesson_packs
+        self.assertTrue((lesson_packs.packs_dir() / "_trash" / res["archived"]).is_file(),
+                        "归档必须进 _trash/，否则面板里找不回来")
 
     def test_no_400_row_window(self):
         """教训库必须全量：以前 read_log(limit=400) 让 188 条复盘只剩 86 条进库。"""

@@ -118,9 +118,14 @@ def migrate_lessons(login: int | str | None = None) -> dict:
 def reset_lessons(login: int | str | None = None) -> dict:
     """只清经验：教训库里的一条不留，战绩（流水/state）原样保留。
 
-    什么时候用：旧教训本身就是错的（比如某条铁律是拿坏数据攒的），
-    或者换了打法、旧经验成了包袱。和「重置」分开，是因为这两件事的代价
-    完全不对称——清战绩只损失统计样本，清经验丢掉的是模型唯一的历史。
+    **面板上已经没有这个入口了（2026-11-17）。** 它和「删除这个包」重复，
+    而且更坏：清完包还在下拉列表里、名字不变、可能还是 active，看着"在用"
+    其实是空的——那正是用户截图里 4 个 0 条废包的来源。函数与
+    `/api/autotrade/reset_lessons` 保留给 CLI 和测试，面板不再给按钮。
+
+    归档位置已统一到 `_trash/`（和 `lesson_packs.delete` 一致）：以前是改名
+    成 `p-xxx.<时间戳>.jsonl` 裸留在 packs 目录里，index 里没有它、面板扫不到，
+    等于把用户唯一的经验藏进一个看不见的角落。
     """
     p = lessons_path(login)
     if not p.exists():
@@ -129,7 +134,9 @@ def reset_lessons(login: int | str | None = None) -> dict:
     rows = read_jsonl(p)
     if not rows:
         return {"ok": True, "cleared": 0, "archived": None, "note": "教训库已经是空的"}
-    dst = p.with_name(f"{p.stem}.{time.strftime('%Y%m%d-%H%M%S')}{p.suffix}")
+    trash = p.parent / "_trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    dst = trash / f"{p.name}.{time.strftime('%Y%m%d-%H%M%S')}"
     try:
         p.replace(dst)
     except OSError as exc:
