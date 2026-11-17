@@ -199,6 +199,64 @@ class TestExportTo(unittest.TestCase):
         self.assertIn("不存在", res["error"])
 
 
+class TestDelete(unittest.TestCase):
+    """删除**整个经验包**（面板下拉框旁边那颗按钮）。
+
+    为什么单独钉：删的是用户积累的经验，而面板上没有「恢复」入口——文件虽然
+    只是被挪进 `_trash/`，对用户来说就是没了。所以两条线必须同时成立：
+    1. 不进 `_trash` 不算删（真删等于没退路）；
+    2. 删掉的是**当前生效**的包时，active 必须自动落到剩下的第一个——否则
+       `active_file()` 指向一个已经不存在的文件，注入文本静默变成空的。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        paths.set_root(Path(self._tmp.name))
+        from live import lesson_packs
+
+        self.lp = lesson_packs
+        self.a = lesson_packs.create_empty("包A")["id"]
+        self.b = lesson_packs.create_empty("包B")["id"]
+
+    def tearDown(self):
+        paths.set_root(None)
+
+    def _ids(self) -> list[str]:
+        return [p["id"] for p in self.lp._read_index()["packs"]]
+
+    def test_soft_deletes_into_trash(self):
+        src = self.lp.packs_dir() / self.lp._read_index()["packs"][0]["file"]
+        self.assertTrue(src.is_file())
+        res = self.lp.delete(self.a)
+        self.assertTrue(res["ok"])
+        self.assertNotIn(self.a, self._ids())
+        self.assertFalse(src.exists(), "index 里没了，文件也不能留在包目录")
+        trashed = list((self.lp.packs_dir() / "_trash").glob("*"))
+        self.assertEqual(len(trashed), 1, "删掉的文件必须进 _trash，否则没退路")
+
+    def test_deleting_active_pack_switches_to_first_left(self):
+        self.lp.select(self.b)
+        res = self.lp.delete(self.b)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["active"], self.a)
+        self.assertEqual(self.lp._read_index()["active"], self.a)
+        self.assertTrue(self.lp.active_file().name.endswith(".jsonl"))
+
+    def test_deleting_everything_leaves_no_active(self):
+        self.lp.delete(self.a)
+        res = self.lp.delete(self.b)
+        self.assertTrue(res["ok"])
+        self.assertIsNone(res["active"])
+        self.assertEqual(self._ids(), [])
+
+    def test_unknown_id_is_rejected(self):
+        res = self.lp.delete("p-nope")
+        self.assertFalse(res["ok"])
+        self.assertIn("不存在", res["error"])
+        self.assertEqual(len(self._ids()), 2, "失败不能动别人的包")
+
+
 class _FakeWindow:
     """替掉 pywebview 窗口，把 create_file_dialog 的入参记下来。"""
 

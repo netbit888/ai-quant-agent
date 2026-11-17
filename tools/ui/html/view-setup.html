@@ -108,6 +108,8 @@
                   title="把当前选中的经验库导出成 .jsonl 备份，会弹保存对话框让你选位置">导出</button>
           <button class="btn-ghost" id="lpNew" onclick="lpCreate()"
                   title="新建一个空的经验库，从零积累">新建</button>
+          <button class="btn-ghost btn-danger" id="lpDelete" onclick="lpDeleteCurrent()"
+                  title="删除当前下拉框里选中的**整个经验包**（不是删里面某一条）。文件会移到 lesson_packs/_trash/ 留底，但面板里没有恢复入口。">删除这个包</button>
         </div>
         <!-- 教训库：跨场次复发统计。默认收起——它要扫所有归档流水数平仓笔，
              比状态查询重，不该跟着 1 秒轮询跑，点开才拉。 -->

@@ -30,6 +30,9 @@ async function loadLessons() {
  * 「没有缓存」是这套机制的根基——切换是原子改 index.json，
  * 下一次决策读到的就是新包，不用任何失效逻辑。 */
 let lpPacks = [];
+// 当前生效的包 id。删除弹窗要能说清「你删的是正在用的那套」，否则用户以为
+// 只是从列表里清掉一个闲置文件，实际下次决策的提示词已经换了一套经验。
+let lpActiveId = '';
 
 async function loadLessonPacks() {
   const sel = $('lpSelect');
@@ -38,6 +41,7 @@ async function loadLessonPacks() {
     const j = await (await fetch('/api/lesson_packs', { cache: 'no-store' })).json();
     if (!j.ok) { sel.innerHTML = '<option value="">读取失败</option>'; return; }
     lpPacks = j.packs || [];
+    lpActiveId = j.active || '';
     const prev = sel.value;
     sel.innerHTML = (j.packs || []).map(p =>
       `<option value="${esc(p.id)}">${esc(p.name)}（${p.count} 条）</option>`
@@ -189,5 +193,48 @@ async function lpCreate() {
     if (!j.ok) { qaToast('创建失败：' + (j.error || ''), 'err'); return; }
     await loadLessonPacks();
   } catch (e) { qaToast('创建请求失败：' + String(e), 'err'); }
+}
+
+/* 删除**整个经验包**（下拉列表里的那一行），不是删包里的某一条教训。
+ *
+ * 后端是软删除：文件挪进 lesson_packs/_trash/ 并按时间戳命名，index 里移除。
+ * 但面板上没有「恢复」入口，对用户就等于永久的，所以必须二次确认，并且把
+ * 三件事说清楚：删的是哪个包、里面有几条、它是不是当前生效的那个。
+ * 删的若是生效包，后端会自动切到剩下的第一个——AI 下一次决策立刻换一套经验，
+ * 这个后果比"列表少一行"严重得多，不能让他事后才发现。
+ * 一个不剩时 active 变成 None，注入文本退化成「暂无复盘笔记」。 */
+async function lpDeleteCurrent() {
+  const sel = $('lpSelect');
+  const id = (sel || {}).value || '';
+  if (!id) { qaToast('先选一个要删除的经验库', 'err'); return; }
+  const pack = (lpPacks || []).find(p => p.id === id) || {};
+  const name = pack.name || id;
+  const n = Number(pack.count || 0);
+  const isActive = id === lpActiveId;
+  const left = Math.max(0, (lpPacks || []).length - 1);
+  let ok = false;
+  try {
+    ok = await confirmApiCall({
+      title: `删除经验包「${name}」？`,
+      desc: `整个包一起删掉，下拉列表里不再显示，里面的 ${n} 条教训也不参与注入了。`
+        + (isActive ? ' 它是当前生效的包：删掉后 AI 会立刻切到剩下的第一个包，'
+          + '下一次决策用的就是那套经验。' : '')
+        + (left === 0 ? ' 这是最后一个包，删光后 AI 没有任何历史经验可注入。'
+          : ` 还剩 ${left} 个包。`)
+        + ' 文件会移到 lesson_packs/_trash/ 留底，但面板里没有恢复入口。',
+      cost: '面板内不可撤销',
+      okText: '删除这个包',
+    });
+  } catch (e) { qaToast('确认弹窗没能打开：' + String(e), 'err'); return; }
+  if (!ok) return;
+  try {
+    const j = await (await fetch('/api/lesson_packs/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, confirm: true }),
+    })).json();
+    if (!j.ok) { qaToast('删除失败：' + (j.error || ''), 'err'); return; }
+    await loadLessonPacks();
+    qaToast('已删除经验包「' + name + '」', 'ok');
+  } catch (e) { qaToast('删除请求失败：' + String(e), 'err'); }
 }
 
