@@ -403,4 +403,8 @@
      代表「可能有一笔没人管的仓位」，只出现一次会被后续刷新盖掉。 */
   .sb-unman:not(:empty) { color: var(--bad); cursor: pointer; text-decoration: underline dotted; }
   .sb-unman:not(:empty):hover { color: var(--bad-lit, var(--bad)); }
+  /* 运行中切了模型/经验包：说一句「下一轮生效」。用 info 色而不是告警色——
+     这不是故障，是"你改了依据，从下一笔起算"。10 秒自退，不占常驻位。 */
+  .sb-note { white-space: nowrap; }
+  .sb-note:not(:empty) { color: var(--info); }
 

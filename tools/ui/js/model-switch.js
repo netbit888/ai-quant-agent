@@ -158,6 +158,11 @@ async function switchLlm() {
       }
       $('atLlmKey').value = '';
       $('atLlmKey').classList.remove('bad');
+      // 跑着的时候换模型 = 下一轮 tick 就换一个脑子。这条只 toast 不够：
+      // 人点完就切回做单台了，得让常驻状态带也说一句（2026-11-18）。
+      if (lastAutoData && lastAutoData.running) {
+        atSwitchNote('模型已切到 ' + (j.model || model) + ' · 下一轮生效');
+      }
       await loadLlm();
       loadAutoTrade();
     } else if (j.need_key) {

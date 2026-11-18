@@ -57,7 +57,12 @@ function renderRing(a, p) {
   if (ld) {
     if (ld.kind === 'entry') {
       if (ld.act === false) {
-        word = '不做'; cls = 'hold'; sub = '模型主动放弃';
+        word = '不做'; cls = 'hold';
+        // mid（2026-11-18）这一档是**程序**不让做，不是模型放弃：那时连模型
+        // 都没调（ld.source === 'rule'）。写「模型主动放弃」会让人去翻提示词，
+        // 而真正该去的地方是行情本身——方向不明这一档没有打法。
+        sub = (ld.veto === 'mid_no_trade' || ld.source === 'rule')
+          ? '方向不明·程序不做' : '模型主动放弃';
       } else if (ld.act === true) {
         word = ld.direction > 0 ? '做多' : '做空';
         cls = ld.direction > 0 ? 'long' : 'short';

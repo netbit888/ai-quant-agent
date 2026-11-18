@@ -235,6 +235,23 @@ class Cfg:
     # 全样本显示"止损越宽越好"，但同向 5 分钟去重后（29 点）单调性消失，
     # sl=4.0 那行反而全面低于 3.0 —— 那是重复决策点造成的假象，不据此改参。
     trend_follow: bool = True
+    # 方向不明（mid）这一档做不做单。**默认 False = 不做，连模型都不调**
+    # （2026-11-18，用户定的：「mid 做单很糟糕，弹窗也不要」）。
+    #
+    # 依据：332 笔平仓流水里 mid 12 笔（开仓行 plan 回填口径），胜率 25%、
+    # 每手均值 -145.7、58% 被硬止损——三档最差（trend +90.0 / range -46.6）。
+    # 而 mid 的峰值浮盈均值是每手 +139：**不是没机会，是进去了就来回挨打**。
+    #
+    # 更硬的理由不是数据是定义：range 打法的前提是边界有效（ER<0.30 反复
+    # 回到同一区间），trend 打法的前提是动能（ER>0.50 单边），mid 的
+    # 0.30~0.50 两个前提都不成立——它没有打法，剩下的只有 3.0 美元紧止损
+    # 和 60 秒周期在中间地带来回扫。样本 12 笔不够立铁律，但"方向不明
+    # 就别下注"是逻辑不是统计。
+    #
+    # 为什么保留开关而不是删代码：拦与不拦各自的期望要能用数据说话
+    # （同 mtf_conflict_trend 的处置）。面板不暴露，只由本版默认值决定；
+    # 将来 mid 样本攒够想验证，改成 True 就跑回旧行为。
+    mid_trade: bool = False
     # 趋势单的止盈门槛（USD）。取网格平台的中段而不是峰值（峰值 12.0 在
     # 29 个去重点上挑出来等于拟合）。设 0 = 趋势单也退回 tp_min_usd。
     tp_min_trend: float = 7.0
@@ -448,6 +465,8 @@ CODE_ONLY: tuple[str, ...] = (
     "stale_wake", "stale_sec", "stale_frac", "stale_reask_sec", "stale_min_peak",
     "zone_edge", "trend_follow", "tp_min_trend", "max_hold_trend",
     "trend_span_atr_max",
+    # mid（方向不明）做不做单：依据见 Cfg.mid_trade，面板不暴露
+    "mid_trade",
     "be_at_entry", "be_arm_usd", "be_retry_sec",
     "lock_profit",
     "assist_raise_window",

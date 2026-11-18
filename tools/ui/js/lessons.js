@@ -61,7 +61,13 @@ async function lpSelectChanged() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     })).json();
-    if (!j.ok) atSay('<b>切换失败：</b>' + esc(j.error || ''), 'err');
+    if (!j.ok) { atSay('<b>切换失败：</b>' + esc(j.error || ''), 'err'); return; }
+    // 跑着的时候切包 = 下一轮 tick 就换一套经验在判断（教训是每轮现读的）。
+    // 设置页上那一下下拉看不出这个分量，得在常驻状态带上说一句（2026-11-18）。
+    if (lastAutoData && lastAutoData.running) {
+      const p = (lpPacks || []).find(x => x.id === id) || {};
+      atSwitchNote('经验包已切到「' + (p.name || id) + '」· 下一轮生效');
+    }
   } catch (e) { atSay('<b>切换请求失败：</b>' + String(e), 'err'); }
 }
 
@@ -212,15 +218,26 @@ async function lpDeleteCurrent() {
   const n = Number(pack.count || 0);
   const isActive = id === lpActiveId;
   const left = Math.max(0, (lpPacks || []).length - 1);
+  // 删的是生效包时，后端会切到「剩下的第一个」（`lesson_packs.delete()` 里
+  // `idx["packs"][0]`）。这里把那个包**指名道姓**写进确认框：只说"会切到另一个包"
+  // 等于没说——用户没法判断接下来的判断依据会变成什么（2026-11-18）。
+  const nextPack = isActive
+    ? ((lpPacks || []).find(p => p.id !== id) || null)
+    : null;
+  let tail = '';
+  if (isActive) {
+    tail = nextPack
+      ? ` 它是当前生效的包：删掉后会自动切到「${nextPack.name}」，下一次决策用的就是那套经验。`
+      : ' 它是当前生效的包，也是最后一个——删掉后 AI 没有任何历史经验可注入。';
+  }
+  if (left > 0) tail += ` 还剩 ${left} 个包。`;
+  else if (!isActive) tail += ' 这是最后一个包，删光后 AI 没有任何历史经验可注入。';
   let ok = false;
   try {
     ok = await confirmApiCall({
       title: `删除经验包「${name}」？`,
       desc: `整个包一起删掉，下拉列表里不再显示，里面的 ${n} 条教训也不参与注入了。`
-        + (isActive ? ' 它是当前生效的包：删掉后 AI 会立刻切到剩下的第一个包，'
-          + '下一次决策用的就是那套经验。' : '')
-        + (left === 0 ? ' 这是最后一个包，删光后 AI 没有任何历史经验可注入。'
-          : ` 还剩 ${left} 个包。`)
+        + tail
         + ' 文件会移到 lesson_packs/_trash/ 留底，但面板里没有恢复入口。',
       cost: '面板内不可撤销',
       okText: '删除这个包',
@@ -234,6 +251,13 @@ async function lpDeleteCurrent() {
     })).json();
     if (!j.ok) { qaToast('删除失败：' + (j.error || ''), 'err'); return; }
     await loadLessonPacks();
+    // 生效包被删是个状态变化，不是"列表少一行"：跑着的时候下一轮就换经验了。
+    if (isActive && lastAutoData && lastAutoData.running) {
+      const np = (lpPacks || []).find(p => p.id === j.active);
+      atSwitchNote(np
+        ? `经验包「${name}」已删除 · 现在用「${np.name}」`
+        : `经验包「${name}」已删除 · 当前无经验可注入`);
+    }
     qaToast('已删除经验包「' + name + '」', 'ok');
   } catch (e) { qaToast('删除请求失败：' + String(e), 'err'); }
 }

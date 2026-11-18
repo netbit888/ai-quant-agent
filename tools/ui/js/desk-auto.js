@@ -23,6 +23,28 @@ function atMmSs(sec) {
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
 
+/* 运行中改了「判断依据」（模型 / 经验包）在状态带上留一句话（2026-11-18）。
+ *
+ * 为什么不用 toast：改完人会立刻切回做单台，toast 三秒就没了，而「现在跑的
+ * 是哪套依据」是个持续状态，不是一次性事件。为什么又要自退：它是提醒，
+ * 不是常驻字段——10 秒够看清，之后不该继续占着 44px 的那一行。
+ *
+ * 只在 running 时调用（调用点自己判断）：没在跑的话设置页就在眼前，
+ * 你刚点完下拉框，再说一遍是噪音。
+ */
+let _atSwitchTimer = null;
+function atSwitchNote(text) {
+  const el = $('atSwitchNote');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = '';
+  clearTimeout(_atSwitchTimer);
+  _atSwitchTimer = setTimeout(() => {
+    el.style.display = 'none';
+    el.textContent = '';
+  }, 10000);
+}
+
 function renderAutoTrade(a) {
   renderStatusBar(a);
   const st = $('atState');
@@ -116,7 +138,10 @@ function renderAutoTrade(a) {
         if (a.running && until > nowS) tag += ' · 冷静期 ' + atMmSs(until - nowS);
       }
       else if (ld.veto) {
-        tag = ld.veto === 'manual_position' ? '手工单在场·不叠加' : '程序拦下';
+        // mid（2026-11-18）：这一档根本没调模型，写「程序拦下」会让人以为
+        // 有信号被否决了、去找开关。它的实际含义是"这种行情不做单"。
+        tag = ld.veto === 'manual_position' ? '手工单在场·不叠加'
+            : (ld.veto === 'mid_no_trade' ? '方向不明·不交易' : '程序拦下');
         cls = 'is-veto';
       }
       // 2026-10-28 起程序默认只建议不拦：有建议却没拦，说明模型否决了它。

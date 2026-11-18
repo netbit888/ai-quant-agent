@@ -2580,6 +2580,43 @@ def send_close(cfg: Cfg, ticket: int, attempts: int = 3) -> dict:
 # ------------------------------------------------------------------ 一次 tick
 
 
+def _model_name() -> str:
+    """这一轮**实际会调用**的模型名，用来给流水留痕（2026-11-18）。
+
+    为什么读环境变量而不是 Cfg：模型是运行中可热切的（`/api/llm/switch`
+    改进程内 os.environ + 配置文件），Cfg 里根本没有模型字段。读 env 就是
+    读「下一轮真的会用哪个」，和 `agent.llm` 的取值口径完全一致。
+
+    读不到返回空串：留痕字段缺失比编一个名字强——编出来的名字会让复盘时
+    的归因彻底错掉。
+    """
+    cur = (os.getenv("LLM_MODEL") or "").strip()
+    if cur:
+        return cur
+    try:
+        from agent.llm import DEFAULT_MODEL, _load_dotenv
+
+        _load_dotenv()
+        return (os.getenv("LLM_MODEL") or DEFAULT_MODEL).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _active_pack_id() -> str:
+    """当前生效的经验包 id，同样是留痕用。
+
+    教训是每轮现读 `active_file()` 的，所以切包也是热生效——open 行不记
+    这个 id，事后看流水只能看到「模型判断做多」，看不出它吃的是哪套经验。
+    查不到返回空串（例如还没建过包）。
+    """
+    try:
+        from live.lesson_packs import active_id
+
+        return str(active_id() or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _stop(state: dict, reason: str, now: int, login=None) -> dict:
     state["stop_reason"] = reason
     state["running"] = False
@@ -3075,12 +3112,67 @@ def _tick_body(cfg: Cfg, login, now: int,
                 row["answer"] = ans
             return _finish(state, row, login, ts=now)
 
+    # 行情判定：这一步就是「先判行情、再选打法」的分流点。
+    # 同一个 regime 会同时喂给程序建议、提示词、锚点开关、开仓时的 plan。
+    # 必须排在 prog_dir 之前——mid 那一档连建议都不给（见下面的早退）。
+    regime = regime_of(bars)
+
+    # --- 方向不明（mid）：这一档不做单，连模型都不调 ----------------------
+    #
+    # 2026-11-18 起。用户原话：「mid 做单很糟糕，弹窗也不要，自动化也不要」。
+    #
+    # 数据（332 笔平仓，开仓行 plan 回填）：mid 12 笔 / 胜率 25% / 每手
+    # -145.7 / 58% 硬止损，三档最差（trend +90.0、range -46.6）；而峰值
+    # 浮盈均值每手 +139——有浮盈机会但捞不住，是"进去就挨打"不是"没机会"。
+    #
+    # 为什么在**调模型之前**就退，而不是调完再拦：
+    #   · mid 占全部决策轮次的 26%（300/1134）；结论是确定性的（ER 0.30~0.50
+    #     既无区间边界也无趋势动能 = 这一档没有打法），不需要每分钟再问一遍；
+    #   · 辅助模式的弹窗本来就在 act=true 之后才弹，早退顺带把"mid 也弹窗"
+    #     一起解决，不用在弹窗那一层再写一遍同样的判断。
+    # 代价（明码标价）：mid 期间没有模型观察记录，面板上只剩程序判定。
+    #
+    # `cfg.mid_trade=True` 就等于关掉这条早退，回到 11-18 之前的行为——留着
+    # 是为了将来 mid 样本攒够还能用同一份代码重跑对比（见 Cfg.mid_trade）。
+    if regime == "mid" and not cfg.mid_trade:
+        mid_reason = ("方向不明（ER 0.30~0.50）：既没有区间边界也没有趋势动能，"
+                      "这一档不做单（mid_trade 关闭）")
+        # 清三样东西，都是"这一段没在等、也没在判断"的后果：
+        #   · prev_entry / skip_streak——连续不做是**模型的选择**，mid 是程序
+        #     不让做。不清的话，切回 range 的第一轮会背着一句"你已经连续 N 轮
+        #     不做、价格走了 X"，而它上一轮其实根本没被问过（skip_streak 只会
+        #     在 act=false 时累积，mid 从不走到那里，于是那条 streak 会一路
+        #     停在 mid 之前的值上）。
+        #   · wait——锚点是"等回踩到 X"的配套，这一档不做单就没有等待这回事；
+        #     留着它，切回震荡时下一轮会带着一个 mid 时期的陈旧价位进来。
+        state["prev_entry"] = None
+        state["skip_streak"] = None
+        state["wait"] = None
+        # last_decision 照写：面板的打法卡、状态带、决策环全读它。不写的话
+        # 界面上停在 mid 之前那一轮（超过两个间隔还显示"待判定"），人看到的
+        # 是"程序没在动"而不是"程序按规则不做"。
+        state["last_decision"] = {
+            "ts": now, "kind": "entry", "p_up": None, "direction": 0,
+            "act": False, "prog_dir": 0, "agree": None,
+            "reason": "方向不明，这一档不做单", "source": "rule",
+            # veto 是给面板认的（desk-auto.js 状态带）：没有它就会落进
+            # 「模型不做」那一格，措辞指向提示词，而这里跟模型无关。
+            "veto": "mid_no_trade",
+            "wait": None, "wait_flag": "disabled",
+            "regime": regime,
+        }
+        row = {"ts": now, "kind": "skip", "act": False, "prog_dir": 0,
+               # veto 是给面板认的：状态带据此写「方向不明·不交易」，
+               # 而不是"模型不做"——这两件事该找的人不一样（后者调提示词）。
+               "veto": "mid_no_trade", "source": "rule",
+               "feat": feature_snapshot(bars, cfg),
+               "wait": None, "wait_flag": "disabled",
+               "regime": regime, "reason": mid_reason}
+        return _finish(state, row, login, ts=now)
+
     # 程序建议方向：与喂给模型的位置判定同源（同 _structure + zone_edge），
     # 落盘后才能事后对账「程序对 vs 模型对」。trend_follow 决定趋势市给不给方向。
     prog_dir = _prog_direction(bars, cfg.zone_edge, cfg.trend_follow)
-    # 行情判定：这一步就是「先判行情，再选打法」的分流点。
-    # 同一个 regime 会同时喂给程序建议、提示词、锚点开关、开仓时的 plan。
-    regime = regime_of(bars)
     # M5 背景只查一次：text 进 prompt，info 进特征快照。
     mtf = _mtf_bundle(cfg.symbol, cfg.zone_edge, _digits(cfg.symbol))
     # 刚平仓上下文：只在前 5 分钟（报复单窗口）传。让模型知道自己在
@@ -3439,6 +3531,12 @@ def _tick_body(cfg: Cfg, login, now: int,
         "lots": lots_used, "price": price, "p_up": p_up,
         "confidence": round(max(p_up, 1 - p_up), 4),
         "prog_dir": prog_dir, "agree": agree,
+        # 判断依据留痕（2026-11-18）：模型名 + 经验包 id 在开仓这一刻记下来。
+        # 运行中可以热切模型、热切经验包，不记这两个字段的话，事后复盘分不清
+        # 「这周变差了」是换了模型、换了一套经验，还是行情本身变了——三种归因
+        # 指向完全不同的处置，而流水里一个字都看不出来。
+        "model": _model_name(),
+        "pack": _active_pack_id(),
         # plan 冗余在 feat.regime 之外单列一行：统计工具按 kind=open 取 plan 时
         # 不用钻 feat 字典，和 close 行取法对称。
         "plan": regime,
@@ -5602,6 +5700,12 @@ def playbook_of(state: dict, rows: list[dict],
     elif regime == "range":
         name, action = "震荡市", "低买高卖"
         detail = f"tp {tp:g} / {hold_txt} · 等待锚点生效"
+    elif regime == "mid" and not cfg.mid_trade:
+        # 2026-11-18 起 mid 整体不做单（见 Cfg.mid_trade）。这里必须单独写，
+        # 不能落进下面那句"只做位置明显的单"——那句话现在是不成立的承诺：
+        # tick 早在调模型之前就退出了，程序根本不会因为"位置明显"而动手。
+        name, action = "方向不明", "不交易"
+        detail = "mid_trade 关闭 · 这一档不下单，也不调模型"
     elif regime == "mid":
         name, action = "方向不明", "只做位置明显的单"
         detail = f"tp {tp:g} / {hold_txt} · 只在上下沿动手"
@@ -5617,7 +5721,11 @@ def playbook_of(state: dict, rows: list[dict],
         "regime": regime, "name": name, "action": action, "detail": detail,
         "tp": tp, "max_hold_sec": hold, "interval_sec": iv,
         "ts": ts, "age_sec": age, "stale": stale,
-        "trend_follow": bool(cfg.trend_follow), "anchor": regime != "trend",
+        # 锚点（等回踩价位）只有震荡市有：趋势市 2026-10-28 停用，mid
+        # 2026-11-18 停用（两档都不做单，挂着等待价只会误导人）。mid_trade
+        # 打开时 mid 回到震荡口径，锚点跟着恢复。
+        "trend_follow": bool(cfg.trend_follow),
+        "anchor": regime != "trend" and (regime != "mid" or bool(cfg.mid_trade)),
     }
 
 
