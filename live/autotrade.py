@@ -51,6 +51,9 @@ import time
 from pathlib import Path
 
 from live import paths
+# 人工标签（2026-11-18）：这笔为什么进。独立于 state 与教训库，别名避免
+# 和本文件里一堆 `labels` 局部变量撞名。
+from live import labels as trade_labels
 from live.lessons import (  # noqa: F401  （重新导出：老路径 autotrade.recent_lessons 继续可用）
     HARD_RULE_MIN,
     LESSON_SCOPES,
@@ -242,7 +245,8 @@ _BE_SOURCES = ("be", "be_local")
 def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
                 source: str | None, reason: str | None,
                 held_sec: int | None = None,
-                dry_run: bool | None = None) -> dict:
+                dry_run: bool | None = None,
+                login=None) -> dict:
     """一笔平仓的**唯一记账出口**：更新计数器、清仓位、返回 close 行。
 
     为什么收敛
@@ -312,6 +316,11 @@ def _book_close(state: dict, pos: dict, pnl: float, now: int, *,
         # 两个理由分别存：开仓理由来自当初的进场判断，平仓理由来自这次离场
         # 判断。合成一个字段就再也分不清「为什么进」和「为什么出」，复盘直接废掉。
         "entry_reason": pos.get("entry_reason"),
+        # 人工标签快照（2026-11-18）：`趋势单 · 顺势突破`。**落的是快照不是键**——
+        # 标签表用户可以随时改（改完还叫同一个 ticket），流水是历史，必须固定。
+        # `login` 缺省走当前账户：三个调用点都在同一账户的 worker 里跑，
+        # 测试要隔离时显式传。
+        "label": trade_labels.label_of(pos.get("ticket"), login),
         "reason": reason, "source": source,
         "dry_run": bool(dry_run) if dry_run is not None else bool(pos.get("dry_run")),
     }
@@ -5933,7 +5942,7 @@ def _manual_close_verdict(sh: dict, pnl) -> tuple[str, float | None]:
     return (text, round(cap, 3))
 
 
-def _manual_close_row(sh: dict, now: int) -> dict | None:
+def _manual_close_row(sh: dict, now: int, login=None) -> dict | None:
     """一笔手工单平掉之后的流水行。成交读不到 → None（调用方继续等）。
 
     `kind` 故意叫 `manual_close` 而不是 `close`：`summary` / `daily` 的战绩、
@@ -5978,6 +5987,9 @@ def _manual_close_row(sh: dict, now: int) -> dict | None:
                    if pnl is not None and risk0 else None),
         "reason": verdict,
         "source": "manual", "dry_run": False,
+        # 人工标签快照（2026-11-18）。和程序单同一个口径：`趋势单 · 顺势突破`。
+        # 手工单尤其需要它——这笔的策略判定全在标签里，流水本身只有价格。
+        "label": trade_labels.label_of(ticket, login),
     }
 
 
@@ -6058,7 +6070,7 @@ def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
             changed = True
             continue
         # 开仓那一瞬间可能还没有平仓成交（deals 落盘有延迟）——等，别按报价估。
-        row = _manual_close_row(sh, now)
+        row = _manual_close_row(sh, now, login)
         if row is None:
             miss = int(sh.get("_miss") or 0) + 1
             sh["_miss"] = miss
@@ -6380,6 +6392,25 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         interval_sec=int(saved_cfg.get("interval_sec") or 60),
         symbol=str(saved_cfg.get("symbol") or ""))
 
+    # ---- 人工标签（2026-11-18）----
+    # 只叠加在**返回给面板的副本**上：`state.get("position")` 是 state 里的
+    # 同一个 dict 对象，就地加键等于把标签写进 state，下次 save_state 落盘，
+    # 出场闸门读到的仓位里就多了一个与交易无关的字段。
+    # 一次 load 供两处查（面板 1 秒轮询，不为此多读一遍盘）。
+    _lbls = trade_labels.load_labels(login)
+
+    def _lbl_of(ticket):
+        try:
+            return _lbls.get(str(int(ticket))) or None
+        except (TypeError, ValueError):
+            return None
+
+    _pos_view = state.get("position")
+    if isinstance(_pos_view, dict):
+        _pos_view = {**_pos_view, "label": _lbl_of(_pos_view.get("ticket"))}
+    if isinstance(manual_pos, dict):
+        manual_pos["label"] = _lbl_of(manual_pos.get("ticket"))
+
     return {
         "ok": True,
         "running": running and not stale,
@@ -6393,10 +6424,14 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "unmanaged": state.get("unmanaged"),
         "started_at": state.get("started_at"),
         "last_tick_ts": state.get("last_tick_ts"),
-        "position": state.get("position"),
+        "position": _pos_view,
         # 手工单只读视图（程序没仓位、品种上有仓时才有）。前端画在持仓面板里，
         # 标「手工单·程序未接管」；不参与任何出场逻辑。
         "manual_position": manual_pos,
+        # 人工标签的可选值（2026-11-18）。和 `symbols` 同一个理由：前端不许
+        # 自己写死一份，否则加标签时两边必然漂移。没仓位也要下发——
+        # 用户可能先把标签选好，只是这一笔还没开。
+        "label_tags": trade_labels.tag_options(),
         # 持仓浮动盈亏（USD）。None = 没仓或拿不到报价。状态带用它显示实时盈亏，
         # 和峰值 peak_pnl 一起看就能当场判断「是不是摸到过门槛又吐回去」。
         "float_pnl": float_pnl,

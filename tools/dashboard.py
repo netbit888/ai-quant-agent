@@ -559,6 +559,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/advice": self._post_advice,
             "/api/autotrade/start": self._post_autotrade_start,
             "/api/autotrade/prefs": self._post_autotrade_prefs,
+            "/api/trade_label": self._post_trade_label,
             "/api/autotrade/stop": self._post_autotrade_stop,
             "/api/autotrade/ack": self._post_autotrade_ack,
             "/api/autotrade/signal": self._post_autotrade_signal,
@@ -616,6 +617,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         self._json(200, payload)
+
+    def _post_trade_label(self, body: dict) -> None:
+        """给一笔单打标签：这笔为什么进、走的哪套打法。
+
+        纯记录层——不挂单、不拦单、不动仓位。`clear=true` 撤销标签。
+        校验全在 `live.labels.set_label` 里（regime 与 tag 必须成套），
+        这里只负责把它翻成 400/200：**不在路由层写第二份合法值清单**，
+        否则加一个标签要改两个地方，漏一处就是"界面能选、保存报错"。
+        """
+        from live import labels
+
+        account = str(body.get("account") or "").strip() or None
+        if body.get("clear"):
+            cleared = labels.clear_label(body.get("ticket"), account)
+            self._json(200, {"ok": True, "cleared": bool(cleared), "label": None})
+            return
+        try:
+            item = labels.set_label(body.get("ticket"), body.get("regime"),
+                                    body.get("tag"), account,
+                                    note=str(body.get("note") or ""))
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._json(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._json(200, {"ok": True, "label": item})
 
     def _post_autotrade_prefs(self, body: dict) -> None:
         """记住面板上的交易参数（品种 / 模式 / 间隔 / 纸面演练）。

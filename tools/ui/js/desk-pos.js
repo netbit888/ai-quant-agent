@@ -28,6 +28,9 @@ function rulerTop(tp, hi) {
 }
 
 function renderPos(a, p, mp) {
+  // 人工标签胶囊（2026-11-18）。放在这里是因为这一块每秒重绘一次、
+  // 且 p/mp 的取舍逻辑（程序单优先）只在这一处有；标签本身在 desk-tag.js。
+  renderTagChip(a, p, mp);
   const nowS = serverNow(a);
   const plan = p ? (p.plan || 'range') : '';
   const tp = Number((plan === 'trend' ? a.tp_min_trend : a.tp_min_usd) || 0);

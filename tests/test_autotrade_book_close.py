@@ -33,6 +33,10 @@ COMMON_KEYS = {
     "ts", "kind", "ticket", "direction", "pnl", "p_up", "hit", "held_sec",
     "peak_pnl", "peak_ts", "plan", "atr", "entry_reason",
     "atr_peak", "t3", "t5", "burst",
+    # 人工标签快照（2026-11-18）：三条路都要带。缺了这一格，"走早了是执行
+    # 问题还是打法本来如此"在人工平仓/清仓的单子上就永远分不开——
+    # 而那两批正是最需要归因的。
+    "label",
     "reason", "source", "dry_run",
 }
 

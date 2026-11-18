@@ -237,6 +237,9 @@
     display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--border);
     border-radius: var(--r-md); padding: var(--sp3) var(--sp4);
+    /* 标签浮层的定位基准（2026-11-18）。浮层挂在这个面板内部，
+       不另起弹窗：做单时视线就在这几行数字上。 */
+    position: relative;
   }
   .pos-head { display: flex; align-items: baseline; gap: var(--sp2); margin-bottom: var(--sp2); }
   .pos-side { font-size: var(--fs-8); font-weight: 700; line-height: 1.1; }
@@ -262,6 +265,73 @@
     color: var(--gold-lit); border-color: rgba(240,180,41,.5);
     background: rgba(240,180,41,.1); font-weight: 600;
   }
+
+  /* ---- 人工标签（2026-11-18）----
+     为什么做成头行的小胶囊而不是一行表单：1120×720 下持仓面板已经贴底，
+     任何新增行都会被截断。未标时用金色虚线边框——它要能被一眼看见
+     （漏标的单在复盘里等于没有入场理由），但不闪烁：常驻闪烁在做单时
+     是干扰，不是提醒。 */
+  .pos-tag {
+    font-size: var(--fs-1); padding: 1px 6px; border-radius: var(--r-xs);
+    border: 1px solid var(--border); background: none; color: var(--dim);
+    white-space: nowrap; cursor: pointer; font-family: inherit;
+    max-width: 132px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pos-tag:hover { border-color: var(--border-hi); color: var(--fg); }
+  .pos-tag.todo {
+    color: var(--gold-lit); border-color: rgba(240,180,41,.45);
+    border-style: dashed; background: rgba(240,180,41,.07);
+  }
+  .pos-tag.todo:hover { background: rgba(240,180,41,.16); }
+  .pos-tag.on { color: var(--muted); border-color: var(--border-hi); }
+  .pos-tag.on.trend { color: var(--gold-lit); border-color: rgba(240,198,116,.4); }
+
+  .tagpop {
+    /* top 避开头行：浮层压住胶囊本身时，用户看不到自己点的是哪一笔的标签。
+       44px = 头行高度 + 一个间距（实测 1120 布局下右栏约 400px）。 */
+    position: absolute; right: var(--sp4); top: 44px; z-index: 60;
+    /* 面板在 1200 以下会变窄，写死宽度会顶到边框外 */
+    width: min(276px, calc(100% - var(--sp4) * 2));
+    max-height: 62vh; overflow-y: auto;
+    background: var(--panel-2, var(--panel));
+    border: 1px solid var(--border-hi); border-radius: var(--r-md);
+    box-shadow: 0 10px 28px rgba(0,0,0,.45); padding: var(--sp3);
+    display: flex; flex-direction: column; gap: var(--sp2);
+  }
+  .tagpop.hidden { display: none; }
+  .tagpop-hd { display: flex; align-items: baseline; gap: var(--sp2); }
+  .tagpop-hd b { font-size: var(--fs-2); font-weight: 600; }
+  .tagpop-hd .sub { font-size: var(--fs-1); color: var(--dim); }
+  .tagpop-hd .x {
+    margin-left: auto; background: none; border: 0; color: var(--dim);
+    font-size: var(--fs-6); line-height: 1; cursor: pointer; padding: 0 2px;
+  }
+  .tagpop-hd .x:hover { color: var(--fg); }
+  .tagpop-body { display: flex; flex-direction: column; gap: var(--sp2); }
+  .taggrp-k {
+    font-size: var(--fs-1); color: var(--dim); margin-bottom: 4px;
+    letter-spacing: .3px;
+  }
+  /* 2×2 而不是 flex-wrap：4 个标签在 276px 里挤成 3+1 很难看，
+     而固定两列宽度稳定、字也不会被压成两行。 */
+  .tagopts { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .tagopt {
+    font-size: var(--fs-1); padding: 3px 8px; border-radius: var(--r-xs);
+    border: 1px solid var(--border); background: none; color: var(--muted);
+    cursor: pointer; font-family: inherit; white-space: nowrap;
+  }
+  .tagopt:hover { border-color: var(--border-hi); color: var(--fg); }
+  .tagopt.on {
+    color: var(--gold-lit); border-color: rgba(240,180,41,.55);
+    background: rgba(240,180,41,.12); font-weight: 600;
+  }
+  .tagopt:disabled { opacity: .5; cursor: default; }
+  .tagpop-ft {
+    display: flex; align-items: center; gap: var(--sp2);
+    font-size: var(--fs-1); color: var(--dim);
+  }
+  .tagpop-ft .hint { flex: 1 1 auto; min-width: 0; }
+  .tagpop-ft .tag-clear { font-size: var(--fs-1); padding: 2px 6px; }
   /* 四个数字排一行（原来 2×2 要两行 78px）。上下分栏之后面板是整幅宽度，
      再用 space-between 会把四个数拉到两个极端（中间空一米），
      改成左对齐 + 固定间距。 */

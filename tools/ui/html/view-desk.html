@@ -183,6 +183,12 @@
           <!-- 脉冲浮盈（2026-11-13）：趋势单专有。放在头行右端，**不新增行高**——
                持仓面板在 1120×720 下已经贴底，多一行就被截断。 -->
           <span class="pos-burst hidden" id="posBurst">—</span>
+          <!-- 人工标签（2026-11-18）：这笔为什么进。
+               放在头行末端，**不新增行高**（1120×720 下面板已贴底）。
+               程序单和手工单共用这一个入口：程序能记下价格和峰值，
+               记不下开仓时人脑子里那句话，而那句话决定复盘怎么归因。 -->
+          <button class="pos-tag hidden" id="posTag" onclick="toggleTagPicker()"
+                  title="这笔为什么进。标签只用于复盘归因，不影响任何交易动作。">待标签</button>
         </div>
         <div class="pos-rows">
           <div class="prow"><span class="k">开仓价</span><span class="v idle" id="posEntry">—</span></div>
@@ -223,6 +229,32 @@
           <div class="gate-led" id="ledTp"><i></i><span>止盈门槛</span><span class="gv" id="ledTpV"></span></div>
           <div class="gate-led" id="ledStale"><i></i><span>停滞唤醒</span><span class="gv" id="ledStaleV"></span></div>
           <div class="gate-led" id="ledHold"><i></i><span>持仓上限</span><span class="gv" id="ledHoldV"></span></div>
+        </div>
+
+        <!-- 标签选择浮层（2026-11-18）。绝对定位挂在持仓面板内部，
+             不占布局高度、不遮挡决策环。按钮由 JS 按后端下发的 label_tags
+             生成——**前端不写死标签表**，否则加一个标签要改两处。
+             趋势 / 震荡分开列：同一句"走早了"在两种打法里归因完全不同。 -->
+        <div class="tagpop hidden" id="tagPop" role="dialog" aria-label="给这笔单打标签">
+          <div class="tagpop-hd">
+            <b>这笔为什么进</b>
+            <span class="sub">趋势 / 震荡分开算</span>
+            <button class="x" onclick="closeTagPicker()" title="关掉">×</button>
+          </div>
+          <div class="tagpop-body">
+            <div class="taggrp">
+              <div class="taggrp-k">趋势单</div>
+              <div class="tagopts" id="tagOptsTrend"></div>
+            </div>
+            <div class="taggrp">
+              <div class="taggrp-k">震荡单</div>
+              <div class="tagopts" id="tagOptsRange"></div>
+            </div>
+          </div>
+          <div class="tagpop-ft">
+            <span class="hint" id="tagPopHint">选完立刻记下 · 平仓后进归因统计</span>
+            <button class="btn-ghost tag-clear" id="tagClear" onclick="clearTag()">清除</button>
+          </div>
         </div>
       </div>
     </div>
