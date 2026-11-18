@@ -158,10 +158,10 @@ function drawArea(svgId, values, colorClass, color, opt) {
 
   // 多系列（opt.series）是可选增强；没传时退化为单系列，行为与老版一致。
   // series 顺序 = 绘制顺序（后画的在上层）。
-  const hasEnh = !!(opt && (opt.series || opt.ts || opt.hover));
+  const hasEnh = !!(opt && (opt.series || opt.hover));
   const series = hasEnh && opt.series && opt.series.length
     ? opt.series
-    : [{ values, colorClass, color, area: true, ts: hasEnh ? opt.ts : null }];
+    : [{ values, colorClass, color, area: true }];
   const primary = series.find(s => s.primary) || series[series.length - 1];
 
   // Y 轴范围取所有系列的并集，但不再强制含 0（见 axisDomain）
@@ -171,20 +171,32 @@ function drawArea(svgId, values, colorClass, color, opt) {
   // 面积填充/零线的基线：0 在窗口外时落到绘图区边缘，不让路径拖出画布
   const yBase = Math.max(padT, Math.min(H - padB, y(0)));
 
-  // X 映射：系列带 ts（且首尾可分）时按时间对齐——20 笔线和 100 笔线点数不同、
-  // 终点都是最近一笔，按索引映射会把两条线的日期对错位；时间映射才能纵向对齐。
-  let tsMin = Infinity, tsMax = -Infinity;
-  for (const s of series) {
-    if (s.ts && s.ts.length === s.values.length) {
-      if (s.ts[0] < tsMin) tsMin = s.ts[0];
-      if (s.ts[s.ts.length - 1] > tsMax) tsMax = s.ts[s.ts.length - 1];
+  // X 映射只有两种：默认按索引等距（「第 N 笔」天然等价的图，如权益/余额），
+  // 或 opt.xseq 笔序模式——横轴 = 距最新一笔的笔序（0 = 最新，负数往左）。
+  //
+  // 这里曾经有过第三种「按墙钟时间」模式，已删。滚动期望是「每笔」的统计量，
+  // 时间轴会让交易密度决定曲线陡不陡：该账户 49 笔跨 375 小时，97% 的宽度落在
+  // 没交易的空窗里，密集区被压成垂直断崖（同一个 R 变化，视觉坡度差 10 倍以上）。
+  // 那不是「另一种读法」，是失真——要按时间看，另做「每日笔数/盈亏」柱状图，
+  // 每根柱的宽度就是一天，天然等距，不存在这个问题。
+  //
+  // 笔序模式下两条线共用一个域、右端对齐（同一尺度才能比斜率），不各自归一化。
+  const seqMode = !!(opt && opt.xseq);
+  let dMin = Infinity, dMax = -Infinity;
+  if (seqMode) {
+    for (const s of series) {
+      const arr = s.seq;
+      if (arr && arr.length === s.values.length) {
+        if (arr[0] < dMin) dMin = arr[0];
+        if (arr[arr.length - 1] > dMax) dMax = arr[arr.length - 1];
+      }
     }
   }
-  const timeMode = tsMax > tsMin;
+  const seqDomain = seqMode && dMax > dMin;
   const xIdx = (i, n) => n === 1 ? (padL + W - padR) / 2
               : padL + i * (W - padL - padR) / (n - 1);
-  const xOfTs = t => padL + (t - tsMin) / (tsMax - tsMin) * (W - padL - padR);
-  const xAt = (s, i) => (timeMode && s.ts) ? xOfTs(s.ts[i]) : xIdx(i, s.values.length);
+  const xOfD = t => padL + (t - dMin) / (dMax - dMin) * (W - padL - padR);
+  const xAt = (s, i) => (seqDomain && s.seq) ? xOfD(s.seq[i]) : xIdx(i, s.values.length);
 
   // 网格：刻度落在整齐值上；刻度数量跟高度走（小图 4 格，最大化后最多 8 格），
   // 但窗口本身只由数据决定——同一份数据在大小图上形状必须一致。
@@ -212,20 +224,22 @@ function drawArea(svgId, values, colorClass, color, opt) {
     svg.appendChild(svgEl('path', { d: lp, class: s.colorClass }));
   }
 
-  // X 轴日期刻度：只在时间模式下画，放底部 padB 空带里
-  if (timeMode) {
-    const k = (opt && opt.ticks) || 5;
-    const p2 = n => String(n).padStart(2, '0');
+  // X 轴刻度：放底部 padB 空带里。只有笔序模式需要刻度（索引轴没有可读的横轴语义）。
+  if (seqDomain) {
+    // 左端标这条线一共几笔，右端固定「最新」，中间只留笔序号。
+    // 左端不写「最早 N 笔」——那段文字会一直顶到 Y 轴刻度上（两者水平间距只有
+    // 4px，Y 轴刻度又在同一屏底部），缩到「N 笔」才留得下呼吸位。
+    const k = (opt && opt.ticks) || 4;
     for (let j = 0; j < k; j++) {
-      const t = tsMin + (tsMax - tsMin) * j / (k - 1);
-      const tx = xOfTs(t);
-      const d = new Date(t * 1000);
+      const t = dMin + (dMax - dMin) * j / (k - 1);
+      const tx = xOfD(t);
       svg.appendChild(svgEl('line', { x1: tx, x2: tx, y1: H - padB, y2: H - padB + 4, class: 'grid-line' }));
       const txt = svgEl('text', {
         x: tx, y: H - 6, class: 'lbl',
         'text-anchor': j === 0 ? 'start' : (j === k - 1 ? 'end' : 'middle')
       });
-      txt.textContent = `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+      txt.textContent = j === 0 ? `${Math.round(-dMin) + 1} 笔`
+        : (j === k - 1 ? '最新' : String(Math.round(t)));
       svg.appendChild(txt);
     }
   }
@@ -257,7 +271,7 @@ function drawArea(svgId, values, colorClass, color, opt) {
         // 上界用画布顶（10）而不是 padT：axisDomain 只留 12% 的白，约 12px，
         // 放不下「点上 8px + 11px 字」，一律翻面就会把峰顶数字压到曲线上。
         // 下界要给底部日期行让位（时间模式下日期字在 H-6）。
-        const bottom = timeMode ? H - padB - 2 : H - 12;
+        const bottom = seqDomain ? H - padB - 2 : H - 12;
         let ly = up ? cy - 8 : cy + 14;
         if (up && ly < 10) ly = cy + 14;
         if (!up && ly > bottom) ly = cy - 8;

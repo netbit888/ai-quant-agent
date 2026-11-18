@@ -19,7 +19,7 @@
     <button class="btn-ghost btn-mute" id="atBarMute" onclick="toggleMute()"
             title="AI 信号/成交提示音开关。静音时弹窗、置顶、标题闪烁照常。">提示音：开</button>
     <button class="btn-ghost btn-danger" id="atBarStop" onclick="stopAutoTrade()"
-            title="急停（吸顶带这一颗滚到哪都点得到）：停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）。和下方 AI 卡片里的「关闭并清仓」是同一个动作，点哪个都一样。">关闭并清仓</button>
+            title="急停：停 AI，并市价平掉账户上所有持仓（含手动开的单）。和下面操作条那颗是同一个动作。">关闭并清仓</button>
   </div>
   <div class="acct" id="acct">
     <div class="who">
@@ -69,7 +69,7 @@
       <div class="at-head-acts">
         <button class="btn-ghost" id="atStart" onclick="startAutoTrade()">开始做单</button>
         <button class="btn-ghost btn-danger" id="atStop" onclick="stopAutoTrade()"
-                title="收工：停下 AI 线程，并把账户上所有持仓市价平掉（含手动开的单）。和顶部吸顶带的那一颗是同一个动作。">关闭并清仓</button>
+                title="停 AI，并市价平掉所有持仓（含手动开的单）。和顶部吸顶带那颗是同一个动作。">关闭并清仓</button>
         <button class="btn-ghost" id="atCurtainBtn" onclick="enterTradingFullscreen()"
                 title="全屏铺一块红字提醒，防止在做单时误操作这台电脑">全屏提醒</button>
       </div>
@@ -127,7 +127,7 @@
               <span style="left:50%">0.50</span><span style="left:70%">0.70</span>
               <span style="left:100%">1.00</span>
             </div>
-            <div class="ring-why" id="ringWhy">还没跑过。点「开始做单」后这一格会显示模型这一轮的理由原话。</div>
+            <div class="ring-why" id="ringWhy">还没跑过。开跑后这里显示模型这一轮的理由原话。</div>
             <div class="ring-adv hidden" id="ringAdv">
               <span class="txt" id="ringAdvTxt"></span>
             </div>

@@ -75,9 +75,9 @@ function renderStatusBar(a) {
   if (!a || !a.ok) {
     state = '数据读取失败';
   } else if (a.running) {
-    // 辅助模式必须一眼看出来：同样是「运行中」，真实做单会自己下单，
-    // 辅助模式在等你看弹窗——这两种状态的"现在需要你做什么"完全不同。
-    state = a.assist ? (a.dry_run ? '运行中 · 辅助演练' : '运行中 · 辅助')
+    // 确认下单模式必须一眼看出来：同样是「运行中」，真实模式会自己下单，
+    // 确认下单在等你看弹窗——这两种状态的"现在需要你做什么"完全不同。
+    state = a.assist ? (a.dry_run ? '运行中 · 确认演练' : '运行中 · 确认下单')
                      : (a.dry_run ? '运行中 · 纸面' : '运行中 · 真实');
     cls = (a.dry_run && !a.assist) ? 'on' : 'warn';
   } else if (a.stale) {

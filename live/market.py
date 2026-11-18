@@ -164,13 +164,36 @@ def _quote(symbol: str) -> tuple[float, float] | None:
         return None
 
 
+_LAST_BARS_ERR = ""
+
+
+def last_bars_error() -> str:
+    """最近一次取 K 线失败的原因。成功取到非空数据后清空。
+
+    为什么要留这个（2026-11-18）：`_bars` 以前 `except Exception: return []`，
+    把「品种不存在」「终端没连」「历史还没同步」三种完全不同的故障压成同一个
+    空列表。换账户后品种名会变（XAUUSDm → XAUUSDc），那时面板上只有一句
+    "拿不到行情"，而真正的原因一句 `ValueError: 品种不存在` 谁都看不到。
+    """
+    return _LAST_BARS_ERR
+
+
 def _bars(symbol: str, tf: str, count: int) -> list[dict]:
     # 用 get_rates_live：不 initialize、不 shutdown。
     # 老写法 mt5_session() 会在退出时 shutdown，把整个面板进程的连接一起关掉，
     # 下一轮就只剩「拿不到报价」。
+    global _LAST_BARS_ERR
     try:
         from mt5.bridge import get_rates_live
 
-        return get_rates_live(symbol, tf, count)
-    except Exception:  # noqa: BLE001
+        rows = get_rates_live(symbol, tf, count)
+        if rows:
+            _LAST_BARS_ERR = ""
+        elif not _LAST_BARS_ERR:
+            _LAST_BARS_ERR = f"{symbol} {tf} 返回 0 根（历史还没同步？）"
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        # 异常本身仍要吞掉：这条路径在每轮决策里跑，抛出去会带走整个线程。
+        # 但原因必须留下，面板在"无行情"时要能显示它。
+        _LAST_BARS_ERR = f"{type(exc).__name__}: {exc}"[:200]
         return []

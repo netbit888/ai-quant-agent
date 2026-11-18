@@ -117,6 +117,21 @@ function renderGateLeds(a, p) {
   }
   put('atGateTpV', tp > 0 ? fmt(tp, 2) + ' ' + mu : '关闭');
   if ($('atGateTp')) $('atGateTp').className = 'at-gate tp' + (tp > 0 ? '' : ' off');
+  // 脉冲锁利（2026-11-13）：线宽和门槛都从后端来，不在前端写死 1.5 / 5。
+  // 确认下单模式下这条规则整体不生效（只弹窗），所以不能写「关闭」——写「不适用」
+  // 才对得上 _lock_applies 的口径。
+  const lockOn = !!a.lock_profit;
+  const lockL = Number(a.lock_atr || 0);
+  const lockMin = Number(a.lock_min_atr || 0);
+  const lockSl = (p && Number(p.lock_sl || 0) > 0) ? Number(p.lock_sl) : 0;
+  put('atGateLockV', !lockOn ? '关闭'
+    : (a.assist ? '确认下单·只弹窗'
+        : (lockL > 0
+            ? '峰值 − ' + fmt(lockL, 1) + ' ATR'
+              + (lockSl > 0 ? ' → SL ' + fmt(lockSl, 3) : '')
+            : '—')));
+  put('atGateLockMin', lockMin > 0 ? fmt(lockMin, 0) : '5');
+  if ($('atGateLock')) $('atGateLock').className = 'at-gate' + (lockOn ? '' : ' off');
   const staleSec = Number(a.stale_sec || 0);
   put('atGateStaleV', staleOn ? '每 ' + fmt(Math.round(staleSec / 60), 0) + ' 分钟' : '关闭');
   if ($('atGateStale')) $('atGateStale').className = 'at-gate' + (staleOn ? '' : ' off');

@@ -13,8 +13,8 @@ function atLiveMode() {
 function atAssistMode() {
   return atMode() === 'assist';
 }
-/* 辅助模式下是否「演练」（点同意也只记账）。默认勾上吗？
-   不。默认不勾 = 辅助就是真单，这是用户选第三档时的本意；
+/* 确认下单模式下是否「演练」（点同意也只记账）。默认勾上吗？
+   不。默认不勾 = 确认下单就是真单，这是用户选第三档时的本意；
    想演练要自己勾，勾错了最多白弹几次窗，不会以为是练手结果下了真单。 */
 function atAssistPaper() {
   return !!(atAssistMode() && $('atAssistPaper') && $('atAssistPaper').checked);
@@ -44,7 +44,7 @@ function atLots() {
 function updateModeHint() {
   const el = $('atModeHint');
   if (!el) return;
-  // 「纸面演练」复选框只在辅助模式下露出
+  // 「确认演练」复选框只在确认下单模式下露出
   const wrap = $('atAssistPaperWrap');
   if (wrap) wrap.style.display = atAssistMode() ? 'flex' : 'none';
   const iv = atIntervalSec();
@@ -56,10 +56,10 @@ function updateModeHint() {
   const trips = Math.min(calls, 60);
   const perTrip = atSpreadCostUsd(lots);
   if (atAssistMode()) {
-    // 辅助模式必须写清两件事：等的是你，以及**硬止损不等你**。
+    // 确认下单模式必须写清两件事：等的是你，以及**硬止损不等你**。
     // 不写后半句，用户会以为"人确认"包含"人决定什么时候止损"。
     const paper = atAssistPaper();
-    el.textContent = `辅助${paper ? '·演练' : ''} · ${atSymbolLabel()} · 每 ${iv} 秒判断 · `
+    el.textContent = `确认下单${paper ? '·演练' : ''} · ${atSymbolLabel()} · 每 ${iv} 秒判断 · `
       + `${lots} 手 · `
       + `开/平仓前弹窗等你点（入场 90 秒 / 出场 120 秒，超时按默认处理）· `
       + `硬止损与持仓上限由程序直接执行${paper ? ' · 不发真单' : ''}`;
@@ -121,7 +121,7 @@ function fillSymbolOptions(a) {
 
 /* 交易参数的「上次选择」回填（品种在 fillSymbolOptions 里单独处理）。
 
-   只回填一次。之后每 1 秒的轮询不再碰控件——用户刚点完「AI 辅助」、保存请求
+   只回填一次。之后每 1 秒的轮询不再碰控件——用户刚点完「确认下单」、保存请求
    还在路上时，轮询拿到的还是旧值，每次都覆盖就会变成「点了自己跳回去」。
 
    期间若已经在跑（running），renderAutoTrade 走的是另一条分支：按实际在跑的
@@ -152,7 +152,7 @@ function applyPrefs(a) {
   const mode = p.mode || 'live';
   const setChecked = (id, on) => { const e = $(id); if (e) e.checked = !!on; };
   // 先全部落定再 updateModeHint：三条 radio 是同一组，逐条改会让 hint 拿到
-  // 中间态（比如先勾了纸面、又勾辅助，hint 会闪一下纸面）。
+  // 中间态（比如先勾了纸面、又勾确认下单，hint 会闪一下纸面）。
   if (mode === 'assist') {
     setChecked('atModeAssist', true);
     setChecked('atAssistPaper', !!p.assist_paper);
@@ -250,7 +250,7 @@ async function startAutoTrade() {
   try {
     ok = await confirmApiCall({
       title: assist
-        ? `AI 辅助${paper ? '（演练）' : ''}：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`
+        ? `确认下单${paper ? '演练' : ''}：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`
         : (live ? `真实下单：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`
                 : `纸面：${atSymbolLabel()} ${lots} 手，每 ${iv} 秒判断一次，开始？`),
       desc: assist
@@ -262,17 +262,18 @@ async function startAutoTrade() {
                    : `当前会向券商发真实市价单（${lots} 手）。`)
           + `每小时约 ${calls} 次模型调用。`
         : (live
-            ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，每笔 ${lots} 手，不挂止损止盈。`
+            ? `会在 ${atSymbolLabel()}（${sym}）上向券商发真实市价单，每笔 ${lots} 手；`
+              + `硬止损由程序市价平，同一条线也挂券商端（价距一致）；震荡单另挂 TP，趋势单不挂；保本与锁利会把券商端 SL 往上抬。`
               + `每小时约 ${calls} 次模型调用；平仓后冷却 60 秒、同向重进 180 秒，往返上限 60 笔/小时`
               + `（模型可跳过，实际通常更少），`
               + `最坏点差约 ${perTrip == null ? '未知'
                   : fmt(60 * perTrip * AT_FACTOR, 2) + ' ' + AT_MONEY}。`
             : `只调模型、只在本地记账，不发单给券商。品种 ${atSymbolLabel()}，`
               + `每小时约 ${calls} 次模型调用。`),
-      cost: assist ? (paper ? '辅助演练 + 模型调用' : '弹窗确认 + 真实下单')
+      cost: assist ? (paper ? '确认演练 + 模型调用' : '弹窗确认 + 真实下单')
                    : (live ? '真实下单 + 模型调用' : '仅模型调用'),
-      okText: assist ? (paper ? '开始（辅助演练）' : '开始（辅助·真单）')
-                     : (live ? '真实开始' : '开始（纸面）'),
+      okText: assist ? (paper ? '开始（确认演练）' : '开始（确认下单）')
+                     : (live ? '开始（真实）' : '开始（纸面）'),
     });
   } catch (e) {
     // 弹窗本身炸了也要让用户看见，否则又是「点了没反应」
@@ -297,8 +298,8 @@ async function startAutoTrade() {
     if (!j.ok) {
       atSay(atErrHtml(j.error), 'err');
     } else {
-      const what = j.assist ? (j.dry_run ? '（辅助演练）' : '（辅助·真单）')
-                            : (j.dry_run ? '（纸面）' : '（真实做单）');
+      const what = j.assist ? (j.dry_run ? '（确认演练）' : '（确认下单）')
+                            : (j.dry_run ? '（纸面）' : '（真实）');
       atSay(`<b>已启动${what}</b>：${esc(j.symbol)} ${j.lots} 手，
              每 ${j.interval_sec} 秒判断一次。`
              + (j.assist ? '有信号会弹窗，<b>硬止损不等你</b>。'

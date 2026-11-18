@@ -187,6 +187,7 @@ from live.market import (  # noqa: F401  （重新导出：老路径 autotrade._
     _positions,
     _quote,
     _symbol_contract,
+    last_bars_error,
     price_dist_of,
 )
 from live.report import (  # noqa: F401  （重新导出：老路径 autotrade.symbol_options 继续可用）
@@ -2344,7 +2345,9 @@ def _attach_entry_sl(ex, cfg: Cfg, res: dict, direction: int,
         r = _try_protect(ex, ticket, sl, None)
     base = {"entry": entry, "dist": dist, "tries": int(r.get("tries") or 1)}
     if r.get("ok"):
-        out = {"ok": True, "sl": float(r.get("price") or sl), **base}
+        out = {"ok": True, "sl": float(r.get("price") or sl), **base,
+               # 实际成交手数（2026-11-18）：改单那次读持仓顺手带出来的。
+               "volume": float(r.get("volume") or 0.0)}
         if want_tp and not tp_err:
             out["tp"] = float(r.get("tp") or want_tp)
         if tp_err:
@@ -2411,6 +2414,42 @@ def _entry_tp_price(cfg: Cfg, res: dict, direction: int,
             "tp": entry + (1 if direction > 0 else -1) * dist}
 
 
+def _read_fill_volume(ex, cfg: Cfg, res: dict, sl_att: dict) -> float:
+    """成交后回读这笔的**真实手数**。读不到返回 0 = 不知道。
+
+    为什么需要（2026-11-18）：市价单可能只成交一部分（流动性不足 / 单笔上限），
+    而 `open_market` 的回执里只有 order 号、没有成交量。按配置手数记账的后果
+    不是"数字略偏"——`float_pnl`、`atr_pnl`、保本/锁利/止盈门槛全是金额口径，
+    实际手数只有一半时，价格走到一半就被判成"到线了"，提前离场。
+
+    两个来源，从便宜到贵：
+      1. `sl_attach.volume` —— 挂保护线时读持仓顺手带出来的（零额外请求）；
+      2. `ex.positions()` —— 挂线被跳过（sl_usd=0、价距落在点差里）时补一次。
+         这是读请求，不是交易请求，不受「每秒两个交易请求」限流。
+
+    返回 0 时调用方退回 `cfg.lots`：那是"不知道"，不是"成交了全部"，但比
+    让开仓作废或凭空猜一个数要好。
+    """
+    if cfg.dry_run:
+        return 0.0
+    ticket = int(res.get("order") or 0)
+    if ticket <= 0:
+        return 0.0
+    vol = float((sl_att or {}).get("volume") or 0.0)
+    if vol > 0:
+        return vol
+    fn = getattr(ex, "positions", None)
+    if not callable(fn):
+        return 0.0
+    try:
+        for p in fn() or []:
+            if int(p.get("ticket") or 0) == ticket:
+                return float(p.get("volume") or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return 0.0
+
+
 def send_open(cfg: Cfg, direction: int, plan: str | None = None) -> dict:
     """市价开仓，成交后挂券商端保护线。失败时 ok=False。
 
@@ -2447,6 +2486,7 @@ def send_open(cfg: Cfg, direction: int, plan: str | None = None) -> dict:
         sl_att = _attach_entry_sl(ex, cfg, res, direction,
                                   tp=tp_plan.get("tp") or None)
         res["sl_attach"] = sl_att
+        res["volume"] = _read_fill_volume(ex, cfg, res, sl_att)
         tp_px = float(sl_att.get("tp") or 0.0)
         res["tp_attach"] = {
             "ok": tp_px > 0.0,
@@ -2555,8 +2595,15 @@ def _stop(state: dict, reason: str, now: int, login=None) -> dict:
 def tick(cfg: Cfg, login=None, now: int | None = None,
          quote: tuple[float, float] | None = None,
          rows: list[dict] | None = None,
-         positions: list[dict] | None = None) -> dict:
+         positions: list[dict] | None = None,
+         stop_ev=None) -> dict:
     """跑一轮决策。所有外部依赖都可注入，方便在没有终端的机器上测。
+
+    `stop_ev` 是这一代做单线程的停止信号（`Worker.stop()` 会 set 它）。
+    只在下单口那一处检查一次：它解决的是「清仓和旧 tick 并发」——
+    tick 已经过了所有闸门、正要发单时用户点了「关闭并清仓」，那一轮必须
+    放弃下单，否则清仓之后会多出一笔没人管的仓（见 `stop()` 里的注释）。
+    默认 None = 不检查（CLI、单测）。
 
     **异常在这一层兜住并落盘**，不再往上抛。以前全靠 `Worker._loop` 兜：
     tick 中途炸掉时流水可能已经写了一行、state 却没写，面板显示的还是上一轮
@@ -2571,7 +2618,8 @@ def tick(cfg: Cfg, login=None, now: int | None = None,
     # 以为空仓再开一单。
     live_state: list[dict] = []
     try:
-        return _tick_body(cfg, login, now, quote, rows, positions, live_state)
+        return _tick_body(cfg, login, now, quote, rows, positions, live_state,
+                          stop_ev=stop_ev)
     except Exception as exc:  # noqa: BLE001
         row = {"ts": now, "kind": "error",
                "reason": f"{type(exc).__name__}: {exc}"}
@@ -2588,7 +2636,8 @@ def _tick_body(cfg: Cfg, login, now: int,
                quote: tuple[float, float] | None,
                rows: list[dict] | None,
                positions: list[dict] | None,
-               live_state: list[dict] | None = None) -> dict:
+               live_state: list[dict] | None = None,
+               stop_ev=None) -> dict:
     """一轮决策的实际实现（now 已由 tick 归一，出口一律走 _finish）。
 
     `live_state` 是给外层异常兜底用的：这里 load 出来的 state 引用塞进去，
@@ -2638,6 +2687,19 @@ def _tick_body(cfg: Cfg, login, now: int,
     # （visible_bars 在 build_entry_prompt / _structure 里各截一次）。
     bars = rows if rows is not None else _bars(
         cfg.symbol, cfg.tf, max(int(cfg.bars or 0), MA_PERIOD + 6))
+    if not bars and not state.get("position"):
+        # 一根都拿不到 = 这一轮没有任何可分析的东西（2026-11-18）。
+        # 以前会照样拼提示词（14 根的位置全是空的）去问模型，模型只能瞎猜，
+        # 而 `_bars` 又把异常吞成空列表——面板上只剩"拿不到行情"，看不出
+        # 是品种名配错（换账户后 XAUUSDm / XAUUSDc）还是终端没连。
+        #
+        # **有持仓时不在这里返回**：出场闸门（硬止损/超时）不依赖 K 线，
+        # 为了一条报错把这一轮的止损检查跳掉，是把提示做到了保命之前。
+        err = last_bars_error()
+        row = {"ts": now, "kind": "skip",
+               "reason": "拿不到 K 线" + (f"（{err}）" if err else ""),
+               "bars_error": err}
+        return _finish(state, row, login, ts=now)
 
     pos = state.get("position")
     # 纸面仓位只存在于 state 里，券商那边什么都没有。拿它去和 MT5 持仓比对
@@ -3264,6 +3326,20 @@ def _tick_body(cfg: Cfg, login, now: int,
 
     # plan 显式传进去：震荡单要挂券商端硬止盈（见 `_attach_entry_tp`），
     # 趋势单不挂。这个值必须在发单之前就定下来，出场参数也锁同一个值。
+    #
+    # 下单口是**唯一**检查停止信号的地方（2026-11-18）。清仓和旧 tick 并发时，
+    # 这一轮可能已经把模型问完、闸门全过，再发出去就是"清仓之后又开一笔"——
+    # state 已被清空，这笔成了幽灵仓。检查放在 `send_open` 之前一格，
+    # 前面所有开销（模型调用）都白花了，但这是唯一能保证不反向开仓的位置。
+    if stop_ev is not None and stop_ev.is_set():
+        row = {"ts": now, "kind": "skip", "p_up": p_up, "direction": direction,
+               "prog_dir": prog_dir, "agree": agree, "feat": feat,
+               "veto": "stopped",
+               "reason": "做单线程已收到停止信号，这一笔不下单（清仓优先）"}
+        if sig_id:
+            row["signal_id"] = sig_id
+        return _finish(state, row, login, ts=now)
+
     res = send_open(cfg, direction, regime)
     if not res.get("ok"):
         row = {"ts": now, "kind": "open_failed", "p_up": p_up, "direction": direction,
@@ -3288,14 +3364,29 @@ def _tick_body(cfg: Cfg, login, now: int,
     tp_att = res.get("tp_attach") or {}
     tp_broker = (float(tp_att.get("tp") or 0.0)
                  if tp_att.get("ok") else 0.0)
+    # ---- 实际成交手数（2026-11-18）----------------------------------
+    # 市价单可能只成交一部分（流动性不足 / 单笔上限），而 `open_market` 的
+    # 回执里只有 order 号，没有成交量。按配置手数记账的后果不是"数字略偏"：
+    # `float_pnl`、`atr_pnl`、保本/锁利/止盈门槛全是"金额"口径，实际手数只有
+    # 一半时，价格走到一半就被判成"到线了"，提前离场。
+    # 读不到成交量时退回配置手数——这是"不知道"，不是"成交了全部"，但相比
+    # 直接崩掉或开仓作废，退回旧行为是唯一不制造新事故的选择。
+    # 价距（price_dist_of）与手数无关，所以券商端 SL 的位置不受影响。
+    fill_lots = (float(cfg.lots) if cfg.dry_run
+                 else float(res.get("volume") or 0.0))
+    lots_used = fill_lots if fill_lots > 0 else float(cfg.lots)
+    partial = (not cfg.dry_run and fill_lots > 0
+               and abs(fill_lots - float(cfg.lots)) > 1e-6)
     state["position"] = {
-        "ticket": ticket, "direction": direction, "lots": cfg.lots,
+        "ticket": ticket, "direction": direction, "lots": lots_used,
         "price_open": price, "opened_at": now, "p_up": p_up,
         "entry_reason": decision.get("reason"), "dry_run": cfg.dry_run,
         # 开仓时是不是辅助模式——只用来决定脉冲弹不弹（全自动模式下没人盯屏，
         # 弹窗是干扰）。锁利本身两种模式都做，不看这个字段。记进 pos 而不是
         # 每轮读 cfg：面板中途切模式不该影响一笔已经开出去的仓。
         "assist": bool(cfg.assist),
+        # 实际成交手数（2026-11-18）。取不到成交量时等于 cfg.lots——旧行为。
+        "lots_cfg": float(cfg.lots),
         # 分歧记账：程序建议方向 + 模型是否自称同意。
         # 事后按 (prog_dir, direction) 分格算期望，谁该拥有判断权让数据判。
         "prog_dir": prog_dir, "agree": agree,
@@ -3311,7 +3402,7 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 1 个 ATR 折成这笔单的浮盈（账户货币）。与 atr 同理开仓锁死：
         # 脉冲判据（_mark_burst）要用它，中途重算会让同一笔仓前后两套门槛。
         "atr_pnl": _atr_pnl_unit(float((feat or {}).get("atr") or 0.0),
-                                 cfg.lots, cfg.symbol),
+                                 lots_used, cfg.symbol),
         # 辅助模式：这笔是人工确认进来的。平仓行要用它标 exec_by。
         "signal_id": sig_id, "exec_by": exec_by,
         # 券商端有没有这条硬止损线（2026-11-09）。0 = 没挂上，这笔只有程序
@@ -3324,6 +3415,20 @@ def _tick_body(cfg: Cfg, login, now: int,
         # 它在「仓在终端消失」的判定里与 sl_broker 同权：只有 reason=5 且
         # 这个字段非 0 才记止盈成交，否则一律按人工平仓（见 detected 分支）。
         "tp_broker": tp_broker,
+        # 挂载失败的原因必须进 pos，不能只留在流水里（2026-11-18）。
+        #
+        # 持仓面板（`desk-pos.js`）在 `sl_broker==0` 时要显示「券商端未挂（原因）」，
+        # 它读的就是这两个字段——在此之前 pos 里根本没有它们，于是"改单失败、
+        # 这笔只有 5 秒轮询在守"这件事在页面上一个字都没有。这是全系统唯一
+        # 一条「失保且无提示」的路径：进程一崩，券商那边没有任何止损。
+        #
+        # 纸面单写空串：它本来就不该有券商端保护，写成"未挂"等于每笔纸面单
+        # 都亮一个假警报，真正的失保就被淹了。
+        "sl_err": ("" if cfg.dry_run or sl_att.get("ok")
+                   else str(sl_att.get("reason") or sl_att.get("skipped") or "未知")),
+        "tp_err": ("" if (cfg.dry_run or not tp_att.get("wanted")
+                          or tp_att.get("ok"))
+                   else str(tp_att.get("reason") or tp_att.get("skipped") or "未知")),
     }
     state["trades"] = int(state.get("trades") or 0) + 1
     state["last_open_ts"] = now
@@ -3331,7 +3436,7 @@ def _tick_body(cfg: Cfg, login, now: int,
 
     row = {
         "ts": now, "kind": "open", "ticket": ticket, "direction": direction,
-        "lots": cfg.lots, "price": price, "p_up": p_up,
+        "lots": lots_used, "price": price, "p_up": p_up,
         "confidence": round(max(p_up, 1 - p_up), 4),
         "prog_dir": prog_dir, "agree": agree,
         # plan 冗余在 feat.regime 之外单列一行：统计工具按 kind=open 取 plan 时
@@ -3347,6 +3452,12 @@ def _tick_body(cfg: Cfg, login, now: int,
     }
     if not sl_att.get("ok"):
         row["sl_err"] = str(sl_att.get("reason") or sl_att.get("skipped") or "未知")
+    if partial:
+        # 只成交了一部分：`lots` 已经是实际量，这里把"配置量"也留下来。
+        # 不单独开一个 kind=partial_fill 行——按 ticket 反查 open 行就能看见，
+        # 而多一种 kind 会让所有按 kind 统计的工具都要跟着加分支。
+        row["partial_fill"] = True
+        row["lots_cfg"] = float(cfg.lots)
     # 止盈线只在「这个 plan 本来该有」时才写进流水：趋势单每笔都带一条
     # tp_err="trend_plan" 只会把真正该看的挂载失败淹掉。
     if tp_att.get("wanted"):
@@ -4943,7 +5054,7 @@ def run(cfg: Cfg, login=None) -> None:
 
     mode = "纸面（不发单）" if cfg.dry_run else "真实下单"
     if cfg.assist:
-        mode = f"AI 辅助（{mode}）"
+        mode = f"确认下单（{mode}）"
     align = (f"（对齐 K 线收盘，+{cfg.align_settle_sec:g} 秒）"
              if cfg.align_settle_sec > 0 else "（自由跑表，不对齐收盘）")
     # 「不挂 SL/TP」是 _attach_entry_sl 之前的说法。现在开仓成交后会往券商端挂
@@ -4953,7 +5064,7 @@ def run(cfg: Cfg, login=None) -> None:
     print(f"AI 交易员启动 | {cfg.symbol} 超短线 {cfg.lots} 手 | 每 {cfg.interval_sec} 秒决策{align} | "
           f"平仓后冷却 {cfg.cooldown_sec} 秒（同向 {cfg.cooldown_same_sec} 秒）| {sl_txt} | {mode}")
     if cfg.assist:
-        print("⚠ 辅助模式在命令行里没有面板可点：所有信号都会超时 → "
+        print("⚠ 确认下单模式在命令行里没有面板可点：所有信号都会超时 → "
               "入场一律不做、出场按模型决定平。要人点请用面板。")
     print("Ctrl-C 停止。状态与流水在账户目录下 autotrade_state.json / autotrade_log.jsonl")
 
@@ -5055,7 +5166,7 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
             # 性质是「可能有一个没人管的仓位在券商端」，必须在面板上一直亮着，
             # 直到用户去终端确认过（点掉提示）。字段里存原因和重试次数，
             # 下次复现就能判断是不是终端掉线，不用再靠猜。
-            state["unmanaged"] = {"ts": now, "why": why,
+            state["unmanaged"] = {"ts": now, "why": why, "kind": "read_failed",
                                   "error": _last_pos_err or "未知原因",
                                   "tries": tries}
             save_state(state, login)
@@ -5131,9 +5242,24 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
             done.append(item)
 
     state["running"] = False
-    state["stop_reason"] = why
-    # 这次读到了持仓、也平完了，旧的「未确认平仓」标记到此失效。
-    state.pop("unmanaged", None)
+    if failed:
+        # 有单没平掉 = **部分失败**，不是"清仓完成"（2026-11-18）。
+        # 旧代码无条件 pop 标记、写成功语义的 stop_reason，于是手动单被拒
+        # （休市 / 10018 / 保证金）之后，弹窗闪一次就没了；刷新页面看到的是
+        # 「已停止 · 面板停止并清仓」——程序已停、守卫已停、仓位还在券商端，
+        # 而界面上一个字都不提。标记必须亮到用户确认（ack_unmanaged）为止。
+        state["stop_reason"] = f"{why}（{len(failed)} 笔没平掉）"
+        state["unmanaged"] = {
+            "ts": now,
+            "why": state["stop_reason"],
+            "kind": "close_failed",
+            "tickets": [int(f.get("ticket") or 0) for f in failed],
+            "error": "；".join(str(f.get("error") or "未知") for f in failed)[:300],
+        }
+    else:
+        state["stop_reason"] = why
+        # 这次读到了持仓、也平完了，旧的「未确认平仓」标记到此失效。
+        state.pop("unmanaged", None)
     save_state(state, login)
 
     append_log({"ts": now, "kind": "flatten", "reason": why,
@@ -5153,6 +5279,10 @@ def close_all(cfg: Cfg, login=None, symbol_only: bool = False,
     if cfg.dry_run and untouched:
         notes.append(f"纸面模式没有动券商上的 {untouched} 笔真实持仓；"
                      "要平真单请取消勾选「真实下单」后重新启动，或者直接去终端手动平。")
+    if failed:
+        notes.append(f"{len(failed)} 笔没平掉（{state.get('unmanaged', {}).get('error') or '原因见流水'}）："
+                     "AI 已停止，这些仓位现在只剩券商端止损在管。"
+                     "去终端手动平掉后再点掉吸顶带上的提示。")
     if notes:
         out["note"] = "；".join(notes)
     return out
@@ -5226,9 +5356,24 @@ class Worker:
         state["running"] = True
         state["started_at"] = int(time.time())
         state["stop_reason"] = None
-        # 上一次「停止时没平掉仓位」的悬案：用户已经重新启动，说明他处理过了
-        # （或者至少知道了），标记跟着清掉，免得红条一直挂着变成噪音。
-        state.pop("unmanaged", None)
+        # 上一次「停止时没平掉仓位」的悬案：**不能无条件清掉**（2026-11-18）。
+        # 旧代码直接 pop，于是"清仓部分失败 → 重启 → 标记消失"——仓位还在
+        # 券商端，界面上却什么都没有了。清标记的条件是"确实读到了空仓"：
+        #   · 纸面模式不碰券商仓位，标记与它无关，直接清；
+        #   · 真实模式读一次持仓，读到空才清；读到仓（或读不到 = 不知道）都留着。
+        mark = state.get("unmanaged")
+        if mark:
+            keep = False
+            if not cfg.dry_run:
+                ps = _all_positions()
+                keep = (ps is None) or bool(ps)
+                if ps:
+                    mark = {**mark, "why": "重新启动时账户上仍有持仓（上次停止没平掉）",
+                            "tickets": [int(p.get("ticket") or 0) for p in ps],
+                            "ts": int(time.time())}
+                    state["unmanaged"] = mark
+            if not keep:
+                state.pop("unmanaged", None)
         state["owner"] = "panel"
         state["pid"] = os.getpid()
         state["cfg"] = cfg_to_dict(cfg)
@@ -5249,7 +5394,7 @@ class Worker:
         while not stop_ev.is_set() and gen == self._gen:
             started = time.time()
             try:
-                row = tick(cfg, login=login)
+                row = tick(cfg, login=login, stop_ev=stop_ev)
             except Exception as exc:  # noqa: BLE001
                 # 单次 tick 炸掉不能带走整个线程，否则面板显示"运行中"但实际全停
                 append_log({"ts": int(time.time()), "kind": "error",
@@ -5284,11 +5429,26 @@ class Worker:
         self._evs.clear()
         self._stop.set()
         thread = self._thread
+        alive = False
         if thread and thread.is_alive():
             thread.join(timeout=15)
+            alive = thread.is_alive()
         self._thread = None
 
         use_cfg = cfg or self.cfg or cfg_from_state(login or self.login) or Cfg()
+        if flatten and alive:
+            # 15 秒还没退出 = 卡在一次慢 tick 里（模型调用 + MT5 busy 叠加）。
+            #
+            # 这时候**不能清仓**：旧 tick 已经过了 can_open 和所有闸门，
+            # 可能正走到 send_open。先清仓、它后开单，就多出一笔 state 里
+            # 没有的仓——没人管、没有出场闸门、只有券商端那条 SL。
+            # 这是唯一能让「关闭并清仓」反向开仓的路径（2026-11-18）。
+            # 不下单、不改状态：让用户过几秒再点一次，那时线程一般已经退出。
+            return {"ok": False, "closed": [], "failed": [], "count": 0,
+                    "alive": True,
+                    "error": "做单线程 15 秒内没有退出（可能卡在一次模型调用里）。"
+                             "为避免它和清仓同时下单，这次没有执行清仓——"
+                             "请等几秒再点一次「关闭并清仓」。"}
         if flatten:
             return close_all(use_cfg, login=login or self.login)
 
@@ -5738,6 +5898,14 @@ def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
             sh = _manual_shadow_new(m, cfg)
             shadow[key] = sh
             changed = True
+        # `seen_ts` 是僵尸清理的判据（24 小时没再见过才算僵尸）。旧代码只在
+        # 建条目那一刻写一次，于是**持有超过 24 小时的手工单**会在某一轮被
+        # 当成僵尸删掉、下一轮又重建：sl0 / risk0 / 峰值全部归零，11-17 做的
+        # 风险基线静默失效（2026-11-18 审计）。每小时刷新一次足够，
+        # 不必每 3 秒写盘。
+        if now - int(sh.get("seen_ts") or 0) > 3600:
+            sh["seen_ts"] = now
+            changed = True
         # ---- 止损基线 + 改止损留痕（2026-11-17）----
         # 放在 fp 判空**之前**：拿不到浮盈也必须记止损变化——那是"这一刻人对
         # 这笔单做了什么"，和"这笔现在赚多少"没有关系。11-17 那笔把 SL 从
@@ -5831,7 +5999,7 @@ _MANUAL_POS_CACHE: dict = {"ts": 0.0, "view": None}
 
 
 def _manual_position(saved_cfg: dict, defaults=None,
-                     login=None) -> dict | None:
+                     login=None, allow_view: bool = True) -> dict | None:
     """账户上那笔「不是程序开的」持仓，做成**只读**视图给做单台。
 
     为什么需要：程序只记录自己开的单（`state["position"]`），手工单在它眼里
@@ -5843,10 +6011,15 @@ def _manual_position(saved_cfg: dict, defaults=None,
 
     每 3 秒最多读一次持仓：summary 是 1 秒一次轮询，而 positions_get 要走
     MT5 锁，会和做单线程抢；空仓又是常态，1 秒一读纯属浪费。
+
+    `allow_view=False` 时**照样推进影子**、只返回 None（2026-11-18）。
+    以前整段只在「程序自己没仓」时才调用，于是程序持仓期间开的手工单
+    没有 peak/mae/risk0，平了也不落 `manual_close`——面板上不是"缺数据"，
+    而是这笔压根不存在。影子的推进和"给不给面板看"是两件事，必须解耦。
     """
     now_t = time.time()
     if now_t - float(_MANUAL_POS_CACHE.get("ts") or 0.0) < 3.0:
-        return _MANUAL_POS_CACHE.get("view")
+        return _MANUAL_POS_CACHE.get("view") if allow_view else None
 
     view = None
     try:
@@ -5855,16 +6028,15 @@ def _manual_position(saved_cfg: dict, defaults=None,
         sym = str(saved_cfg.get("symbol") or "")
         rows = [x for x in open_positions()
                 if sym and str(x.get("symbol")) == sym]
-        if rows:
-            m = rows[0]
-            try:
-                cfg_now = Cfg(**{k: v for k, v in saved_cfg.items()
-                                 if k in Cfg.__dataclass_fields__})
-            except (TypeError, ValueError):
-                cfg_now = defaults
-            fps: dict = {}
-            sh_all: dict = {}
-            if cfg_now is not None:
+        try:
+            cfg_now = Cfg(**{k: v for k, v in saved_cfg.items()
+                             if k in Cfg.__dataclass_fields__})
+        except (TypeError, ValueError):
+            cfg_now = defaults
+        fps: dict = {}
+        sh_all: dict = {}
+        if cfg_now is not None:
+            if rows:
                 q = _quote(cfg_now.symbol)
                 if q:
                     # 用同一个 _realized_pnl，别在前端另算一套口径。
@@ -5878,10 +6050,14 @@ def _manual_position(saved_cfg: dict, defaults=None,
                              "lots": x.get("volume"),
                              "price_open": x.get("price_open")},
                             q[0], q[1])
-                # 影子峰值（2026-11-17）：借这 3 秒一次的缓存推进，不新增线程。
-                # 为什么不在 tick 里做：手工单只在"程序没仓"时存在，那时 tick
-                # 每 60 秒才醒一次，MFE 会漏掉大半——而 MFE 正是这一层的全部意义。
-                sh_all = _manual_shadow_sync(cfg_now, rows, fps, login)
+            # 影子峰值（2026-11-17）：借这 3 秒一次的缓存推进，不新增线程。
+            # 为什么不在 tick 里做：手工单只在"程序没仓"时存在，那时 tick
+            # 每 60 秒才醒一次，MFE 会漏掉大半——而 MFE 正是这一层的全部意义。
+            # **无条件调用**（2026-11-18）：程序持仓期间也要推进，否则那段时间
+            # 开的手工单没有影子（见函数 docstring）。
+            sh_all = _manual_shadow_sync(cfg_now, rows, fps, login)
+        if rows and allow_view:
+            m = rows[0]
             pnl = fps.get(int(m.get("ticket") or 0))
             sh = sh_all.get(str(int(m.get("ticket") or 0))) or {}
             # ---- 风险读数（2026-11-17）----
@@ -5949,8 +6125,18 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     opens = [r for r in rows if r.get("kind") == "open"]
     llm_decisions = [r for r in rows if r.get("source") == "llm"]
 
-    closed = len(closes)
-    wins = sum(1 for r in closes if r.get("pnl", 0) > 0)
+    # 累计口径（2026-11-18）：以前 closed/wins 从**最近 5000 行**现算，
+    # 而 pnl 取自 state（真累计）——同一份返回里混了两种口径。流水一过 5000 行，
+    # 面板上的"累计笔数/胜率"就会和旁边的"累计盈亏"对不上，而且没有任何标注。
+    # 现在计数器优先（`_book_close` 每笔都在维护），窗口数只当**下限**：
+    # 单测/脚本直接 append_log 写流水而不动 state 时，窗口数更大，用窗口数。
+    window_closed = len(closes)
+    window_wins = sum(1 for r in closes if r.get("pnl", 0) > 0)
+    state_closed = int(state.get("closed") or 0)
+    if state_closed >= window_closed:
+        closed, wins = state_closed, int(state.get("wins") or 0)
+    else:
+        closed, wins = window_closed, window_wins
     llm_closes = [r for r in closes if r.get("source") == "llm"]
     llm_wins = sum(1 for r in llm_closes if r.get("pnl", 0) > 0)
     reviews = [r for r in rows if r.get("kind") == "review" and r.get("lesson")]
@@ -6058,9 +6244,10 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 超时平仓），那是完全另一个决定，用户要的是"看得见"，不是"被接管"。
     # 前端据此渲染成「手工单 · 程序未接管」，刻度尺/保本/脉冲一律不画（那些线
     # 只存在于程序的脑子里，画出来就是撒谎）。
-    manual_pos = None
-    if not pos_now:
-        manual_pos = _manual_position(saved_cfg, _defaults, login)
+    # `allow_view=not pos_now`：程序自己持仓时不画手工单面板（那是另一个决定），
+    # 但**影子照样推进**——否则程序持仓期间开/平的手工单不会被记录（2026-11-18）。
+    manual_pos = _manual_position(saved_cfg, _defaults, login,
+                                  allow_view=not bool(pos_now))
 
     # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
     # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。
@@ -6106,7 +6293,8 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         # 和峰值 peak_pnl 一起看就能当场判断「是不是摸到过门槛又吐回去」。
         "float_pnl": float_pnl,
         "last_decision": state.get("last_decision"),
-        "trades": len(opens),
+        # 同上：开仓笔数也以 state 计数器为上限（窗口截断时不会少报）。
+        "trades": max(int(state.get("trades") or 0), len(opens)),
         "closed": closed,
         "wins": wins,
         "hit_rate": round(wins / closed, 4) if closed else None,
@@ -6122,13 +6310,15 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "llm_hit_rate": round(llm_wins / len(llm_closes), 4) if llm_closes else None,
         # 程序硬止损平的笔数。单独的指标：止损多说明入场方向差，
         # 而不是"模型平得不好"，两者的处理方式完全不同。
-        "sl_closes": sum(1 for r in rows
-                         if r.get("kind") == "close" and r.get("source") == "sl"),
+        "sl_closes": max(int(state.get("sl_closes") or 0),
+                         sum(1 for r in rows
+                             if r.get("kind") == "close" and r.get("source") == "sl")),
         # 保本止损平的笔数（券商端 / 程序代平都算）。和 sl_closes 分开：
         # 硬止损说明入场方向错了，保本止损说明方向对过但没吃到，两者的
         # 改法完全相反。攒够样本才谈得上判这条规则值不值。
-        "be_closes": sum(1 for r in rows if r.get("kind") == "close"
-                         and r.get("source") in ("be", "be_local")),
+        "be_closes": max(int(state.get("be_closes") or 0),
+                         sum(1 for r in rows if r.get("kind") == "close"
+                             and r.get("source") in ("be", "be_local"))),
         # 新出场规则的阈值，面板上要能看见，否则用户不知道规则已经变了。
         # 旧 state 里的 cfg 没有这两个字段（那会儿还不存在），
         # 所以缺了就回退到 Cfg 的当前默认值，而不是显示 None。
@@ -6178,6 +6368,12 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
         "be_at_entry": bool(saved_cfg.get("be_at_entry", _defaults.be_at_entry)),
         "be_arm_usd": money_at_lots(_view_cfg,
                                     saved_cfg.get("be_arm_usd", _defaults.be_arm_usd)),
+        # 脉冲锁利（2026-11-13）。和保本同理：面板上的「出场闸门」表少这一行，
+        # 表头写着"闸门"却不全，用户没法判断这笔的券商端 SL 会不会被程序抬走。
+        # 线宽与门槛都从模块常量下发，前端不写死 1.5 / 5——两处写死必然漂移。
+        "lock_profit": bool(saved_cfg.get("lock_profit", _defaults.lock_profit)),
+        "lock_atr": _LOCK_L,
+        "lock_min_atr": _BURST_ATR,
         "reviews": len(reviews),
         "last_lesson": reviews[-1]["lesson"] if reviews else None,
         # 教训库（独立文件、不随流水归档）的条数。面板上要能看见：
@@ -6192,6 +6388,9 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
                        "skew": skew},
         "model_declines": declines,
         "model_failures": failures,
+        # 最近一次取 K 线失败的原因（2026-11-18）。面板"无行情"时要把原因
+        # 一起显示出来——品种名配错和终端没连，处理方式完全不同。
+        "bars_error": last_bars_error(),
         "cache": cache_stats(login),
         "model": model_name,
         # 品种选择器：面板下拉框直接读这个，别在前端另存一份白名单——
@@ -6381,7 +6580,7 @@ def main() -> None:
     # AI 辅助模式：CLI 也能跑，但没有面板就没有人点，所有信号都会超时。
     # 保留这个开关是为了无界面调试（配 --once 可以走一遍完整链路）。
     parser.add_argument("--assist", action="store_true",
-                        help="AI 辅助：开/平仓前等人确认（无面板时会全部超时）")
+                        help="确认下单：开/平仓前等人确认（无面板时会全部超时）")
     parser.add_argument("--assist-wait", type=int, default=Cfg.assist_entry_wait_sec,
                         help=f"入场确认时限秒数（默认 {Cfg.assist_entry_wait_sec}）")
     parser.add_argument("--assist-slip", type=float, default=Cfg.assist_max_slip_usd,

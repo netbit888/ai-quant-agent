@@ -60,7 +60,9 @@ function updateCurtain(a) {
   const set = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
 
   set('atCurtainState', !ok ? '状态未知'
-    : running ? (a.dry_run ? '运行中 · 纸面' : '运行中 · 真实')
+    : running ? (a.assist
+                  ? (a.dry_run ? '运行中 · 确认演练' : '运行中 · 确认下单')
+                  : (a.dry_run ? '运行中 · 纸面' : '运行中 · 真实'))
     : (a.stale ? '已停止（面板重启过）' : 'AI 已停止'));
   set('atCurtainSym', (a && a.symbol) || 'XAUUSD · M1');
   set('atCurtainClock', new Date().toLocaleTimeString('zh-CN', { hour12: false }));

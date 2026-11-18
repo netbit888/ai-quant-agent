@@ -521,7 +521,11 @@ class Executor:
                       "retcode": rc, "comment": getattr(result, "comment", None)})
         return {"ok": ok, "retcode": rc,
                 "comment": getattr(result, "comment", None),
-                "price": price_sl, "tp": float(request["tp"])}
+                "price": price_sl, "tp": float(request["tp"]),
+                # 顺手把持仓手数带出去（2026-11-18）：这次读持仓本来就在手上，
+                # 上层要靠它判断"成交了多少"——部分成交时按配置手数记账会让
+                # 保本/止盈门槛在半个价距上就被判达成。零额外请求。
+                "volume": float(getattr(pos, "volume", 0.0) or 0.0)}
 
     # ---------------------------------------------------------- 记录
 

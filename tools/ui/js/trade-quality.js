@@ -17,6 +17,7 @@ function renderQuality(q) {
     $('qualCmp').innerHTML = '';
     $('qualProc').innerHTML = '';
     $('rollNote').textContent = '';
+    if ($('rollTitle')) $('rollTitle').textContent = '滚动期望';
     drawArea('chartRolling', [], 'line-info', '#4a9eff', { W: 1240, H: 150 });
     return;
   }
@@ -121,33 +122,50 @@ function renderQuality(q) {
         : `${freq.days} 个交易日，分不出高低频`),
   ].join('');
 
-  // 滚动期望曲线：近 20 笔主线（语义色+渐变面积）+ 近 100 笔对照线（灰蓝虚线，低权重）。
-  // series 顺序 = 绘制顺序：对照线先画（垫底），主线和面积压在上面。
-  // 按平仓时间对齐 X 轴——两条线点数不同、终点都是最近一笔，按索引映射日期会错位。
+  // 横轴固定笔序（#rollAxis 切换已删）：滚动期望是「每笔」的统计量，时间轴会把
+  // 交易密度带进横轴——97% 的宽度落在没交易的空窗里，密集段被压成垂直断崖。
+  // 要看「哪天开始失效」，另看按日统计，不在这张图上妥协。
   const rollRaw = q.rolling || [];
   const roll = rollRaw.map(x => x.r);
   const rollTs = rollRaw.map(x => x.ts);
   // 旧后端/旧缓存可能没有 rolling100：兜底为空 = 自动退化为单线图，不报错
   const roll100Raw = q.rolling100 || [];
   const roll100 = roll100Raw.map(x => x.r);
-  const roll100Ts = roll100Raw.map(x => x.ts);
+  // 笔序：0 = 最新一笔，负数往左。两条线长度不同，但右端都是 0（同一笔）。
+  const seqOf = arr => arr.map((_, i) => i - (arr.length - 1));
   const rollUp = roll.length && roll[roll.length - 1] >= 0;
   const mainCls = rollUp ? 'line-up' : 'line-down';
   const mainColor = rollUp ? '#2ecc71' : '#ff4d4f';
+  // 100 笔线不足 100 笔时根本不存在，标题不能写「100 笔对照」
+  const rollTitle = $('rollTitle');
+  if (rollTitle) {
+    rollTitle.textContent = roll100.length
+      ? '滚动期望（近 20 笔 · 100 笔对照）'
+      : '滚动期望（近 20 笔滚动）';
+  }
+  // 两条线点数不同，按同一索引取 roll100[i] 会错位——两条线都以「最新一笔」为 0，
+  // 按笔序对齐：主线的第 i 点对应 100 笔线的 i + (len100 - len20) 点。
+  const seqOff = roll100.length - roll.length;
   drawArea('chartRolling', roll, mainCls, mainColor, {
-    W: 1240, H: 150, ts: rollTs,
+    W: 1240, H: 150,
+    xseq: true,
     series: [
-      ...(roll100.length ? [{ values: roll100, colorClass: 'line-ghost', color: '#7f93a8', area: false, ts: roll100Ts }] : []),
-      { values: roll, colorClass: mainCls, color: mainColor, area: true, primary: true, ts: rollTs },
+      ...(roll100.length ? [{ values: roll100, colorClass: 'line-ghost', color: '#7f93a8', area: false, seq: seqOf(roll100) }] : []),
+      { values: roll, colorClass: mainCls, color: mainColor, area: true, primary: true, seq: seqOf(roll) },
     ],
-    hover: i => [
-      `${fmtTsMin(rollTs[i])} · 窗口 ${rollRaw[i].n} 笔`,
-      `近20笔 ${roll[i] >= 0 ? '+' : ''}${fmt(roll[i], 3)} R`,
-      roll100[i] != null ? `近100笔 ${roll100[i] >= 0 ? '+' : ''}${fmt(roll100[i], 3)} R` : '近100笔 无数据',
-    ],
+    hover: i => {
+      const j = i + seqOff;
+      const has100 = j >= 0 && j < roll100.length;
+      return [
+        `${fmtTsMin(rollTs[i])} · 窗口 ${rollRaw[i].n} 笔`,
+        `近20笔 ${roll[i] >= 0 ? '+' : ''}${fmt(roll[i], 3)} R`,
+        has100 ? `近100笔 ${roll100[j] >= 0 ? '+' : ''}${fmt(roll100[j], 3)} R` : '近100笔 无数据',
+      ];
+    },
   });
+  // 横轴是笔序，中间刻度只是序号——不写一句就没人知道「-19」是第 19 笔还是期望 -19
   $('rollNote').textContent = roll.length
-    ? `近20笔 最新 ${fmt(roll[roll.length - 1], 3)} R（区间 ${fmt(Math.min(...roll), 2)} ~ ${fmt(Math.max(...roll), 2)}）`
+    ? `横轴=笔序（共 ${roll.length} 点）· 近20笔 最新 ${fmt(roll[roll.length - 1], 3)} R（区间 ${fmt(Math.min(...roll), 2)} ~ ${fmt(Math.max(...roll), 2)}）`
       + (roll100.length ? ` · 近100笔 最新 ${fmt(roll100[roll100.length - 1], 3)} R` : '')
     : `交易数不足 20 笔，无法计算滚动期望`;
 }

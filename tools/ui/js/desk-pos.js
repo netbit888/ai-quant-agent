@@ -249,7 +249,7 @@ function renderPos(a, p, mp) {
 
   // ---- 脉冲浮盈（2026-11-13）----
   // 趋势单的峰值折成「几倍 ATR」。阈值跟后端 `_mark_burst` 严格对齐：
-  // 3 倍开始记速度（t3）、5 倍算脉冲（t5，辅助模式弹窗 / 全自动抬锁利线）。
+  // 3 倍开始记速度（t3）、5 倍算脉冲（t5，确认下单弹窗 / 全自动抬锁利线）。
   // 三态颜色也照这个分：灰=还没到 3 倍、黄=到过 3 倍、亮黄实心=脉冲成立。
   //
   // 换算只用开仓时锁定的 `atr_pnl`（1 个 ATR 折多少浮盈），**不在前端用 atr
@@ -276,7 +276,7 @@ function renderPos(a, p, mp) {
         + (t3 == null ? ' · 还没到 3 倍' : ' · 3 倍用了 ' + fmt(t3, 1) + ' 分')
         + (t5 == null ? ' · 5 倍算脉冲' : ' · 5 倍用了 ' + fmt(t5, 1) + ' 分')
         + '\n' + (p.assist
-          ? '辅助模式：只弹窗提醒，程序既不平仓也不抬止损'
+          ? '确认下单：只弹窗提醒，程序既不平仓也不抬止损'
           : (p.lock_ok
             ? '全自动：锁利线已挂券商端 SL ' + fmt(Number(p.lock_sl || 0), 3)
             : '全自动：脉冲成立后把券商端 SL 抬到「峰值 − 1.5 ATR」'));
@@ -411,7 +411,9 @@ function renderPos(a, p, mp) {
       btxt = '保本止损已关闭'; bnote = '设置舱 → 出场闸门可开';
     } else if (p && !beFit) {
       // 规则开着，但这笔是震荡单：它根本没有这条线。
-      btxt = '震荡单 · 不挂保本'; bnote = '只给趋势单（止盈门槛 7.00 的那一档才需要）' + sbNote;
+      const trendTp = Number(a.tp_min_trend || 0);
+      btxt = '震荡单 · 不挂保本';
+      bnote = '只给趋势单' + (trendTp > 0 ? '（门槛 ' + fmt(trendTp, 2) + ' 那档才需要）' : '') + sbNote;
     } else if (!p) {
       btxt = '空仓 · 无持仓保护'; bnote = '开仓后按触发线自动挂';
     } else if (p.be_ok) {
@@ -428,6 +430,15 @@ function renderPos(a, p, mp) {
       bnote = '峰值 ' + (peak == null ? '—' : money(peak)) + ' / 触发线 ' + fmt(beArm, 2) + sbNote;
     }
     be.className = 'be-badge ' + bcls;
+    // 入场线不在券商端时，徽章必须变成警示色（2026-11-18）。
+    // 之前这里只把原因拼在 note 里，徽章本身仍是「保本未触发」的中性色——
+    // 于是"这笔只有 5 秒轮询在守、进程一崩就没有任何止损"看起来和正常仓
+    // 一模一样。纸面单不算：它本来就没有券商端保护。
+    if (p && !p.dry_run && sbPx <= 0 && p.sl_err) {
+      bcls = 'fail';
+      be.className = 'be-badge ' + bcls;
+      if (bnote.indexOf('⚠') !== 0) bnote = '⚠ 券商端无止损 · ' + bnote;
+    }
     const t = $('beText'), n = $('beNote');
     if (t) t.textContent = btxt;
     if (n) n.textContent = bnote;

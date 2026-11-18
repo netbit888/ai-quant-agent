@@ -47,9 +47,16 @@ function openChartMax(id) {
   const reg = CHART_REG[id];
   if (!reg || !reg.args) return;
   chartMaxId = id;
-  $('chartMaskTitle').textContent = CHART_TITLES[id] || id;
+  // 标题/图例不能硬编码：滚动期望的标题在「有没有 100 笔线」上会变——写死等于
+  // 让弹层说和卡片不一样的话。横轴固定笔序（切换已删），图例也就没有条件分支了。
+  const rollTitleEl = id === 'chartRolling' ? $('rollTitle') : null;
+  $('chartMaskTitle').textContent = (rollTitleEl && rollTitleEl.textContent)
+    || CHART_TITLES[id] || id;
+  const rollOpt = id === 'chartRolling' && reg.args[3] ? reg.args[3] : null;
+  const rollHas100 = !!(rollOpt && rollOpt.series && rollOpt.series.length > 1);
   $('chartMaskLegend').textContent = (id === 'chartRolling')
-    ? '实线 = 近 20 笔 · 虚线 = 近 100 笔（对照） · 悬停看每个时点'
+    ? `实线 = 近 20 笔${rollHas100 ? ' · 虚线 = 近 100 笔' : ''}`
+      + ' · 横轴 = 笔序（每笔等距） · 悬停看每个时点'
     : '数据截至最近一次刷新';
   $('chartMask').classList.remove('hidden');
   chartMaskDraw();
@@ -168,9 +175,9 @@ async function stopAutoTrade() {
   try {
     ok = await confirmApiCall({
       title: '关闭 AI 并平掉所有仓位？',
-      desc: '停掉 AI 做单，然后向券商发送平仓单：账户上所有持仓都会平掉，包括你自己手动开的那些。平完不可撤销。',
+      desc: '停 AI，并向券商发平仓单：账户上所有持仓都平掉，包括你手动开的那些，不可撤销。',
       cost: '会立刻平仓',
-      okText: '关闭并平仓',
+      okText: '关闭并清仓',
     });  } catch (e) {
     atSay('<b>确认弹窗没能打开：</b>' + esc(String(e)), 'err');
     return;

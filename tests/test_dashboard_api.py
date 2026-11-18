@@ -290,5 +290,69 @@ class TestStartCfgWiring(LiveServerCase):
         self.assertEqual(cfg.tp_min_trend, autotrade.Cfg.tp_min_trend)
 
 
+class TestHostGuard(LiveServerCase):
+    """Host 校验（2026-11-18）：DNS rebinding 读账本，不需要跨站。
+
+    浏览器会把恶意域名的 Host 头发到 127.0.0.1 上的服务，Origin 却是它自己——
+    所以只挡 POST 的 Origin 不够，**GET 也必须看 Host**。
+    """
+
+    def _raw(self, host_header: str, method: str = "GET", path: str = "/api/app/info",
+             body: bytes | None = None) -> tuple[int, bytes]:
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        conn.putheader("Host", host_header)
+        if body is not None:
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return resp.status, data
+
+    def test_loopback_hosts_allowed(self):
+        for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}",
+                     f"[::1]:{self.port}"):
+            status, _ = self._raw(host)
+            self.assertEqual(status, 200, f"回环地址被误挡：{host}")
+
+    def test_foreign_host_cannot_read(self):
+        status, body = self._raw("evil.example")
+        self.assertEqual(status, 403)
+        self.assertIn("Host".encode(), body)
+
+    def test_foreign_host_cannot_post(self):
+        body = json.dumps({"confirm": True, "flatten": True}).encode()
+        status, _ = self._raw("evil.example", method="POST",
+                              path="/api/autotrade/stop", body=body)
+        self.assertEqual(status, 403)
+
+    def test_missing_host_allowed(self):
+        """HTTP/1.0 / 本机脚本不带 Host：浏览器一定带，挡它只会挡自己人。"""
+        status, _ = self._raw("127.0.0.1")
+        self.assertEqual(status, 200)
+
+
+class TestHostArgGuard(unittest.TestCase):
+    """`--host` 的启动护栏：非回环必须显式确认（2026-11-18）。"""
+
+    def _args(self, host, ack=False):
+        from types import SimpleNamespace
+        return SimpleNamespace(host=host, i_know_network_risk=ack)
+
+    def test_loopback_passes(self):
+        for host in ("127.0.0.1", "localhost", "::1", ""):
+            self.assertEqual(dashboard._host_guard(self._args(host)), "")
+
+    def test_lan_requires_ack(self):
+        msg = dashboard._host_guard(self._args("0.0.0.0"))
+        self.assertIn("--i-know-network-risk", msg)
+        self.assertIn("0.0.0.0", msg)
+        self.assertEqual(dashboard._host_guard(self._args("0.0.0.0", ack=True)), "")
+
+
 if __name__ == "__main__":
     unittest.main()

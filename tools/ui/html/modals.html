@@ -11,7 +11,7 @@
   </div>
 </div>
 
-<!-- 人工确认弹窗（AI 辅助做单）。**独立 DOM**，不复用 #modalMask：
+<!-- 人工确认弹窗（确认下单模式）。**独立 DOM**，不复用 #modalMask：
      那个是单槽 Promise（modalResolve 只有一个），信号和"确认付费"撞车时会
      互相覆盖，点谁都算到对方头上。
      这里也**不响应 Esc、不点遮罩关闭**——误按一次等于否决一次，代价是白丢
@@ -70,8 +70,8 @@
   <div class="modal modal-wide" role="dialog" aria-modal="true">
     <h4>配一下模型 API</h4>
     <div class="desc">
-      面板要靠大模型做决策和复盘，没有 key 就没法用 AI 做单。
-      填一次就行，存在本机 <b>config/.env</b>，不会上传。
+      决策和复盘都靠大模型，没有 key 用不了。
+      填一次就行，只存本机 <b>config/.env</b>，不上传。
     </div>
     <div class="setup-row"><label for="setupProvider">供应商</label>
       <select id="setupProvider" onchange="onSetupProviderChange()"></select></div>

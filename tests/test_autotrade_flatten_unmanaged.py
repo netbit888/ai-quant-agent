@@ -166,5 +166,69 @@ class TestAck(FlattenCase):
         self.assertNotIn("unmanaged", autotrade.load_state())
 
 
+class TestCloseFailure(FlattenCase):
+    """平仓被拒 = 部分失败，不能记成"清仓完成"（2026-11-18）。"""
+
+    def test_failed_close_keeps_mark(self):
+        self._seed_position(ticket=9999)
+        with mock.patch.object(autotrade, "_all_positions",
+                               return_value=[{"ticket": 9999, "symbol": "XAUUSDc",
+                                              "direction": 1, "volume": 0.01}]), \
+             mock.patch.object(autotrade, "send_close",
+                               return_value={"ok": False, "reason": "休市"}):
+            res = autotrade.close_all(self.cfg, why="面板停止并清仓")
+
+        self.assertFalse(res["ok"])
+        self.assertEqual(len(res["failed"]), 1)
+        self.assertIn("1 笔没平掉", res.get("note", ""), "面板要能看到失败，不是只闪一下")
+
+        st = autotrade.load_state()
+        mark = st.get("unmanaged")
+        self.assertIsInstance(mark, dict, "平仓失败必须留常驻标记")
+        self.assertEqual(mark["kind"], "close_failed")
+        self.assertEqual(mark["tickets"], [9999])
+        self.assertIn("休市", mark["error"])
+        self.assertIn("没平掉", st["stop_reason"])
+        self.assertEqual(st["position"]["ticket"], 9999, "没平掉就别清仓位")
+
+    def test_all_failed_closes_still_survive_restart(self):
+        """重启不能把「还有仓位」这件事洗掉——清标记前必须确认账户真没仓。"""
+        state = autotrade._empty_state()
+        state["unmanaged"] = {"ts": int(time.time()) - 60, "why": "面板停止并清仓",
+                              "kind": "close_failed", "tickets": [9999]}
+        autotrade.save_state(state)
+
+        with mock.patch.object(autotrade, "_all_positions",
+                               return_value=[{"ticket": 9999, "symbol": "XAUUSDc",
+                                              "direction": 1, "volume": 0.01}]), \
+             mock.patch.object(autotrade.Worker, "_loop", lambda *a, **k: None):
+            res = autotrade.WORKER.start(autotrade.Cfg(dry_run=False))
+
+        try:
+            self.assertTrue(res["ok"], res)
+            mark = autotrade.load_state().get("unmanaged")
+            self.assertIsInstance(mark, dict)
+            self.assertEqual(mark["tickets"], [9999])
+            self.assertIn("仍有持仓", mark["why"])
+        finally:
+            autotrade.WORKER.stop(flatten=False)
+
+    def test_restart_clears_mark_when_flat(self):
+        state = autotrade._empty_state()
+        state["unmanaged"] = {"ts": int(time.time()) - 60, "why": "面板停止并清仓",
+                              "kind": "close_failed", "tickets": [9999]}
+        autotrade.save_state(state)
+
+        with mock.patch.object(autotrade, "_all_positions", return_value=[]), \
+             mock.patch.object(autotrade.Worker, "_loop", lambda *a, **k: None):
+            res = autotrade.WORKER.start(autotrade.Cfg(dry_run=False))
+
+        try:
+            self.assertTrue(res["ok"], res)
+            self.assertNotIn("unmanaged", autotrade.load_state())
+        finally:
+            autotrade.WORKER.stop(flatten=False)
+
+
 if __name__ == "__main__":
     unittest.main()

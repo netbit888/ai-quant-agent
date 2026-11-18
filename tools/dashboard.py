@@ -13,11 +13,15 @@
     /api/session_advice    生成场次级 AI 复盘（花钱）
     /api/autotrade/start   启动 AI 实时做单线程（花钱 + 可能下单）
     /api/autotrade/stop    停止 AI 并平掉所有持仓（会下单）
-    /api/autotrade/signal  回答一条待确认信号（AI 辅助模式；approve 会下单）
+    /api/autotrade/signal  回答一条待确认信号（确认下单模式；approve 会下单）
     /api/autotrade/reset   重置战绩（旧流水归档，不删除；会停掉 AI；**经验保留**）
     /api/autotrade/reset_lessons  只清 AI 攒的经验（教训库），战绩不动（面板无入口，仅供 CLI/脚本）
+    /api/lesson_packs/rename      重命名经验包（面板无入口，仅供 CLI/脚本；2026-11-18 复核）
     /api/autotrade/prefs   记住面板上的交易参数（品种/模式/间隔/手数；不下单、不花钱）
     /api/llm/switch        换模型供应商/模型（真调一次验证，进程内即时生效）
+
+所有接口（含 GET）都过 Host 校验：只认 127.0.0.1 / localhost / [::1]，
+域名一律 403——那挡的是 DNS rebinding（恶意网页把域名解析到本机，读走账本）。
 
 只读接口里要留意的两个：
     /api/autotrade         AI 做单状态 + 战绩
@@ -35,7 +39,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from app_version import APP_VERSION
 from live import appdirs, uiparts
@@ -93,6 +97,51 @@ def _start_server(host: str, want: int):
     raise SystemExit(f"端口 {want}~{want + 7} 都被占用了，请用 --port 指定一个空闲端口")
 
 
+# 源码态的单实例互斥体。打包版由 aqa_launcher 持同名互斥体（`Global\AIQuantDashboard`），
+# 所以在 dashboard 里只在**源码态**抢它：打包版是 launcher → import dashboard.main
+# 同进程，自己再抢一次会看到"已存在"而误判成多开。
+_DEV_MUTEX = None
+
+
+def _acquire_instance_mutex() -> bool:
+    """源码态防多开（2026-11-18）。返回 False = 已有一份在跑。
+
+    为什么必须管：`allow_reuse_address=False` 只防"同一个端口被绑两次"。
+    `python -m tools.dashboard --port 9000` 可以绕开端口探活，于是两个进程
+    同时写 `autotrade_state.json` / `deals.jsonl`——互相覆盖状态、重复下单。
+    打包版有 launcher 的互斥体兜底，源码态以前什么都没有。
+    """
+    global _DEV_MUTEX
+    if os.name != "nt" or appdirs.is_frozen():
+        return True
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        handle = k32.CreateMutexW(None, False, "Global\\AIQuantDashboard")
+        if not handle:
+            return True                 # 拿不到互斥体不该阻止启动
+        if k32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            k32.CloseHandle(handle)
+            return False
+        _DEV_MUTEX = handle             # 故意持有到进程退出
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _host_guard(args) -> str:
+    """`--host` 非回环时要求显式确认。返回空串 = 可以启动。"""
+    host = (getattr(args, "host", "") or "").strip()
+    if host in ("", "127.0.0.1", "localhost", "::1"):
+        return ""
+    if getattr(args, "i_know_network_risk", False):
+        return ""
+    return (f"--host {host} 会把面板绑到非回环地址：同一局域网的任何机器都能读到"
+            "账户余额、逐笔成交、教训库、API 用量；写接口会因 Origin 校验回 403"
+            "（面板半残）。确实需要就加 --i-know-network-risk 再启动。")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"QuantDashboard/{APP_VERSION}"
 
@@ -118,7 +167,47 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(payload, ensure_ascii=False, default=str).encode(),
                    "application/json; charset=utf-8")
 
+    # 回环主机名白名单。Host 头只允许这几个：面板只该从本机被打开。
+    _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+    def _host_allowed(self) -> bool:
+        """**所有**请求的 Host 校验（2026-11-18，承接上轮审计 A2）。
+
+        为什么 GET 也要管：`_origin_allowed()` 只保护写接口，而 DNS rebinding
+        攻击根本不需要跨站——恶意页面把自己的域名解析到 127.0.0.1，浏览器
+        就认为"同源"，`fetch('/api/live')` 里带的是它自己的 Origin，
+        但也带一个 `Host: evil.example` 头。所以判据只能是 Host：
+        服务只认 127.0.0.1 / localhost / [::1]，域名一律 403。
+
+        代价：写接口本来就挡住了丢钱，这个洞丢的是**账本**——余额、逐笔成交、
+        教训库、API 用量都能被读走。所以它值得单独一条。
+
+        Host 缺失（HTTP/1.0、某些老客户端、curl --http1.0）放行：那种请求
+        不可能来自浏览器（浏览器必带 Host），挡它只会挡掉本机的脚本。
+        """
+        host = self.headers.get("Host")
+        if not host:
+            return True
+        try:
+            name = (urlsplit("//" + host.strip()).hostname or "").lower()
+        except ValueError:
+            return False
+        allowed = set(self._LOOPBACK_HOSTS)
+        # 显式绑到非回环地址时（--host + --i-know-network-risk），用那个地址
+        # 访问是用户的明确选择，放行；但**域名仍然一律拒**——那正是
+        # DNS rebinding 的入口。
+        try:
+            bound = str(self.server.server_address[0] or "").lower()
+            if bound:
+                allowed.add(bound)
+        except Exception:  # noqa: BLE001
+            pass
+        return name in allowed
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._json(403, {"ok": False, "error": "Host 不在本机回环地址内，已拒绝"})
+            return
         parsed = urlparse(self.path)
 
         if parsed.path == "/":
@@ -447,6 +536,9 @@ class Handler(BaseHTTPRequestHandler):
           2. 归档账户不能生成新的复盘——它连不上了，生成了也没法验证。
         备注和删账户不花钱，但仍然只接受显式 POST。
         """
+        if not self._host_allowed():
+            self._json(403, {"ok": False, "error": "Host 不在本机回环地址内，已拒绝"})
+            return
         if not self._origin_allowed():
             self._json(403, {"ok": False, "error": "跨站请求被拒绝（Origin/Referer 不在本面板）"})
             return
@@ -1863,7 +1955,10 @@ def _parse_args(argv=None):
 
     p = argparse.ArgumentParser(description="SeatOne 状态面板")
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="监听地址。默认只回环；非回环地址需要 --i-know-network-risk")
+    p.add_argument("--i-know-network-risk", action="store_true",
+                   help="确认知道风险后才允许 --host 绑到非回环地址（账本会对局域网开放）")
     p.add_argument("--no-open", action="store_true",
                    help="不起任何界面（只跑服务，给脚本/测试用）")
     p.add_argument("--web", action="store_true",
@@ -2011,6 +2106,21 @@ def _register_window_attach(win) -> None:
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+
+    # 两条启动前置检查，都在建目录/起线程之前：
+    #   · 非回环 host 必须显式确认（账本会对局域网开放）；
+    #   · 源码态只允许一份（两份会写同一个状态文件、重复下单）。
+    guard = _host_guard(args)
+    if guard:
+        print(f"[!] {guard}")
+        if appdirs.is_frozen() and not args.no_open:
+            from tools import desktop
+            desktop.message_box(guard, style=desktop.MB_ICONERROR)
+        return 2
+    if not _acquire_instance_mutex():
+        print("[!] 已经有一份面板在运行。同一台机器只允许一份——"
+              "两份会写同一个 autotrade_state.json、重复下单。")
+        return 2
 
     # 可写目录先建好。放到 Program Files 这类只读位置时这里就报错，
     # 而不是等用户第一次点「开始做单」才 500——那时候根本看不出是权限问题。

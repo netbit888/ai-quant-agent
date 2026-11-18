@@ -6,13 +6,13 @@
   <div class="card l1">
     <div class="card-head">
       <h2>设置舱</h2>
-      <span class="mini at-head-note">跑起来之后这些控件自动锁死，避免「界面说真实、实际发纸面」</span>
+      <span class="mini at-head-note">开跑即锁，改完下次启动才生效</span>
     </div>
     <div class="setup-grid">
 
       <div class="setup-card">
         <h3>交易参数</h3>
-        <div class="sub">中途改这些等于换了一个策略，而仓位还挂在旧参数上——所以开跑即锁。没在跑的时候改过的会自动记住，下次打开不用重选。</div>
+        <div class="sub">中途改等于换策略，而仓位还挂在旧参数上，所以开跑即锁。没在跑时改过的会记住。</div>
         <div class="row">
           <span class="lb">品种</span>
           <label class="mini at-int" title="做单品种。只列实测过 point/contract/spread 的品种——没测过的品种点差成本会算成 0，风险失控">
@@ -28,15 +28,15 @@
             </label>
             <label title="向券商发真实市价单（模拟账户也是真单，只是钱是假的）">
               <input type="radio" name="atMode" id="atModeLive" value="live" checked
-                     onchange="updateModeHint(); saveAtPrefs()"> 真实做单
+                     onchange="updateModeHint(); saveAtPrefs()"> 真实
             </label>
-            <label title="和真实做单一样，但每次开/平仓前弹窗等你点。硬止损和持仓上限仍由程序直接执行，不弹窗">
+            <label title="AI 出信号后弹窗等你点「同意」才发单，默认就是真单。硬止损和持仓上限不等你，由程序直接执行">
               <input type="radio" name="atMode" id="atModeAssist" value="assist"
-                     onchange="updateModeHint(); saveAtPrefs()"> AI 辅助
+                     onchange="updateModeHint(); saveAtPrefs()"> 确认下单
             </label>
             <label class="at-sub" id="atAssistPaperWrap"
-                   title="演练：弹窗照弹、同意也只记账，不发真单">
-              <input type="checkbox" id="atAssistPaper" onchange="updateModeHint(); saveAtPrefs()"> 纸面演练
+                   title="勾上后照常弹窗、同意也只记账，不发真单">
+              <input type="checkbox" id="atAssistPaper" onchange="updateModeHint(); saveAtPrefs()"> 确认演练
             </label>
           </div>
         </div>
@@ -54,7 +54,7 @@
         </div>
         <div class="row">
           <span class="lb">手数</span>
-          <label class="mini at-int" title="每笔开仓手数。止损/止盈/保本的金额阈值会随手数等比缩放，价格距离不变；上限 0.05 手，再大点差会吃掉止损">
+          <label class="mini at-int" title="每笔开仓手数，最高 0.50 手（压力档）。止损/止盈/保本的金额阈值随手数等比放大，价格距离不变">
             <select id="atLots" onchange="updateModeHint(); saveAtPrefs()">
               <option value="0.01" selected>0.01 手</option>
               <option value="0.05">0.05 手</option>
@@ -71,7 +71,7 @@
 
       <div class="setup-card">
         <h3>AI 模型</h3>
-        <div class="sub">先选供应商，再选这一家的模型。换供应商要填该家的 key（同一个 key 不能跨家通用）；改这里就够了，不用动 .env、不用重启。</div>
+        <div class="sub">先选供应商再选模型。换供应商要填该家的 key；改完不用动 .env，也不用重启。</div>
         <div class="at-llm" id="atLlmBar">
           <label class="at-llm-k" for="atLlmProvider">供应商</label>
           <select id="atLlmProvider" onchange="onLlmProviderChange()"
@@ -97,7 +97,7 @@
 
       <div class="setup-card">
         <h3>经验库</h3>
-        <div class="sub">全局共享（不跟账户走）。AI 做单的提示词注入和复盘写入都用当前选中的这一套。</div>
+        <div class="sub">全局共享，不跟账户走。提示词注入和复盘写入都用这一套。</div>
         <div class="lesson-packs">
           <select id="lpSelect" title="选择当前生效的经验库。AI 做单的提示词注入和复盘写入都用它。">
             <option value="">读取中…</option>
@@ -109,7 +109,7 @@
           <button class="btn-ghost" id="lpNew" onclick="lpCreate()"
                   title="新建一个空的经验库，从零积累">新建</button>
           <button class="btn-ghost btn-danger" id="lpDelete" onclick="lpDeleteCurrent()"
-                  title="删除当前下拉框里选中的**整个经验包**（不是删里面某一条）。文件会移到 lesson_packs/_trash/ 留底，但面板里没有恢复入口。">删除这个包</button>
+                  title="删除下拉框里选中的整个经验包（不是删某一条）。文件移到 lesson_packs/_trash/ 留底，面板里没有恢复入口。">删除这个包</button>
         </div>
         <!-- 教训库：跨场次复发统计。默认收起——它要扫所有归档流水数平仓笔，
              比状态查询重，不该跟着 1 秒轮询跑，点开才拉。 -->
@@ -123,15 +123,11 @@
 
       <div class="setup-card">
         <h3>运维</h3>
-        <div class="sub">重置战绩只清数字，旧流水归档保留、可回看；经验完全不动。
-          经验要清理就直接删整个包（上面经验库那一排的「删除这个包」）——包是经验的
-          最小单位，删包语义更清楚，也不会留下一个"看着在用、其实是空的"废包。</div>
+        <div class="sub">重置战绩只清数字，旧流水归档保留、可回看，经验不动。
+          要清经验就删整个包（上面经验库的「删除这个包」）。</div>
         <div class="row">
           <button class="btn-ghost" id="atReset" onclick="resetAutoTrade()"
                   title="清空 AI 的战绩统计（旧流水归档保留），换参数前用。经验不受影响">重置战绩</button>
-        </div>
-        <div class="sub" style="margin:var(--sp2) 0 0">
-          急停（关闭并清仓）有两处入口：顶部吸顶带、做单台操作条——都是同一个动作。
         </div>
       </div>
     </div>
@@ -142,7 +138,7 @@
   <div class="card">
     <div class="card-head">
       <h2>出场闸门</h2>
-      <span class="mini">数值来自 state 里实际在跑的 cfg，不是模板默认值</span>
+      <span class="mini">实际生效值，不是模板默认值</span>
     </div>
     <table>
       <thead><tr>
@@ -153,13 +149,13 @@
         <tr>
           <td class="tl">硬止损</td>
           <td class="tl"><span class="at-gate sl" id="atGateSl"
-                title="浮亏到线由程序直接市价平，不问模型。账本里仍记为「手动平仓」，不给订单挂 SL"><b id="atGateSlV">−3.00</b></span></td>
+                title="浮亏到线由程序直接市价平，不问模型。开仓成交后同一条线也挂在券商端（价距一致），先到先用"><b id="atGateSlV">−3.00</b></span></td>
           <td class="tl">出场第 1 顺位。到线不等模型，直接市价平。</td>
         </tr>
         <tr>
           <td class="tl">止损快查</td>
           <td class="tl"><span class="at-gate guard" id="atGateGuard"
-                title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。决策间隔是 60 秒，这中间价格能跑完一整根 M1，止损会超调"><b id="atGateGuardV">每 5 秒</b></span></td>
+                title="持仓期间每 N 秒单独查一次止损（只读报价、不调模型）。两轮决策之间价格能跑完一整根 M1，等决策再查必然超调"><b id="atGateGuardV">每 5 秒</b></span></td>
           <td class="tl">必须严于决策间隔才有意义；配得不小于间隔时显示「关闭」。</td>
         </tr>
         <tr>
@@ -169,10 +165,16 @@
           <td class="tl">只给趋势单。改的是券商端 SL，进程崩了也有效。</td>
         </tr>
         <tr>
+          <td class="tl">脉冲锁利</td>
+          <td class="tl"><span class="at-gate" id="atGateLock"
+                title="趋势单浮盈走满 5 个 ATR 后，把券商端 SL 抬到「峰值 − 1.5 ATR」，峰值再抬高就跟着抬。它锁的是利润，保本那条锁的是本金，所以一定更晚发生。确认下单模式下不抬线，只弹窗提醒"><b id="atGateLockV">峰值 − 1.5 ATR</b></span></td>
+          <td class="tl">走满 <span id="atGateLockMin">5</span> ATR 后抬券商端 SL，只锁利润不保本。仅趋势单、仅全自动。</td>
+        </tr>
+        <tr>
           <td class="tl">止盈门槛</td>
           <td class="tl"><span class="at-gate tp" id="atGateTp"
                 title="浮盈没到这个数就不平、也不调模型（省 token）。到线才问模型要不要落袋"><b id="atGateTpV">3.25</b></span></td>
-          <td class="tl">按持仓锁定的 plan 取值：趋势单用 <span id="atGateTpTrend">—</span>。</td>
+          <td class="tl">按持仓锁定的 plan 取值（<span id="atGateTpTrend">—</span>）。</td>
         </tr>
         <tr>
           <td class="tl">停滞唤醒</td>
@@ -184,7 +186,7 @@
           <td class="tl">持仓上限</td>
           <td class="tl"><span class="at-gate" id="atGateHold"
                 title="到点无条件市价平，盈亏都平。防止震荡行情里拖成隔夜单"><b id="atGateHoldV">60 分钟</b></span></td>
-          <td class="tl">到点无条件平，防止拖成隔夜单。趋势单用 <span id="atGateHoldTrend">—</span>。</td>
+          <td class="tl">到点无条件平，防止拖成隔夜单（<span id="atGateHoldTrend">—</span>）。</td>
         </tr>
       </tbody>
     </table>
@@ -193,21 +195,17 @@
     <details class="at-rules" style="margin-top:var(--sp3)">
       <summary>完整规则与信息边界</summary>
       <div class="at-rules-body">
-        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 60 秒、同向重进 180 秒（可配置）；何时重开由模型结合经验库判断，教训库会抑制报复单</b>
-        · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b>。
-        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 持仓上限 → 峰值停滞唤醒 → 止盈门槛，顺序写死。
-        浮盈 ≥ 止盈门槛时才会问模型要不要落袋；峰值停滞（默认 3 分钟没再抬高、且浮盈已掉到
-        门槛的 60% 以下）也会把这一轮的决定权交回模型——<b>阈值一个字没改，只是不再盲等</b>
-        （10-28 那笔摸到 +1.85 之后 455 秒、7 轮 tick 模型一次没被问到）。参数是用真实 M1 K 线回放 191 笔入场
-        扫出来的，不是拍的——见 <code>tools/replay_exit.py</code>；扫了 36 组，
-        <b>全部负期望</b>，最优一组仍是 −0.09/笔，所以别指望调这两个数扭亏。
-        <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→等回踩再顺势；
+        XAUUSD 超短线（M1）· 同品种只留一笔 · <b>平仓后冷却 60 秒、同向重进 180 秒</b>
+        · <b>信号强度 |p_up−0.50| ≥ 0.06 才开仓</b> · <b>点差不进模型视野</b>（不给成本数字，也不许拿它拒单）。
+        <br><b>出场先过程序闸门（不问模型）</b>：硬止损 → 锁利兜底 → 保本兜底 → 持仓上限 → 峰值停滞唤醒 → 止盈门槛。
+        浮盈 ≥ 止盈门槛才问模型要不要落袋；峰值停滞（默认 3 分钟没再抬高、且已吐回四成以上）同样把决定权交回模型。
+        <br><b>主看 K 线，tick 仅辅助</b>：ER&lt;0.30 震荡→低买高卖；ER&gt;0.50 趋势→<b>顺势直接做，不等回踩</b>；
         收盘位置 <b>≤35% 做多 / ≥65% 做空 / 中间不动手</b>。
-        <br><b>无视点差成本</b>（不由模型负责）· 止损是程序按浮亏主动市价平，
-        <b>不给订单挂 SL/TP</b>（账本里仍是手动平仓）。
-        <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓之后才允许回看，
-        且<b>要等 7 根 K 线走完才复盘</b>——复盘窗口是「平仓前 7 根 + 平仓这根 + 平仓后 7 根 = 15 根」。
-        等待期间照常分析行情做下一笔。决策流里灰字是「跳过」——不花钱、没下单。
+        <br><b>硬止损两道线重合</b>：开仓成交后把 SL 挂到券商端（价距 = 止损金额），程序同时按浮亏市价平，
+        先到先用；<b>震荡单另挂 TP，趋势单不挂</b>。保本与脉冲锁利会把券商端 SL 往开仓价、峰值方向抬。
+        <br><b>信息边界：只能看当前 K 线 + 之前 13 根（共 14 根）</b>；平仓后才允许回看，
+        且<b>要等 7 根 K 线走完才复盘</b>（窗口 = 平仓前 7 根 + 平仓这根 + 平仓后 7 根）。
+        决策流里的灰字是「跳过」——没花钱、没下单。
       </div>
     </details>
   </div>

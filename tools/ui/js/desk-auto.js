@@ -2,7 +2,7 @@
    相同就跳过 innerHTML 重建（理由见下面的 rowsHtml）。 */
 let atRowsHtml = '';
 
-/* 冷静期剩余秒数（辅助模式专用）。
+/* 冷静期剩余秒数（确认下单模式专用）。
  *
  * 超时 / 否决之后有一段静默期（assist_deny_cooldown，默认 180 秒），
  * 但两个槽位的含义完全不同，混着写会让用户以为"程序全停了"：
@@ -68,7 +68,7 @@ function renderAutoTrade(a) {
   const nowMode = $('atNowMode');
   if (nowMode) {
     const ivSec = Number((a.cfg && a.cfg.interval_sec) || 0) || 60;
-    const modeTxt = a.assist ? (a.dry_run ? '辅助演练' : '辅助')
+    const modeTxt = a.assist ? (a.dry_run ? '确认演练' : '确认下单')
       : (a.dry_run ? '纸面' : '真实');
     nowMode.textContent = modeTxt + ' · ' + (a.symbol || '—') + ' · ' + ivSec + 's';
     nowMode.className = 'at-now' + (a.assist ? ' red' : '');
@@ -181,11 +181,24 @@ function renderAutoTrade(a) {
     if (um) {
       const t = Number(um.ts || 0);
       const hhmm = t ? new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-      unman.textContent = `⚠ ${hhmm} 停止时没读到持仓，仓位可能还在券商端 · 点此确认`;
-      unman.title = '「关闭并清仓」时 MT5 读不到持仓，程序没有平掉任何仓位。'
-        + '请去 MT5 终端确认仓位已平，然后点掉这条提示。'
-        + (um.error ? ('\n原因：' + um.error) : '')
-        + (um.tries ? `\n重试 ${um.tries} 次` : '');
+      // 两种悬案（2026-11-18）：
+      //   read_failed  —— 读不到持仓，不知道有没有平；
+      //   close_failed —— 读到了、平仓被拒，确定还有仓位在券商端。
+      // 后者必须把票据和拒单理由带上：用户去终端要能一眼找到那一笔。
+      const n = Array.isArray(um.tickets) ? um.tickets.length : 0;
+      if (um.kind === 'close_failed') {
+        unman.textContent = `⚠ ${hhmm} 有 ${n || '几'} 笔没平掉 · 点此确认`;
+        unman.title = '「关闭并清仓」时有仓位平仓被券商拒绝，AI 已停止、这些仓位'
+          + '现在只剩券商端止损在管。请去 MT5 终端手动平掉，然后点掉这条提示。'
+          + (n ? ('\n没平掉的票号：' + um.tickets.join(', ')) : '')
+          + (um.error ? ('\n原因：' + um.error) : '');
+      } else {
+        unman.textContent = `⚠ ${hhmm} 停止时没读到持仓，仓位可能还在券商端 · 点此确认`;
+        unman.title = '「关闭并清仓」时 MT5 读不到持仓，程序没有平掉任何仓位。'
+          + '请去 MT5 终端确认仓位已平，然后点掉这条提示。'
+          + (um.error ? ('\n原因：' + um.error) : '')
+          + (um.tries ? `\n重试 ${um.tries} 次` : '');
+      }
       unman.style.display = '';
     } else {
       unman.textContent = '';
