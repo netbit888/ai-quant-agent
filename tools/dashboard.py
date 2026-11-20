@@ -287,8 +287,17 @@ class Handler(BaseHTTPRequestHandler):
                 login = info.get("login") or want or None
                 # 逐笔进场理由：AI 复盘的输入之一，也随结果一起回给面板
                 trade_notes = paths.read_trade_notes(login)
+                # 人工标签（2026-11-20）：做单台能打标，复盘台却看不到——
+                # 标签按 ticket 存在 trade_labels.json，复盘表的行是**券商账本**
+                # （journal.build_trades，按月/按场上限截断），两条数据源之间
+                # 原来没有任何 join。一次算好整张表，前端按 position_id 对。
+                from live import labels as trade_labels
+
+                label_map = trade_labels.label_map(login)
+
                 advice = advise(stats, flags, info["trades"], allow_call=False,
-                                scoring=info.get("scoring"), login=login, notes=trade_notes)
+                                scoring=info.get("scoring"), login=login, notes=trade_notes,
+                                labels=label_map)
 
                 # 场次复盘：只放最近 30 场，账本长期累积后不至于把响应撑爆
                 from live import rules
@@ -326,6 +335,10 @@ class Handler(BaseHTTPRequestHandler):
                     "sessions": sessions,
                     "mark_summary": marks,
                     "trade_notes": {k: (v or {}).get("note", "") for k, v in trade_notes.items()},
+                    # 人工标签：{position_id: "趋势单 · 顺势突破"}。复盘表按它加一列，
+                    # 手工单在券商账本里和程序单长得一样，没有这一列就分不出
+                    # "走早了是执行问题"还是"这套打法本来就这么跑的"。
+                    "trade_labels": label_map,
                     "sessions_error": info.get("sessions_error"),
                     "session_notes": note_map,
                     "session_advice": session_advice,
@@ -594,6 +607,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "缺少 confirm=true，拒绝调用付费 API"})
             return
         try:
+            from live import labels as trade_labels
             from live import paths
             from live.advisor import advise, api_call_summary
             from live.journal import collect
@@ -610,6 +624,9 @@ class Handler(BaseHTTPRequestHandler):
                     force=bool(body.get("force")), allow_call=True,
                     scoring=info.get("scoring"), login=info.get("login"),
                     notes=paths.read_trade_notes(info.get("login")),
+                    # 标签也是复盘输入（2026-11-20）：不传的话 AI 复盘看到的
+                    # "走早了"是混着所有打法的平均值，归因全归到执行上。
+                    labels=trade_labels.label_map(info.get("login")),
                 )
                 payload = {"ok": result.get("ok", False), "advice": result, "api_calls": api_call_summary()}
                 if not payload["ok"]:

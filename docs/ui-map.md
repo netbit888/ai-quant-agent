@@ -36,12 +36,12 @@
 | `html/modals.html` | 142 | 五个弹窗 + 通用确认框 `#modalMask` |
 | `html/view-desk.html` | 232 | 做单台：`#atBar` 状态带、账户条、`#live-desk` |
 | `html/view-flow.html` | 36 | 决策流页 `#live-flow` |
-| `html/view-review.html` | 167 | 复盘台 `#live-review` |
+| `html/view-review.html` | 180 | 复盘台 `#live-review`、分区跳转条 `#revNav` |
 | `html/view-setup.html` | 219 | 设置舱 `#live-setup` |
 | `html/footer.html` | 9 | 页脚：程序名 / 版本 / 检查更新 |
 | `html/curtain.html` | 28 | 全屏提醒幕布 `#atCurtain`（在 `</script>` 之后） |
 | `js/bridge.js` | 243 | pywebview 桥、格式化工具、`drawArea`/`drawBars` 图表原语 |
-| `js/review.js` | 331 | `loadLive`/`renderLive` 主轮询、账户切换、账户条秒针与数据新鲜度（`paintAcctClock`） |
+| `js/review.js` | 456 | `loadLive`/`renderLive` 主轮询、账户切换、账户条秒针与数据新鲜度（`paintAcctClock`）、复盘台分区跳转（末尾） |
 | `js/autotrade.js` | 162 | `loadAutoTrade`、`renderStatusBar`、反馈面板 |
 | `js/desk-ring.js` | 275 | `renderRing`（决策环 + 8 格位）、`setLed` |
 | `js/desk-pos.js` | 215 | `renderPos`（浮盈尺、保本三态；趋势单的线叫「复核门槛」不叫止盈；轴上限按峰值阶梯放大） |
@@ -72,6 +72,7 @@
 | 做单参数（品种/间隔/手数/纸面真实） | `js/desk-prefs.js` + `html/view-setup.html`（手数档位另有 `live/prefs.py` 的 `LOTS`，两边由 `tests/test_lot_scale.py` 钉住） |
 | 账户条 / 余额净值 | `html/view-desk.html` + `css/live.css` + `js/review.js` |
 | 复盘台（本场复盘、行为标记） | `js/session-review.js` + `html/view-review.html` |
+| 复盘台顶部的分区跳转条（本场/战绩/曲线/AI 诊断/分维度/持仓流水） | `html/view-review.html` 的 `#revNav`（按钮 `data-rev-to` → 分组 id）+ `js/review.js` 末尾那段。**加卡片要归到某个组里**，否则滚到它时高亮会停在上一组；`tests/test_review_nav.py` 校验 id 存在、按钮顺序 = 分组在文档里的先后 |
 | 交易评分 / 近期质量 | `js/scoring.js`、`js/trade-quality.js` |
 | 经验库、教训库统计 | `js/lessons.js` |
 | 模型切换下拉 | `js/model-switch.js` |

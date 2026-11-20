@@ -43,9 +43,10 @@
   /* 理由列是长句，必须能换行；但得限宽，否则它会把「时间 / 动作 / 方向」
      这些短列压到只剩一个字宽——中文可以在任意字之间断行，压缩的表现就是
      表头还正常、每行第一列只剩「时」「间」上下两行。 */
-  /* v2 决策流只有 6 列，理由落在第 6 列（原来第 7/8 列是开仓/平仓理由）。 */
+  /* v2 决策流只有 6 列，理由落在第 6 列（原来第 7/8 列是开仓/平仓理由）。
+     复盘表 2026-11-20 加了「标签」列（第 4 列），进场理由从第 11 挪到第 12。 */
   #rowsAuto td:nth-child(6),
-  #rowsTrade td:nth-child(11), #rowsPos td:nth-child(9) {
+  #rowsTrade td:nth-child(12), #rowsPos td:nth-child(9) {
     white-space: normal; max-width: 340px; word-break: break-word;
   }
   /* 理由列的上限只做「视觉折行」，不再在 JS 里砍字符串。
@@ -72,11 +73,21 @@
   #rowsAuto th:nth-child(2), #rowsAuto th:nth-child(3),
   #rowsAuto th:nth-child(6),
   #rowsTrade td:nth-child(2), #rowsTrade td:nth-child(3),
-  #rowsTrade td:nth-child(8), #rowsTrade td:nth-child(11),
+  #rowsTrade td:nth-child(4), #rowsTrade td:nth-child(9),
+  #rowsTrade td:nth-child(12),
   #rowsTrade th:nth-child(2), #rowsTrade th:nth-child(3),
-  #rowsTrade th:nth-child(8), #rowsTrade th:nth-child(11),
+  #rowsTrade th:nth-child(4), #rowsTrade th:nth-child(9),
+  #rowsTrade th:nth-child(12),
   #rowsPos td:nth-child(2), #rowsPos td:nth-child(3),
   #rowsPos th:nth-child(2), #rowsPos th:nth-child(3) { text-align: left; }
+  /* 复盘表的「标签」列（2026-11-20）：做单台那颗胶囊的文字版。
+     形状做小药丸是为了和右边的「评分」方块在同一行里不打架——
+     两者都是短枚举，靠形状区分（药丸=人的判断，方块=程序打的分）。 */
+  .tbl-tag {
+    display: inline-block; padding: 1px 7px; border-radius: var(--r-pill);
+    border: 1px solid var(--border-hi); color: var(--dim);
+    font-size: var(--fs-1); white-space: nowrap;
+  }
   /* 空状态是整行一句话，不能被 td 的 nowrap 撑成一条超长的单行 */
   .empty { white-space: normal; }
   /* 直接装表格的卡片允许横向滚。表格现在所有格都不换行（不然中文会被压成

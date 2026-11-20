@@ -463,6 +463,9 @@ document.querySelectorAll('.live-sub').forEach(b => {
     $('live-review').classList.toggle('hidden', s !== 'review');
     $('live-setup').classList.toggle('hidden', s !== 'setup');
     if (s === 'desk' || s === 'flow') fitActive();
+    // 复盘台是唯一「一屏装不下」的态：切过去回到顶部，重算导航吸附高度，
+    // 否则从做单台滚了半屏切过来会落在复盘台中间（2026-11-20）
+    if (s === 'review' && typeof showReviewTop === 'function') showReviewTop();
   });
 });
 

@@ -162,8 +162,32 @@ def label_of(ticket, login=None) -> str:
     trend/range 一个道理，但这里连改写都不需要）。
     """
     item = get_label(ticket, login)
-    if not item:
-        return ""
+    return _fmt(item) if item else ""
+
+
+def _fmt(item: dict) -> str:
+    """一条标签记录 → `趋势单 · 顺势突破`。唯一的格式化出口。"""
     txt = REGIME_TXT.get(str(item.get("regime")), "")
     tag = str(item.get("tag") or "")
     return f"{txt} · {tag}" if txt and tag else (txt or tag)
+
+
+def label_map(login=None) -> dict[str, str]:
+    """ticket -> `趋势单 · 顺势突破`。给**批量渲染**用。
+
+    为什么不开 `label_of` 循环（2026-11-20）：复盘表一次要摆十几到两百笔，
+    而 `label_of` 每次都 `load_labels()` 整份读盘——200 笔就是 200 次文件
+    读取，面板还是 20 秒一轮询。这里读一次、算一遍。
+
+    键是字符串，和 `paths.read_trade_notes()` 返回的形状一致（前端拿
+    `String(position_id)` 去对），别一边 int 一边 str——`trade_notes` 已经
+    因为这点在 `review.js` 里专门写了 `String(...)`。
+    """
+    out: dict[str, str] = {}
+    for key, item in load_labels(login).items():
+        if not isinstance(item, dict):
+            continue
+        txt = _fmt(item)
+        if txt:
+            out[str(key)] = txt
+    return out

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -65,7 +66,9 @@ PROMPT = """以下是一个真实账户的交易统计，请做复盘诊断。
 ## 逐日盈亏
 {daily}
 
-## 最近 20 笔交易
+## 最近 20 笔交易（「标签」= 人给这一笔写的入场意图，不是程序判的；
+  同一句"走早了"在「顺势突破」和「逆势反抽」下是两件事：前者是执行怕回撤，
+  后者这种打法本来就是快进快出。没有标签的只能从盈亏反推，要标明是推测）
 {recent}
 
 ## 规则引擎已标记的风险
@@ -93,7 +96,7 @@ def _fmt_money(v) -> str:
 
 
 def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: dict | None = None,
-                 notes: dict | None = None) -> str:
+                 notes: dict | None = None, labels: dict | None = None) -> str:
     acct = stats.get("account") or {}
     account = (
         f"账户 {acct.get('login', '?')} @ {acct.get('server', '?')}，"
@@ -105,10 +108,20 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
     )
 
     notes = notes or {}
+    labels = labels or {}
 
     def _note_of(t: dict) -> str:
         row = notes.get(str(t.get("position_id"))) or {}
         return (row.get("note") or "").strip()
+
+    def _label_of(t: dict) -> str:
+        """这一笔的标签（`趋势单 · 顺势突破`）。做单台打的，没打就是空串。
+
+        2026-11-20 接进来：标签本来是给复盘归因用的（`live.labels` 的文档
+        第一句就写着"决定复盘怎么归因"），但在此之前只有流水行里存了一份，
+        复盘提示词一个字都没读到——人标了，模型不知道，等于白标。
+        """
+        return str(labels.get(str(t.get("position_id"))) or "")
 
     overall = "\n".join(
         [
@@ -117,6 +130,8 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
             f"日均 {stats.get('trades_per_day')} 笔（按有交易的天数算，不是日历跨度）",
             f"其中 {sum(1 for t in trades if _note_of(t))} 笔写了进场理由"
             "（没有理由的交易只能从盈亏反推，结论要标明是推测）",
+            f"其中 {sum(1 for t in trades if _label_of(t))} 笔打了打法标签"
+            "（标签是人的入场意图，归因时优先按它分组，不要把所有亏损都归到执行上）",
             f"净盈亏 {_fmt_money(stats.get('net'))}，相对入金 {stats.get('return_pct')}%",
             f"胜率 {stats.get('win_rate')}%（{stats.get('wins')} 胜 / {stats.get('losses')} 负）",
             f"盈利因子 PF {stats.get('pf')}",
@@ -152,6 +167,7 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
         f"{_fmt_money(t['profit'])} | {t.get('close_reason')} | "
         f"持仓 {(t['exit_time'] - t['entry_time']) / 60:.0f} 分钟"
         + (f" | 进场理由: {_note_of(t)}" if _note_of(t) else "")
+        + (f" | 标签: {_label_of(t)}" if _label_of(t) else "")
         for t in recent
     ) or "（无）"
 
@@ -200,13 +216,21 @@ def build_prompt(stats: dict, flags: list[dict], trades: list[dict], scoring: di
     )
 
 
-def _cache_key(stats: dict, trades: list[dict], notes: dict | None = None) -> str:
+def _cache_key(stats: dict, trades: list[dict], notes: dict | None = None,
+               labels: dict | None = None) -> str:
     closed = [t for t in trades if t.get("exit_time")]
     last = max((t["exit_time"] for t in closed), default=0)
     # 进场理由也算输入的一部分：新写了理由，旧复盘就该失效
     notes = notes or {}
     note_sig = f"{len(notes)}:{max((v.get('updated_at') or 0) for v in notes.values()) if notes else 0}"
-    return f"{len(closed)}:{last}:{note_sig}"
+    # 标签同理（2026-11-20）：补一个标签就该重新复盘。标签表没有 updated_at
+    # （`labels.label_map` 只给文字），所以按内容算——条数 + 拼串摘要，
+    # 不用 hash()：那个跨进程不稳定，缓存键会自己失效。
+    labels = labels or {}
+    lbl_sig = (f"{len(labels)}:" + hashlib.md5(
+        "|".join(f"{k}={v}" for k, v in sorted(labels.items())).encode("utf-8")
+    ).hexdigest()[:10]) if labels else "0"
+    return f"{len(closed)}:{last}:{note_sig}:{lbl_sig}"
 
 
 def load_cached(login: int | str | None = None) -> dict | None:
@@ -247,6 +271,7 @@ def advise(
     scoring: dict | None = None,
     login: int | str | None = None,
     notes: dict | None = None,
+    labels: dict | None = None,
 ) -> dict:
     """返回 AI 复盘结果。失败时返回带 error 的字典，不抛异常——面板不能因此挂掉。
 
@@ -256,7 +281,7 @@ def advise(
     if stats.get("empty"):
         return {"ok": False, "error": "还没有已平仓交易，无法复盘", "advice": None, "flags": flags}
 
-    key = _cache_key(stats, trades, notes)
+    key = _cache_key(stats, trades, notes, labels)
     cached = load_cached(login)
     if not force and cached and cached.get("key") == key and cached.get("advice"):
         return {"ok": True, "cached": True, **cached, "flags": flags}
@@ -277,7 +302,8 @@ def advise(
         from agent.sandbox import extract_json
         from agent.llm import chat_ex
 
-        text, usage = chat_ex(build_prompt(stats, flags, trades, scoring, notes), system=SYSTEM)
+        text, usage = chat_ex(build_prompt(stats, flags, trades, scoring, notes, labels),
+                              system=SYSTEM)
         parsed = extract_json(text)
     except Exception as exc:  # noqa: BLE001
         _log_call(False, usage, f"{type(exc).__name__}: {exc}", login=login)

@@ -1,4 +1,17 @@
   <div id="live-review" class="live-pane hidden">
+  <!-- 复盘台分区导航（2026-11-20）：14 张卡片竖排 4000+ 像素，找一块得滚半天。
+       一行锚点贴在状态带下面，点一下滚过去，滚动时自动高亮当前所在的分区。
+       **不折叠、不改卡片顺序**——只是给长页面加个门牌号，内容还是原来那些。
+       data-rev-to 指向的分组 id 由 tests/test_review_nav.py 校验存在且顺序一致。 -->
+  <nav class="rev-nav" id="revNav" aria-label="复盘台分区">
+    <button class="rev-nav-btn active" data-rev-to="revSess">本场</button>
+    <button class="rev-nav-btn" data-rev-to="revPerf">战绩</button>
+    <button class="rev-nav-btn" data-rev-to="revCurve">曲线</button>
+    <button class="rev-nav-btn" data-rev-to="revAi">AI 诊断</button>
+    <button class="rev-nav-btn" data-rev-to="revBreak">分维度</button>
+    <button class="rev-nav-btn" data-rev-to="revFlow">持仓流水</button>
+  </nav>
+
   <!-- 以下全部是原「实盘复盘」页的卡片，S1 原样搬入复盘台，一个字未改。 -->
 
   <!-- 运行计数：做单台上只留「模型调用失败 / 主动放弃」两条，其余都是
@@ -19,7 +32,7 @@
   </div>
 
   <!-- 本场复盘：盘后打开先看这一块。按「上一笔平仓→下一笔开仓」超过 30 分钟切场 -->
-  <div class="card l1">
+  <div class="card l1" id="revSess">
     <div class="card-head">
       <h2>本场复盘</h2>
       <div class="win-tabs" id="sessTabs"></div>
@@ -27,7 +40,7 @@
     <div id="sessBody"><div class="mini">读取中…</div></div>
   </div>
 
-  <div class="kpis">
+  <div class="kpis" id="revPerf">
     <div class="kpi"><div class="k">今日盈亏</div><div class="v mono" id="lvToday">—</div><div class="s" id="lvTodaySub">按平仓日统计</div></div>
     <div class="kpi"><div class="k">累计净盈亏</div><div class="v mono" id="lvNet">—</div><div class="s" id="lvNetSub">全部已平仓</div></div>
     <div class="kpi"><div class="k">胜率</div><div class="v mono" id="lvWin">—</div><div class="s" id="lvWinSub">—</div></div>
@@ -92,7 +105,7 @@
     <svg id="chartRolling" viewBox="0 0 1240 150" preserveAspectRatio="none"></svg>
   </div>
 
-  <div class="grid2">
+  <div class="grid2" id="revCurve">
     <div class="card">
       <div class="card-head">
         <h2>账户余额曲线（含出入金）</h2>
@@ -119,7 +132,7 @@
     <svg id="chartBalance" viewBox="0 0 1240 150" preserveAspectRatio="none"></svg>
   </div>
 
-  <div class="grid2">
+  <div class="grid2" id="revAi">
     <div class="card">
       <div class="card-head">
         <h2>AI 复盘</h2>
@@ -144,7 +157,7 @@
     <table><thead><tr><th>标记</th><th>次数</th><th>涉及净盈亏</th><th>胜率</th><th>出现场次</th></tr></thead><tbody id="rowsMark"></tbody></table>
   </div>
 
-  <div class="grid2">
+  <div class="grid2" id="revBreak">
     <div class="card l3"><h2>分方向</h2><table><thead><tr><th>方向</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsDir"></tbody></table></div>
     <div class="card l3"><h2>分平仓原因</h2><table><thead><tr><th>原因</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsReason"></tbody></table></div>
   </div>
@@ -154,14 +167,14 @@
     <div class="card l3"><h2>分星期</h2><table><thead><tr><th>星期</th><th>笔数</th><th>胜率</th><th>净盈亏</th><th>PF</th></tr></thead><tbody id="rowsWeek"></tbody></table></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="revFlow">
     <h2>当前持仓 <span class="mini" id="posCount"></span></h2>
     <table><thead><tr><th>开仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>现价</th><th>止损</th><th>止盈</th><th>浮动盈亏</th></tr></thead><tbody id="rowsPos"></tbody></table>
   </div>
 
   <div class="card l3">
     <h2>最近平仓记录</h2>
-    <table><thead><tr><th>平仓时间</th><th>品种</th><th>方向</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th><th>原因</th><th>持仓</th><th>评分</th><th>进场理由</th></tr></thead><tbody id="rowsTrade"></tbody></table>
+    <table><thead><tr><th>平仓时间</th><th>品种</th><th>方向</th><th>标签</th><th>手数</th><th>开仓价</th><th>平仓价</th><th>盈亏</th><th>原因</th><th>持仓</th><th>评分</th><th>进场理由</th></tr></thead><tbody id="rowsTrade"></tbody></table>
   </div>
   </div><!-- /#live-review -->
 

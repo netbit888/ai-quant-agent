@@ -145,5 +145,52 @@ class SummaryWiring(TempLedger):
                          "顺势突破")
 
 
+class LabelReachesReview(TempLedger):
+    """标签必须能一路走到复盘（2026-11-20）。
+
+    用户原话：「我最近做手工单都打了标签，在复盘好像没看到相关信息」。
+    根因不是没存——`manual_close` / `close` 行里一直带着 `label` 快照——而是
+    复盘台读的是**券商账本**（`journal.build_trades`），和按 ticket 存的标签表
+    之间从来没有 join；AI 复盘的提示词也一个字都没读到。标了没人看，等于没标。
+    """
+
+    def test_label_map_batches_and_formats(self):
+        labels.set_label(501, "trend", "顺势突破", "999")
+        labels.set_label(602, "range", "下沿多", "999")
+        m = labels.label_map("999")
+        self.assertEqual(m, {"501": "趋势单 · 顺势突破", "602": "震荡单 · 下沿多"})
+        # 键必须是字符串：前端拿 String(position_id) 去对（trade_notes 同一约定）
+        self.assertTrue(all(isinstance(k, str) for k in m))
+        self.assertEqual(labels.label_map("404"), {})
+
+    def test_prompt_carries_label(self):
+        from live import advisor
+
+        labels.set_label(501, "trend", "逆势反抽", "999")
+        trades = [{"position_id": 501, "symbol": "XAUUSDc", "direction": 1,
+                   "volume": 0.1, "profit": 12.0, "entry_price": 4000.0,
+                   "exit_price": 4012.0, "entry_time": NOW - 600,
+                   "exit_time": NOW, "close_reason": "manual"}]
+        stats = {"account": {}, "by_direction": [], "by_reason": [],
+                 "by_hour": [], "by_weekday": [], "daily": [], "count": 1}
+        txt = advisor.build_prompt(stats, [], trades, None, {},
+                                   labels.label_map("999"))
+        self.assertIn("标签: 趋势单 · 逆势反抽", txt)
+        self.assertIn("1 笔打了打法标签", txt)
+
+    def test_cache_key_invalidates_on_new_label(self):
+        """补一个标签就该重新复盘——否则人标完，看到的还是旧结论。"""
+        from live import advisor
+
+        trades = [{"position_id": 501, "exit_time": NOW}]
+        k1 = advisor._cache_key({}, trades, {}, {})
+        k2 = advisor._cache_key({}, trades, {}, {"501": "趋势单 · 顺势突破"})
+        k3 = advisor._cache_key({}, trades, {}, {"501": "震荡单 · 下沿多"})
+        self.assertNotEqual(k1, k2)
+        self.assertNotEqual(k2, k3)
+        # 同一份标签必须稳定：跨进程也不能漂（不能用内置 hash()）
+        self.assertEqual(k2, advisor._cache_key({}, trades, {}, {"501": "趋势单 · 顺势突破"}))
+
+
 if __name__ == "__main__":
     unittest.main()

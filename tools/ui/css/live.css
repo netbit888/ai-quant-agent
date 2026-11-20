@@ -209,3 +209,33 @@
   .delta-down { color: var(--bad-lit); }
   h3.sub { font-size: var(--fs-2); color: var(--muted); margin: 0 0 9px; font-weight: 600; letter-spacing: .5px; }
 
+
+  /* ---------------- 复盘台分区导航 ----------------
+     14 张卡片竖排在 4000+ 像素里，找「AI 复盘」得滚好久。这一条锚点贴在
+     状态带下沿（top 由 JS 量 atBar 真实高度写进 --revnav-top，窄窗口折行
+     时也不会被压住），点一下滚过去，滚动时自动高亮当前分区。
+
+     z-index 25 < 状态带 30：状态带永远压在上面，两条并成一条双行头。
+     sticky 的包含块是 #live-review（内容全高），所以整段复盘台内都吸得住；
+     pane 是 display:none 切态、没有 overflow，不破坏吸附。 */
+  .rev-nav {
+    position: sticky; top: var(--revnav-top, 44px); z-index: 25;
+    display: flex; align-items: center; gap: var(--sp1);
+    margin: 0 0 var(--sp4); padding: 4px 5px; border-radius: var(--r-md);
+    background: rgba(9,13,19,.92);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border: 1px solid var(--border);
+    /* 窄窗口宁可横向滑，也不折成两行把视口再吃掉 30px */
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  }
+  .rev-nav::-webkit-scrollbar { display: none; }
+  .rev-nav-btn {
+    flex: none; padding: 4px 11px; border: 0; border-radius: var(--r-sm);
+    background: none; color: var(--muted); font: inherit; font-size: var(--fs-2);
+    cursor: pointer; white-space: nowrap; transition: .15s;
+  }
+  .rev-nav-btn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+  .rev-nav-btn.active {
+    color: var(--info-lit); background: rgba(74,158,255,.18);
+    box-shadow: 0 0 0 1px rgba(74,158,255,.3) inset;
+  }

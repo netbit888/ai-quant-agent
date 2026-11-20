@@ -292,6 +292,10 @@ function renderLive(d) {
 
   const trades = (d.trades || []).filter(t => t.exit_time).slice(-15).reverse();
   const tradeNotes = d.trade_notes || {};
+  // 人工标签（2026-11-20）：做单台的胶囊打在这里能看见。券商账本里手工单和
+  // 程序单长得一模一样（magic=0），标签是唯一能区分「这套打法怎么跑的」的信息。
+  // 键是字符串 position_id，和 trade_notes 同一套约定。
+  const tradeLabels = d.trade_labels || {};
   // 正在写理由时不重建表格：20 秒轮询会把输入冲掉（场次备注踩过这个坑）
   const editingNote = document.activeElement && document.activeElement.dataset
     && document.activeElement.dataset.notePid;
@@ -302,11 +306,16 @@ function renderLive(d) {
         ? `<span class="chip c-${sc.grade}" title="${sc.flags.join('；') || '无异常'}">${sc.score}</span>`
         : '<span class="mini">—</span>';
       const note = tradeNotes[String(t.position_id)] || '';
+      const lbl = tradeLabels[String(t.position_id)] || '';
+      const lblCell = lbl
+        ? `<span class="tbl-tag" title="做单台上打的标签：只用于复盘归因，不影响下单/止损/平仓">${esc(lbl)}</span>`
+        : '<span class="mini">—</span>';
       return `
     <tr>
       <td class="mono">${ts2str(t.exit_time)}</td>
       <td>${t.symbol}</td>
       <td class="${t.direction > 0 ? 'pos-long' : 'pos-short'}">${t.direction > 0 ? '多' : '空'}</td>
+      <td>${lblCell}</td>
       <td class="mono"${t.partial ? ` title="部分平仓：已平 ${t.volume_closed} / 开仓 ${t.volume}"` : ''}>${t.partial ? `${t.volume_closed}/${t.volume}` : t.volume}</td>
       <td class="mono">${fmt(t.entry_price, 3)}</td>
       <td class="mono">${fmt(t.exit_price, 3)}</td>
@@ -318,7 +327,7 @@ function renderLive(d) {
                  placeholder="为什么进？" title="写一句进场理由，AI 复盘会读它"
                  onchange="saveTradeNote(this)"></td>
     </tr>`;
-    }).join('') : '<tr><td colspan="11" class="empty">暂无平仓记录</td></tr>';
+    }).join('') : '<tr><td colspan="12" class="empty">暂无平仓记录</td></tr>';
   }
 
   // ---- 本场复盘（盘后第一眼要看的） ----
@@ -329,3 +338,119 @@ function renderLive(d) {
   // 否则账本一刷新就顺带拉一次，两边节奏互相打乱。
 }
 
+
+/* ==================== 复盘台分区导航 ====================
+   复盘台 14 张卡片竖排 4000+ 像素，找「AI 复盘」得一路滚。这里给长页面
+   装一排门牌号：点一下平滑滚过去，滚动时自动高亮当前所在分区。
+
+   三个必须量而不是猜的数：
+   - 吸附位置：状态带窄窗口会折行成两行，CSS 写死 44px 就会被盖住，
+     所以每次进复盘台 / 改窗口都量 atBar 真实高度写进 --revnav-top。
+   - 落点偏移：点击后目标卡片要停在「状态带 + 导航条」下方，否则标题
+     被压在吸顶带底下，等于跳过去看不见自己在哪。
+   - 点击锁定：复盘台里的卡片高度不是常数（AI 复盘 1 秒一刷、表格行数
+     随窗口变），到站后内容一加载，目标卡片的位置又漂几十像素，按位置
+     重新判定就会把高亮退回上一组——人点「AI 诊断」，高亮停在「曲线」。
+     所以点击后按 id 锁住，直到人自己滚轮/触摸/按键才交还给位置判定。 */
+const revNavSecs = () => Array.from(document.querySelectorAll('#revNav [data-rev-to]'))
+  .map(btn => ({ btn, el: document.getElementById(btn.dataset.revTo) }))
+  .filter(s => s.el);
+
+let revNavPin = null;    // 点击锁定的分区 id（null = 跟随滚动位置判定）
+let revNavPinTop = 0;    // 锁定时算出的落点，用来识别「人已经滚走了」
+let revNavIdle = 0;      // 滚动停止后的核对定时器
+let revNavRaf = 0;       // scroll 事件的 rAF 合并，一次滚动只算一遍
+
+function syncRevNavHeight() {
+  const bar = document.getElementById('atBar');
+  if (!bar) return;
+  const h = Math.round(bar.getBoundingClientRect().height) + 'px';
+  const root = document.documentElement;
+  // 只在真的变了才写：每帧写 CSS 变量会触发整棵子树重算样式
+  if (root.style.getPropertyValue('--revnav-top') !== h) {
+    root.style.setProperty('--revnav-top', h);
+  }
+}
+
+/* 吸顶带 + 导航条的总高度：内容不许钻到这底下，不然「跳过去了」等于没跳。 */
+function revNavOffset() {
+  const bar = document.getElementById('atBar');
+  const nav = document.getElementById('revNav');
+  const h = (el) => (el ? el.getBoundingClientRect().height : 0);
+  return Math.round(h(bar) + h(nav) + 10);
+}
+
+function syncRevNav() {
+  const pane = document.getElementById('live-review');
+  if (!pane || pane.classList.contains('hidden')) return;   // 隐藏态 rect 全是 0
+  const secs = revNavSecs();
+  if (!secs.length) return;
+  syncRevNavHeight();      // 状态带文字变长会折行，高度跟着变
+
+  let cur;
+  if (revNavPin) {
+    cur = secs.findIndex(s => s.btn.dataset.revTo === revNavPin);
+  } else {
+    const line = revNavOffset();
+    cur = 0;
+    // 24px 容差 = 点击落点余量（8）+ 到站后的布局漂移余量
+    secs.forEach((s, i) => { if (s.el.getBoundingClientRect().top <= line + 24) cur = i; });
+    // 滚到底：最后一组永远是当前，否则停在最后一张卡时高亮还挂在上一组
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) {
+      cur = secs.length - 1;
+    }
+  }
+  if (cur < 0) return;
+  secs.forEach((s, i) => s.btn.classList.toggle('active', i === cur));
+}
+
+function gotoRevSection(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  syncRevNavHeight();
+  // 多让 8px：落点严格落在判定线之上，标题和吸顶带之间也留出呼吸位
+  const top = Math.max(0, window.scrollY + el.getBoundingClientRect().top
+                          - revNavOffset() - 8);
+  revNavPin = id;
+  revNavPinTop = top;
+  document.querySelectorAll('#revNav [data-rev-to]').forEach(b =>
+    b.classList.toggle('active', b.dataset.revTo === id));
+  window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+}
+
+/* 切到复盘台时调用：回到顶部 + 重算吸附高度 + 高亮复位到第一组。
+   不回顶部的话，在做单台滚了半屏再切过来，人会落在复盘台中间，
+   完全不知道自己在看哪一段。再点一次「复盘台」也走这里 = 回到顶部。 */
+function showReviewTop() {
+  syncRevNavHeight();
+  revNavPin = null;
+  window.scrollTo({ top: 0 });
+  const secs = revNavSecs();
+  secs.forEach((s, i) => s.btn.classList.toggle('active', i === 0));
+}
+
+document.querySelectorAll('#revNav [data-rev-to]').forEach(b => {
+  b.addEventListener('click', () => gotoRevSection(b.dataset.revTo));
+});
+window.addEventListener('scroll', () => {
+  if (revNavRaf) return;
+  revNavRaf = requestAnimationFrame(() => { revNavRaf = 0; syncRevNav(); });
+  // 滚动停稳后核对一次：人自己滚走了就把锁定交还。滚轮/触摸/按键之外，
+  // 拖滚动条、快捷键之外的代码滚动都不产生那些事件，光靠它们会锁死。
+  // 平滑滚动途中不查（那时 scrollY 离落点还很远），只在静止后比一次。
+  clearTimeout(revNavIdle);
+  revNavIdle = setTimeout(() => {
+    if (revNavPin && Math.abs(window.scrollY - revNavPinTop) > 120) {
+      revNavPin = null;
+      syncRevNav();
+    }
+  }, 220);
+}, { passive: true });
+window.addEventListener('resize', () => { syncRevNavHeight(); syncRevNav(); });
+// 人自己动了手 = 不再锁在点击目标上。**不监听 scroll**：平滑滚动自己也是
+// scroll 事件，那样等于刚锁上就解开。
+['wheel', 'touchstart', 'mousedown', 'keydown'].forEach(ev => {
+  window.addEventListener(ev, () => { revNavPin = null; }, { passive: true });
+});
+// 首帧量一次：状态带的字号/内边距要等样式生效才量得准
+requestAnimationFrame(() => { syncRevNavHeight(); syncRevNav(); });

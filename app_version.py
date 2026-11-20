@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-APP_VERSION = "1.5.36"
+APP_VERSION = "1.5.37"
 
 _NUM = re.compile(r"(\d+(?:\.\d+)*)")
 
