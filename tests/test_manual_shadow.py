@@ -235,6 +235,55 @@ class ManualRiskBaseline(TempLedger):
         self.assertGreater(view["sl_atr"], 0)
 
 
+class ProgramTicketIsNotManual(TempLedger):
+    """程序自己那一笔绝不能被当成手工单（2026-11-20）。
+
+    11-18 把影子改成「无条件推进」之后留下的口子：`rows` 是按品种取的账户
+    持仓，里面天然含着程序刚开的那笔（magic=0，券商眼里和手工单没区别）。
+    结果程序持仓期间会给自己建一份影子，平仓时多落一行 `kind="manual_close"`
+    ——一笔程序单在流水里有两行收尾，按 ticket 聚合的工具全被这条噪音污染。
+    战绩本身不受影响（summary 只认 `kind=="close"`），所以它一直没被发现。
+    """
+
+    def _sync(self, rows, fps, skip=0):
+        with mock.patch.object(autotrade, "_bars", return_value=bars_up(40)):
+            return autotrade._manual_shadow_sync(_cfg(), rows, fps, "999",
+                                                 skip_ticket=skip)
+
+    def test_program_ticket_never_enters_shadow(self):
+        sh = self._sync(_rows(ticket=222), {222: 5.0}, skip=222)
+        self.assertEqual(sh, {})
+        self.assertEqual(autotrade._load_manual_shadow("999"), {})
+
+    def test_stale_program_entry_dropped_without_close_row(self):
+        """升级前已经建下的影子：删掉就行，**不许**补一行平仓——它不是手工单。"""
+        self._sync(_rows(ticket=222), {222: 5.0})          # 旧逻辑留下的
+        self.assertIn("222", autotrade._load_manual_shadow("999"))
+
+        written: list = []
+        with mock.patch.object(autotrade, "append_log",
+                               side_effect=lambda row, login=None: written.append(row)):
+            self._sync([], {}, skip=222)
+        self.assertEqual(written, [])
+        self.assertEqual(autotrade._load_manual_shadow("999"), {})
+
+    def test_view_and_count_skip_program_position(self):
+        """同品种两笔仓（程序 222 + 手工 111）：视图只认手工那笔，count 也是 1。"""
+        rows = _rows(ticket=111) + _rows(ticket=222, price_open=4010.0)
+        with mock.patch("live.journal.open_positions", return_value=rows), \
+                mock.patch.object(autotrade, "_quote", return_value=(4000.0, 4000.2)), \
+                mock.patch.object(autotrade, "_bars", return_value=bars_up(40)), \
+                mock.patch.object(autotrade, "append_log"):
+            autotrade._MANUAL_POS_CACHE["ts"] = 0.0
+            view = autotrade._manual_position({"symbol": "XAUUSDc", "lots": 0.1},
+                                              skip_ticket=222)
+        self.assertEqual(view["ticket"], 111)
+        self.assertEqual(view["count"], 1)
+        shadow = autotrade._load_manual_shadow("999")
+        self.assertIn("111", shadow)
+        self.assertNotIn("222", shadow)
+
+
 class ManualVerdict(unittest.TestCase):
     """平仓判语：手工单不进复盘队列，这句话就是它的复盘。"""
 

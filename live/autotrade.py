@@ -5993,7 +5993,8 @@ def _manual_close_row(sh: dict, now: int, login=None) -> dict | None:
     }
 
 
-def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
+def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None,
+                        skip_ticket: int = 0) -> dict:
     """推进手工单影子：更新峰值、发现平仓、落 manual_close 行。
 
     返回影子表（键是 ticket 字符串）。`fps` = {ticket: 当前浮盈}，由调用方
@@ -6001,6 +6002,14 @@ def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
 
     **只写 `manual_shadow.json`，一个字都不写 state。** 这条是硬约束，
     `tests/test_manual_shadow.py` 里钉着。
+
+    `skip_ticket`（2026-11-20）：**程序自己那一笔的 ticket**，绝不许进影子表。
+    `rows` 是按品种取的账户持仓，里面天然含着程序刚开的那笔（magic=0，和
+    手工单在券商眼里没有区别）；不剔掉的话程序持仓期间会给自己建一份
+    "手工单"影子，平仓时多落一行 `kind="manual_close"`——一笔程序单在流水里
+    有两行收尾，按 ticket 聚合的工具全被这条噪音污染。
+    已经存在于影子表里的同 ticket 条目（升级前建下的）直接删掉，**且不落
+    manual_close 行**：它不是手工单，凭空记一笔平仓比不记更糟。
     """
     shadow = _load_manual_shadow(login)
     now = int(time.time())
@@ -6011,6 +6020,13 @@ def _manual_shadow_sync(cfg, rows: list[dict], fps: dict, login=None) -> dict:
             live[t] = m
 
     changed = False
+    # 剔除程序自己的仓，必须在下面「已不在持仓里 = 平了」那段**之前**：
+    # 先 pop 掉影子，那段就看不到这个 key，也就不会给它写平仓行。
+    if skip_ticket:
+        skip = int(skip_ticket)
+        live.pop(skip, None)
+        if shadow.pop(str(skip), None) is not None:
+            changed = True
     for t, m in live.items():
         key = str(t)
         sh = shadow.get(key)
@@ -6119,7 +6135,8 @@ _MANUAL_POS_CACHE: dict = {"ts": 0.0, "view": None}
 
 
 def _manual_position(saved_cfg: dict, defaults=None,
-                     login=None, allow_view: bool = True) -> dict | None:
+                     login=None, allow_view: bool = True,
+                     skip_ticket: int = 0) -> dict | None:
     """账户上那笔「不是程序开的」持仓，做成**只读**视图给做单台。
 
     为什么需要：程序只记录自己开的单（`state["position"]`），手工单在它眼里
@@ -6136,6 +6153,12 @@ def _manual_position(saved_cfg: dict, defaults=None,
     以前整段只在「程序自己没仓」时才调用，于是程序持仓期间开的手工单
     没有 peak/mae/risk0，平了也不落 `manual_close`——面板上不是"缺数据"，
     而是这笔压根不存在。影子的推进和"给不给面板看"是两件事，必须解耦。
+
+    `skip_ticket`（2026-11-20）＝ 程序自己那一笔的 ticket，由调用方从
+    `state["position"]` 取来传进来。上面那个"解耦"带来的副作用是：程序
+    持仓期间按品种取到的 rows 里就有它自己，程序会给自己建影子、平仓时
+    再给自己记一行 `manual_close`。这里把两者一起挡掉——**本函数不读 state**，
+    也不该读：它连位置都不该知道，参数是唯一入口。
     """
     now_t = time.time()
     if now_t - float(_MANUAL_POS_CACHE.get("ts") or 0.0) < 3.0:
@@ -6146,8 +6169,10 @@ def _manual_position(saved_cfg: dict, defaults=None,
         from live.journal import open_positions
 
         sym = str(saved_cfg.get("symbol") or "")
+        skip = int(skip_ticket or 0)
         rows = [x for x in open_positions()
-                if sym and str(x.get("symbol")) == sym]
+                if sym and str(x.get("symbol")) == sym
+                and int(x.get("ticket") or 0) != skip]
         try:
             cfg_now = Cfg(**{k: v for k, v in saved_cfg.items()
                              if k in Cfg.__dataclass_fields__})
@@ -6175,7 +6200,9 @@ def _manual_position(saved_cfg: dict, defaults=None,
             # 每 60 秒才醒一次，MFE 会漏掉大半——而 MFE 正是这一层的全部意义。
             # **无条件调用**（2026-11-18）：程序持仓期间也要推进，否则那段时间
             # 开的手工单没有影子（见函数 docstring）。
-            sh_all = _manual_shadow_sync(cfg_now, rows, fps, login)
+            # `skip_ticket` 把程序自己那笔剔掉（2026-11-20），否则它会被记成手工单。
+            sh_all = _manual_shadow_sync(cfg_now, rows, fps, login,
+                                         skip_ticket=skip)
         if rows and allow_view:
             m = rows[0]
             pnl = fps.get(int(m.get("ticket") or 0))
@@ -6366,8 +6393,11 @@ def summary(login: int | str | None = None, recent: int = 30) -> dict:
     # 只存在于程序的脑子里，画出来就是撒谎）。
     # `allow_view=not pos_now`：程序自己持仓时不画手工单面板（那是另一个决定），
     # 但**影子照样推进**——否则程序持仓期间开/平的手工单不会被记录（2026-11-18）。
+    # `skip_ticket` 是同一件事的另一半（2026-11-20）：影子推进的范围要排除
+    # 程序自己的那一笔，否则它会被当成手工单记一笔 `manual_close`。
     manual_pos = _manual_position(saved_cfg, _defaults, login,
-                                  allow_view=not bool(pos_now))
+                                  allow_view=not bool(pos_now),
+                                  skip_ticket=int((pos_now or {}).get("ticket") or 0))
 
     # 面板上要能看见"现在用的是哪个模型"：换供应商（DeepSeek → 智谱免费档）
     # 之后如果面板不显示，出了 401/404 根本分不清是 key 没换还是模型名写错。
